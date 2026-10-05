@@ -188,8 +188,8 @@ export function classifyTurn(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy transcript classifier (kept: RulesProvider fallback for decision
-// gating). The temporal pipeline uses `classifyTurn` above instead.
+// Legacy transcript classifier (kept: profile-hook prefilter + RulesProvider
+// fallback). The temporal pipeline uses `classifyTurn` above instead.
 
 // Split a transcript into its per-turn {user, assistant} text. Tolerant of
 // missing sections (returns "" for the absent side).
@@ -370,7 +370,7 @@ export function parseSkipped(reply: string): Set<number> {
 // mislabeled the fenced block. Fires ONLY when the `consolidated` block exists
 // but contains no known seq — i.e. the child clearly tried to report but used
 // the wrong identifier. Safe: it can only prune a turn the child explicitly
-// named, and the recovery can only prune a turn the child explicitly named.
+// named, and the write-guard check still applies.
 export function recoverMislabeledConsolidated(reply: string, seqs: number[]): Set<number> {
   // Only fire when the child produced a `consolidated` fence at all (a genuine
   // failure leaves both blocks out). If that fence names a known seq, it was

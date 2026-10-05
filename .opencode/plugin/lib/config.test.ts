@@ -107,8 +107,8 @@ test("stripQuotesFirst + Number float matches profile", () => {
     })
   assert.deepEqual(parse('enabled: "true"'), { enabled: true })
   assert.deepEqual(parse("enabled: maybe"), {})
-  assert.deepEqual(parse('writer_model: "example/model"'), {
-    writer_model: "example/model",
+  assert.deepEqual(parse('writer_model: "deepseek/deepseek-flash"'), {
+    writer_model: "deepseek/deepseek-flash",
   })
   assert.deepEqual(parse('writer_model: ""'), {})
   assert.deepEqual(parse("review_threshold: 0.72"), { review_threshold: 0.72 })

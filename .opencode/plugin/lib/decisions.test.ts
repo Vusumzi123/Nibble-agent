@@ -7,8 +7,6 @@ import {
   RulesProvider,
   buildDecisionsLogEntry,
   buildIngestRequest,
-  buildSalienceRequest,
-  buildTagChoiceRequest,
   buildTriageRequest,
   createDecisionProvider,
   decideWithFallback,
@@ -77,6 +75,36 @@ test("DEFAULT_DECISIONS ships shadow-only and disabled", () => {
   assert.ok(DEFAULT_DECISIONS.log_rotate_bytes > 0)
 })
 
+test("parseDecisionsConfig reads the opencode model spec and override keys", () => {
+  const cfg = parseDecisionsConfig(
+    [
+      "decisions:",
+      "  provider: openjev",
+      "  model: deepseek/deepseek-chat",
+      "  api_provider: custom",
+      "  auth_file: /tmp/auth.json",
+      "  models_file: /tmp/models.json",
+      "",
+      "retrieval:",
+      "  enabled: true",
+    ].join("\n"),
+  )
+  assert.equal(cfg.provider, "openjev")
+  assert.equal(cfg.model, "deepseek/deepseek-chat")
+  assert.equal(cfg.api_provider, "custom")
+  assert.equal(cfg.auth_file, "/tmp/auth.json")
+  assert.equal(cfg.models_file, "/tmp/models.json")
+})
+
+test("DEFAULT_DECISIONS defaults to the opencode-linked model, no forced backend", () => {
+  assert.equal(DEFAULT_DECISIONS.model, "deepseek/deepseek-chat")
+  assert.equal(DEFAULT_DECISIONS.backend, "")
+  assert.equal(DEFAULT_DECISIONS.base_url, "")
+  assert.equal(DEFAULT_DECISIONS.api_provider, "")
+  assert.equal(DEFAULT_DECISIONS.auth_file, "")
+  assert.equal(DEFAULT_DECISIONS.models_file, "")
+})
+
 // ---------------------------------------------------------------------------
 // Triage request
 
@@ -99,23 +127,6 @@ test("buildIngestRequest emits the per-turn memory-gate noul request", () => {
   assert.equal(req.maxBytes, 800)
   // The memory gate uses the inverted ("no durable knowledge") assertion.
   assert.match(String(req.assertion), /no durable knowledge/i)
-})
-
-test("buildTagChoiceRequest emits a choice request over the candidate tags", () => {
-  const req = buildTagChoiceRequest("turn body", ["git", "NEW"], "pick one")
-  assert.equal(req.kind, "choice")
-  assert.equal(req.state, "turn body")
-  assert.deepEqual(req.candidates, ["git", "NEW"])
-  assert.equal(req.criteria, "pick one")
-  assert.equal(req.triage, undefined)
-})
-
-test("buildSalienceRequest emits a score request with the shared criteria", () => {
-  const req = buildSalienceRequest("turn body", "1 = ephemeral, 5 = core")
-  assert.equal(req.kind, "score")
-  assert.equal(req.state, "turn body")
-  assert.equal(req.criteria, "1 = ephemeral, 5 = core")
-  assert.equal(req.candidates, undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -401,7 +412,7 @@ test("buildDecisionsLogEntry carries traceability fields (model/mode/tokens/wall
       provider: "openjev",
       backend: "llamacpp",
       latencyMs: 96,
-      model: "local-model",
+      model: "Ternary-Bonsai-2-27B-PQ2_0",
       usage: {
         promptTokens: 102,
         completionTokens: 1,
@@ -417,7 +428,7 @@ test("buildDecisionsLogEntry carries traceability fields (model/mode/tokens/wall
     fallbackReason: "abstain",
     mode: "gate",
   })
-  assert.equal(entry.model, "local-model")
+  assert.equal(entry.model, "Ternary-Bonsai-2-27B-PQ2_0")
   assert.equal(entry.mode, "gate")
   assert.equal(entry.wallMs, 180)
   assert.equal(entry.promptTokens, 102)

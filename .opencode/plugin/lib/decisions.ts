@@ -21,7 +21,7 @@ import {
   classifyTranscript,
   DEFAULT_CONFIG as DEFAULT_KNOWLEDGE_CONFIG,
   type TriageVerdict,
-} from "./knowledge.ts"
+} from "./autonomy.ts"
 
 export type DecisionKind = "choice" | "noul" | "score"
 
@@ -81,8 +81,11 @@ export type DecisionsConfig = {
   backend: string
   transport: string
   base_url: string
+  api_provider: string
   model: string
   api_key_file: string
+  auth_file: string
+  models_file: string
   temperature_scaling: number
   abstain_threshold: number
   noul_threshold: number
@@ -103,11 +106,14 @@ export const DEFAULT_DECISIONS: DecisionsConfig = {
   enabled: false,
   mode: "shadow",
   provider: "openjev",
-  backend: "llamacpp",
+  backend: "",
   transport: "chat",
-  base_url: "http://127.0.0.1:8090",
-  model: "",
+  base_url: "",
+  api_provider: "",
+  model: "deepseek/deepseek-chat",
   api_key_file: "",
+  auth_file: "",
+  models_file: "",
   temperature_scaling: 1.0,
   abstain_threshold: 0.45,
   noul_threshold: 0.8,
@@ -205,46 +211,14 @@ export const INGEST_ASSERTION =
 // Build the noul request for one captured turn's ingest gate. `triage: true`
 // routes the deterministic RulesProvider fallback to the conservative
 // `classifyTranscript`, which (for a marker-less single turn) keeps the turn.
-// `assertion` overrides the question text; the hook passes the value loaded
-// from `.opencode/decision-prompts.yaml` (defaults here remain the fallback
-// for callers that pass nothing).
-export function buildIngestRequest(
-  content: string,
-  maxBytes?: number,
-  assertion: string = INGEST_ASSERTION,
-): DecisionRequest {
+export function buildIngestRequest(content: string, maxBytes?: number): DecisionRequest {
   return {
     kind: "noul",
     state: content,
-    assertion,
+    assertion: INGEST_ASSERTION,
     allow_abstain: false,
     triage: true,
     maxBytes,
-  }
-}
-
-// Build the `choice` request for the capture-time tag gate: pick one candidate
-// tag (or NEW when none fit). Moved out of knowledge-hook as part of the
-// decision-gate seam so every request literal lives beside the others.
-export function buildTagChoiceRequest(
-  content: string,
-  candidates: string[],
-  criteria: string,
-): DecisionRequest {
-  return {
-    kind: "choice",
-    state: content,
-    candidates,
-    criteria,
-  }
-}
-
-// Build the `score` request for the capture-time salience gate (1-5 ordinal).
-export function buildSalienceRequest(content: string, criteria: string): DecisionRequest {
-  return {
-    kind: "score",
-    state: content,
-    criteria,
   }
 }
 
@@ -330,11 +304,12 @@ export function spawnBridge(args: {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(
-        "python3",
-        [args.script, "--config", args.configPath, "--backend", args.backend],
-        { stdio: ["pipe", "pipe", "pipe"] },
-      )
+      // `--backend` is only passed when set: the Python side reads
+      // provider/model straight from the config block, so an empty value means
+      // "auto-resolve an opencode provider".
+      const argv = [args.script, "--config", args.configPath]
+      if (args.backend) argv.push("--backend", args.backend)
+      child = spawn("python3", argv, { stdio: ["pipe", "pipe", "pipe"] })
     } catch (err) {
       resolve({ code: null, stdout: "", stderr: String(err) })
       return

@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""OpenJev test server — a local, self-contained stand-in for the OpenJevPro
-typed-decision API, backed by a running llama.cpp server.
+"""OpenJev decision backend — a self-contained stand-in for the OpenJevPro
+typed-decision API.
 
-Implements the three Jev decision primitives (choice / noul / score) on top of
-llama.cpp's *native* ``POST /completion`` endpoint (plan "Route B"):
+Two transports are available for the same per-decision candidate log-probs:
+
+* a running **llama.cpp** server (``backend: llamacpp``), and
+* any **OpenAI-compatible hosted provider** the user already configured in
+  opencode — the endpoint + credential are resolved from opencode's own
+  ``models.json`` / ``auth.json`` from an opencode ``<provider>/<model>`` spec
+  (see :func:`resolve_opencode_provider` and
+  ``docs/openjev-opencode-provider-plan.md``).
+
+The llama.cpp path implements the three Jev decision primitives
+(choice / noul / score) on top of llama.cpp's *native* ``POST /completion``
+endpoint (plan "Route B"):
 
     request  -> prompt -> n_predict=1, n_probs>0, completion_probabilities=true
     response -> completion_probabilities[0].top_logprobs
@@ -45,19 +55,26 @@ from sysop_config import coerce, read_block  # noqa: E402
 DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "mode": "shadow",              # shadow | gate
-    "provider": "openjev",         # openjev | rules
-    "backend": "llamacpp",         # llamacpp | deepseek
+    "provider": "openjev",         # openjev | jev-hosted | rules
+    "backend": "",                 # "" = auto opencode provider; "llamacpp" = local
     "transport": "chat",           # chat | completion (see LlamaCppBackend)
-    "base_url": "http://127.0.0.1:8090",
-    "model": "",
-    "api_key_file": "",            # unused by the local backend
-    "temperature_scaling": 1.00,   # must stay 1.0 — self-reported confidence is uncalibrated
+    "base_url": "",                # override: pin an endpoint (no /v1 suffix)
+    "api_provider": "",            # override: provider id when `model` has no prefix
+    "model": "deepseek/deepseek-chat",   # opencode spec: <provider>/<model>
+    "api_key_file": "",            # override: chmod-600 key file
+    "auth_file": "",               # override: path to opencode auth.json
+    "models_file": "",             # override: path to opencode models.json
+    "temperature_scaling": 1.00,   # self-reported confidence is uncalibrated -> 1.0
     "abstain_threshold": 0.45,
     "noul_threshold": 0.80,
-    "timeout_ms": 30000,           # plan default is 8000; raised for long states
+    "timeout_ms": 30000,
     "fallback": "rules",
     "n_probs": 20,
 }
+
+# Native llama.cpp endpoint used when `backend: llamacpp` (or a base_url override)
+# is selected without an explicit URL.
+DEFAULT_LLAMACPP_URL = "http://127.0.0.1:8090"
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_CONFIG = os.path.join(REPO_ROOT, ".opencode", "sysop-config.yaml")
@@ -87,14 +104,14 @@ def load_config(path: str | None) -> dict[str, Any]:
 #   chat (default)  POST /v1/chat/completions with logprobs +                  #
 #                   chat_template_kwargs.enable_thinking=false, read           #
 #                   choices[0].logprobs.content[0].top_logprobs.                #
-#                   REQUIRED for reasoning models: without the     #
+#                   REQUIRED for reasoning models like Bonsai: without the     #
 #                   template the first token is <|im_end|>/whitespace and the  #
 #                   real candidates never surface.                             #
 #                                                                              #
 #   completion      POST /completion with n_predict/n_probs/                   #
 #                   completion_probabilities (the plan's "Route B"), read      #
 #                   completion_probabilities[0].top_logprobs. Kept as a        #
-#                   fallback for non-chat servers; unreliable on reasoning models.       #
+#                   fallback for non-chat servers; unreliable on Bonsai.       #
 # --------------------------------------------------------------------------- #
 SYSTEM_PROMPT = ("You are a deterministic decision engine. Answer with exactly "
                  "one token. Never explain, never think, never add punctuation.")
@@ -183,9 +200,9 @@ class LlamaCppBackend:
 
 
 def _read_api_key(path: str) -> str:
-    """Read the DeepSeek bearer key from a chmod-600 file (never inline)."""
+    """Read a bearer key from a chmod-600 file (never inline)."""
     if not path:
-        raise RuntimeError("deepseek backend requires api_key_file (a chmod-600 file)")
+        raise RuntimeError("api_key_file is empty")
     p = os.path.expanduser(path)
     if not os.path.exists(p):
         raise RuntimeError(f"api key file not found: {p}")
@@ -214,20 +231,20 @@ def _parse_structured(content: str, labels: list[str]) -> list[dict[str, Any]]:
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise ValueError(f"deepseek structured output is not JSON: {text[:200]!r}")
+        raise ValueError(f"structured output is not JSON: {text[:200]!r}")
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"deepseek structured JSON parse failed: {exc}") from exc
+        raise ValueError(f"structured JSON parse failed: {exc}") from exc
     answer = str(obj.get("answer", "")).strip()
     try:
         conf = float(obj.get("confidence"))
     except (TypeError, ValueError):
-        raise ValueError(f"deepseek missing numeric confidence: {obj!r}") from None
+        raise ValueError(f"missing numeric confidence: {obj!r}") from None
     conf = min(0.99, max(0.01, conf))
     norm = {l.strip().upper(): l for l in labels}
     if answer.upper() not in norm:
-        raise ValueError(f"deepseek answer {answer!r} not in {labels}")
+        raise ValueError(f"model answer {answer!r} not in {labels}")
     n = len(labels)
     return [
         {"token": l,
@@ -236,16 +253,160 @@ def _parse_structured(content: str, labels: list[str]) -> list[dict[str, Any]]:
     ]
 
 
-class DeepSeekBackend:
-    """OpenAI-compatible hosted DeepSeek backend (api.deepseek.com).
+# --------------------------------------------------------------------------- #
+# opencode provider resolution                                                 #
+#                                                                              #
+# The decision backend reuses a provider the user already configured in        #
+# opencode instead of a parallel base_url/api_key_file registry. `model` is an #
+# opencode spec `<provider>/<model>`; the endpoint and credential are resolved #
+# from opencode's own files. Any failure raises ProviderResolveError so the    #
+# caller can abstain (fail-open -> rules).                                     #
+# See docs/openjev-opencode-provider-plan.md §5.                               #
+# --------------------------------------------------------------------------- #
+class ProviderResolveError(RuntimeError):
+    """Endpoint or credential for an opencode provider could not be resolved."""
 
-    ``logprobs`` *is* now returned (``choices[0].logprobs.content[0].top_logprobs``,
-    verified live 2026-09-24), but at ``temperature 0`` it is degenerate — the
-    greedy token carries all mass and every alternative is the ``-9999`` sentinel,
-    so it yields no usable confidence spread. This backend therefore uses JSON
-    mode (``response_format=json_object``) plus a self-reported confidence,
-    synthesizing candidate log-probs from the reported probability. Confidence is
-    therefore **uncalibrated** (plan §13.1, "Direct Open LLM" profile);
+
+def _xdg_data_home() -> str:
+    return os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share")
+
+
+def _xdg_cache_home() -> str:
+    return os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+
+
+def default_auth_file() -> str:
+    return os.path.join(_xdg_data_home(), "opencode", "auth.json")
+
+
+def default_models_file() -> str:
+    return os.path.join(_xdg_cache_home(), "opencode", "models.json")
+
+
+def _load_json(path: str) -> Any:
+    """Best-effort JSON read. Missing/unreadable/malformed -> None."""
+    if not path:
+        return None
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def resolve_provider_id(cfg: dict[str, Any]) -> str:
+    """Provider id: explicit ``api_provider`` override, else the model prefix."""
+    explicit = str(cfg.get("api_provider") or "").strip()
+    if explicit:
+        return explicit
+    model = str(cfg.get("model") or "").strip()
+    if "/" in model:
+        return model.split("/", 1)[0].strip()
+    return ""
+
+
+def resolve_model_id(cfg: dict[str, Any], provider_id: str) -> str:
+    """The bare model id: strip the ``<provider>/`` prefix, keep interior slashes."""
+    model = str(cfg.get("model") or "").strip()
+    if not model:
+        return ""
+    if provider_id and model.startswith(provider_id + "/"):
+        return model[len(provider_id) + 1:]
+    if "/" in model:
+        return model.split("/", 1)[1]
+    return model
+
+
+def _catalog_entry(cfg: dict[str, Any], provider_id: str) -> dict[str, Any]:
+    models_file = str(cfg.get("models_file") or "").strip() or default_models_file()
+    data = _load_json(models_file)
+    if isinstance(data, dict):
+        entry = data.get(provider_id)
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
+def resolve_base_url(cfg: dict[str, Any], provider_id: str) -> str:
+    """Base URL: ``base_url`` override -> models.json ``api`` -> opencode.json."""
+    override = str(cfg.get("base_url") or "").strip()
+    if override:
+        return override.rstrip("/")
+    api = _catalog_entry(cfg, provider_id).get("api")
+    if isinstance(api, str) and api.startswith(("http://", "https://")):
+        return api.rstrip("/")
+    oc = _load_json(os.path.join(REPO_ROOT, "opencode.json"))
+    if isinstance(oc, dict):
+        try:
+            burl = oc["provider"][provider_id]["options"]["baseURL"]
+        except (TypeError, KeyError):
+            burl = None
+        if isinstance(burl, str) and burl.startswith(("http://", "https://")):
+            return burl.rstrip("/")
+    raise ProviderResolveError(
+        f"no base URL for provider {provider_id!r} "
+        "(set base_url or add it to models.json / opencode.json)")
+
+
+def resolve_api_key(cfg: dict[str, Any], provider_id: str) -> str:
+    """API key: ``api_key_file`` -> catalog env var -> opencode auth.json."""
+    key_file = str(cfg.get("api_key_file") or "").strip()
+    if key_file:
+        try:
+            return _read_api_key(key_file)
+        except RuntimeError as exc:
+            raise ProviderResolveError(str(exc)) from exc
+    for name in _catalog_entry(cfg, provider_id).get("env") or []:
+        if isinstance(name, str) and os.environ.get(name):
+            return os.environ[name]
+    auth_file = str(cfg.get("auth_file") or "").strip() or default_auth_file()
+    auth = _load_json(auth_file)
+    if isinstance(auth, dict):
+        provider_entry = auth.get(provider_id)
+        if provider_entry is None and isinstance(auth.get("providers"), dict):
+            provider_entry = auth["providers"].get(provider_id)
+        if isinstance(provider_entry, dict):
+            if str(provider_entry.get("type", "")).lower() == "oauth":
+                raise ProviderResolveError(
+                    f"provider {provider_id!r} uses oauth; set base_url + api_key_file")
+            key = provider_entry.get("key")
+            if isinstance(key, str) and key.strip():
+                return key.strip()
+    raise ProviderResolveError(
+        f"no API key for provider {provider_id!r} "
+        "(set api_key_file, export its env var, or run `opencode auth login`)")
+
+
+def resolve_opencode_provider(cfg: dict[str, Any]) -> dict[str, str]:
+    """Resolve ``{provider, base_url, api_key, model}`` from opencode's config.
+
+    Raises ProviderResolveError on any missing endpoint/credential so the caller
+    can abstain (the bridge then fail-opens to the rules provider).
+    """
+    provider_id = resolve_provider_id(cfg)
+    return {
+        "provider": provider_id,
+        "base_url": resolve_base_url(cfg, provider_id),
+        "api_key": resolve_api_key(cfg, provider_id),
+        "model": resolve_model_id(cfg, provider_id),
+    }
+
+
+class OpenAICompatBackend:
+    """OpenAI-compatible hosted backend (DeepSeek, Moonshot, OpenRouter, …).
+
+    Endpoint + credential are resolved from opencode (see the resolver above) and
+    passed in explicitly. ``logprobs`` is not usable here — at ``temperature 0``
+    it is degenerate (the greedy token carries all mass and every alternative is
+    the ``-9999`` sentinel) — so this backend uses JSON mode
+    (``response_format=json_object``, falling back to loose JSON on HTTP 400)
+    plus a self-reported confidence, synthesizing candidate log-probs from the
+    reported probability. Confidence is therefore **uncalibrated**;
     ``temperature_scaling`` must stay 1.0.
 
     Same surface as ``LlamaCppBackend`` so the decision functions are unchanged;
@@ -253,17 +414,17 @@ class DeepSeekBackend:
     """
     supports_logprobs = False
 
-    def __init__(self, cfg: dict[str, Any]):
-        self.base_url = cfg.get("base_url", "https://api.deepseek.com").rstrip("/")
-        self.model = cfg.get("model", "deepseek-chat")
-        self.timeout = max(1.0, float(cfg.get("timeout_ms", 30000)) / 1000.0)
-        self.n_probs = cfg.get("n_probs", 20)
-        self.api_key_file = cfg.get("api_key_file", "")
-        self._api_key: str | None = None
+    def __init__(self, base_url: str, api_key: str, model: str,
+                 timeout_ms: int = 30000, n_probs: int = 20):
+        self.base_url = (base_url or "").rstrip("/")
+        self.model = model
+        self.timeout = max(1.0, float(timeout_ms) / 1000.0)
+        self.n_probs = n_probs
+        self._api_key: str = api_key
 
     def _key(self) -> str:
-        if self._api_key is None:
-            self._api_key = _read_api_key(self.api_key_file)
+        if not self._api_key:
+            raise RuntimeError("no API key resolved for OpenAI-compatible backend")
         return self._api_key
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -299,10 +460,10 @@ class DeepSeekBackend:
         return top, content, normalize_usage(resp, "chat")
 
     def top_logprobs(self, prompt: str) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
-        raise NotImplementedError("DeepSeekBackend uses structured_top_logprobs")
+        raise NotImplementedError("OpenAICompatBackend uses structured_top_logprobs")
 
     def health(self) -> dict[str, Any]:
-        return {"status": "ok", "backend": "deepseek", "model": self.model,
+        return {"status": "ok", "backend": "openai-compat", "model": self.model,
                 "base_url": self.base_url, "capability": "structured-json"}
 
 
@@ -314,13 +475,63 @@ def _probe(backend: Any, prompt: str, labels: list[str]) -> tuple[list[dict[str,
     return backend.structured_top_logprobs(prompt, labels)
 
 
+def _make_llamacpp(cfg: dict[str, Any], base_url: str) -> LlamaCppBackend:
+    cfg["backend"] = "llamacpp"
+    return LlamaCppBackend(base_url, cfg.get("timeout_ms", 30000),
+                           cfg.get("n_probs", 20), cfg.get("transport", "chat"))
+
+
+class UnavailableBackend:
+    """Placeholder backend whose every probe raises, so safe_dispatch abstains.
+
+    Used when an opencode provider cannot be resolved and no ``base_url``
+    override is set: the bridge returns an abstained result and the rules
+    fallback applies (fail-open).
+    """
+    supports_logprobs = False
+
+    def __init__(self, error: str):
+        self.error = error
+        self.base_url = ""
+        self.model = ""
+        self.transport = "chat"
+
+    def structured_top_logprobs(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(self.error)
+
+    def top_logprobs(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(self.error)
+
+    def health(self) -> dict[str, Any]:
+        return {"status": "unavailable", "error": self.error}
+
+
 def make_backend(cfg: dict[str, Any]) -> Any:
-    """Instantiate the backend named by ``cfg['backend']``."""
-    backend = cfg.get("backend", "llamacpp")
-    if backend == "deepseek":
-        return DeepSeekBackend(cfg)
-    return LlamaCppBackend(cfg["base_url"], cfg["timeout_ms"], cfg["n_probs"],
-                           cfg.get("transport", "chat"))
+    """Instantiate the decision backend from ``cfg``.
+
+    - ``backend: llamacpp`` -> the native llama.cpp backend.
+    - otherwise resolve an opencode provider (endpoint + credential) and build an
+      ``OpenAICompatBackend``.
+    - on resolution failure: a set ``base_url`` falls back to the llama.cpp path,
+      else an ``UnavailableBackend`` (abstain -> rules).
+    """
+    backend = str(cfg.get("backend") or "").strip().lower()
+    base_url = str(cfg.get("base_url") or "").strip()
+    if backend == "llamacpp":
+        return _make_llamacpp(cfg, base_url or DEFAULT_LLAMACPP_URL)
+    try:
+        resolved = resolve_opencode_provider(cfg)
+    except ProviderResolveError as exc:
+        if base_url:
+            return _make_llamacpp(cfg, base_url)
+        return UnavailableBackend(str(exc))
+    label = f"opencode/{resolved['provider']}" if resolved["provider"] else "openai-compat"
+    cfg["backend"] = label
+    cfg["model"] = resolved["model"] or resolved["provider"]
+    return OpenAICompatBackend(
+        resolved["base_url"], resolved["api_key"], resolved["model"],
+        timeout_ms=cfg.get("timeout_ms", 30000), n_probs=cfg.get("n_probs", 20),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -801,15 +1012,18 @@ def selftest(backend: LlamaCppBackend, cfg: dict[str, Any]) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="openjevserver.py",
-        description="OpenJev test server backed by a local llama.cpp endpoint.")
+        description="OpenJev decision backend (llama.cpp or an opencode provider).")
     p.add_argument("--config", default=DEFAULT_CONFIG,
                    help=f"sysop-config.yaml to read the decisions: block from (default: {DEFAULT_CONFIG})")
-    p.add_argument("--base-url", help="llama.cpp base URL (overrides config)")
-    p.add_argument("--model", help="model label (overrides config)")
-    p.add_argument("--backend", help="decision backend (llamacpp | deepseek)")
-    p.add_argument("--api-key-file", help="path to the API key file (deepseek; overrides config)")
+    p.add_argument("--base-url", help="endpoint override (llama.cpp or OpenAI-compatible)")
+    p.add_argument("--model", help="opencode spec <provider>/<model> (overrides config)")
+    p.add_argument("--backend", help='"" = auto opencode provider; "llamacpp" = local')
+    p.add_argument("--api-provider", help="provider id when the model has no <provider>/ prefix")
+    p.add_argument("--api-key-file", help="path to a chmod-600 API key file (overrides provider)")
+    p.add_argument("--auth-file", help="override path to opencode auth.json")
+    p.add_argument("--models-file", help="override path to opencode models.json")
     p.add_argument("--transport", choices=("chat", "completion"),
-                   help="llama.cpp prob transport (chat is required for reasoning models)")
+                   help="llama.cpp prob transport (chat is required for Bonsai)")
     p.add_argument("--temperature-scaling", type=float)
     p.add_argument("--abstain-threshold", type=float)
     p.add_argument("--noul-threshold", type=float)
@@ -827,7 +1041,9 @@ def build_parser() -> argparse.ArgumentParser:
 def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
     mapping = {
         "base_url": args.base_url, "model": args.model, "backend": args.backend,
-        "transport": args.transport, "api_key_file": args.api_key_file,
+        "api_provider": args.api_provider, "api_key_file": args.api_key_file,
+        "auth_file": args.auth_file, "models_file": args.models_file,
+        "transport": args.transport,
         "temperature_scaling": args.temperature_scaling,
         "abstain_threshold": args.abstain_threshold,
         "noul_threshold": args.noul_threshold,

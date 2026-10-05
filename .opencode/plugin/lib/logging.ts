@@ -18,7 +18,7 @@ import {
 } from "./logfile.ts"
 
 export type LogSettings = {
-  /** File leaf: absolute, `~`-prefixed, or resolved under <log>. */
+  /** File leaf: absolute, `~`-prefixed, or resolved under <sysop>. */
   file: string
   rotateBytes: number
   keepGenerations: number
@@ -84,14 +84,14 @@ export function logSettingsFrom(
 }
 
 // Resolve a log leaf to an absolute path: absolute passes through, `~` is
-// home-expanded, anything else is joined onto the project-local <log> root.
-export function resolveLogPath(logDir: string, leaf: string, home: string = homedir()): string {
+// home-expanded, anything else is joined onto the <sysop> root.
+export function resolveLogPath(sysopDir: string, leaf: string, home: string = homedir()): string {
   const expanded = expandHome(leaf, home)
-  return isAbsolute(expanded) ? expanded : join(logDir, expanded)
+  return isAbsolute(expanded) ? expanded : join(sysopDir, expanded)
 }
 
 export type LoggerOptions = {
-  logDir: string
+  sysopDir: string
   home?: string
   channel?: string
   rotationEntry?: (ts: string) => Record<string, unknown>
@@ -105,7 +105,7 @@ export type ChannelLogger = NdjsonLogger
 export function createLogger(settings: LogSettings, opts: LoggerOptions): ChannelLogger {
   const channel = opts.channel ?? "log"
   return createNdjsonLogger({
-    log: resolveLogPath(opts.logDir, settings.file, opts.home),
+    log: resolveLogPath(opts.sysopDir, settings.file, opts.home),
     rotateBytes: settings.rotateBytes,
     keepGenerations: settings.keepGenerations,
     retentionDays: settings.retentionDays,
@@ -128,7 +128,7 @@ export function createLogger(settings: LogSettings, opts: LoggerOptions): Channe
 const cache = new Map<string, ChannelLogger>()
 
 export function getLogger(settings: LogSettings, opts: LoggerOptions): ChannelLogger {
-  const key = resolveLogPath(opts.logDir, settings.file, opts.home)
+  const key = resolveLogPath(opts.sysopDir, settings.file, opts.home)
   let logger = cache.get(key)
   if (!logger) {
     logger = createLogger(settings, opts)

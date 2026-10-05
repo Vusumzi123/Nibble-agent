@@ -8,7 +8,11 @@
       "*": "allow",
       "pkexec *": "ask",
       "sudo *": "ask",
-      "systemctl *": "ask"
+      "systemctl *": "ask",
+      "himalaya *": "deny",
+      "msmtp *": "deny",
+      "mbsync *": "deny",
+      "secret-tool *": "deny"
     },
     "external_directory": {
       "~/.ssh/**": "deny",
@@ -18,21 +22,37 @@
     },
     "websearch": "deny",
     "webfetch": "deny",
+    "mail_*": "deny",
     "temporal_search": "deny"
   },
   "mcp": {
     "markdown-vault": {
       "type": "local",
-      "command": ["npx", "-y", "@wirux/mcp-markdown-vault@2.3.0"],
+      "command": ["node", "vendor/mcp-markdown-vault/dist/index.js"],
       "enabled": true,
       "environment": {
-        "VAULT_PATH": "Brain",
-        "VAULT_CONTEXT_MODE": "assisted"
+        "VAULT_CONTEXT_MODE": "assisted",
+        "OLLAMA_URL": "http://127.0.0.1:11434",
+        "OLLAMA_MODEL": "qwen3-embedding:0.6b",
+        "OLLAMA_DIMENSIONS": "1024",
+        "QUERY_INSTRUCTION_PREFIX": "",
+        "RERANK_ENABLED": "true",
+        "RERANK_MODEL": "Xenova/ms-marco-MiniLM-L-6-v2",
+        "RERANK_CANDIDATES": "10",
+        "INDEX_EXCLUDE_PREFIXES": "meta/",
+        "CHUNK_MAX_TOKENS": "512",
+        "CHUNK_OVERLAP_TOKENS": "64"
       }
+    },
+    "drawio": {
+      "type": "local",
+      "command": ["npx", "-y", "@drawio/mcp"],
+      "enabled": true
     }
   },
   "tools": {
-    "markdown-vault_*": false
+    "markdown-vault_*": false,
+    "drawio_*": false
   },
   "agent": {
     "security-locks": {
@@ -52,6 +72,37 @@
     "package-manager": {
       "mode": "subagent",
       "color": "#44AAFF"
+    },
+    "os-configurator": {
+      "mode": "subagent",
+      "color": "#44FF44"
+    },
+    "audit-logger": {
+      "mode": "subagent",
+      "disable": true,
+      "color": "#AAAAAA",
+      "tools": { "read": true, "write": true, "edit": true, "bash": true },
+      "permission": {
+        "edit": { "*": "deny" },
+        "bash": {
+          "*": "deny",
+          "printf *": "allow",
+          "mv ~/.opencode-sysop/*": "allow",
+          "rm ~/.opencode-sysop/audit.log.*": "allow",
+          "wc *": "allow",
+          "ls *": "allow",
+          "stat *": "allow",
+          "mkdir -p ~/.opencode-sysop": "allow",
+          "touch ~/.opencode-sysop/*": "allow",
+          "find ~/.opencode-sysop/*": "allow"
+        },
+        "external_directory": {
+          "~/.ssh/**": "deny",
+          "~/.gnupg/**": "deny",
+          "~/.password-store/**": "deny",
+          "*": "allow"
+        }
+      }
     },
     "sandbox-runner": {
       "mode": "subagent",
@@ -95,6 +146,83 @@
         "grep": "deny",
         "websearch": "allow",
         "webfetch": "allow"
+      }
+    },
+    "deep-browser": {
+      "mode": "subagent",
+      "color": "#26C6DA",
+      "permission": {
+        "read": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "websearch": "allow",
+        "webfetch": "allow"
+      }
+    },
+    "safe-mail": {
+      "mode": "subagent",
+      "color": "#33CC99",
+      "permission": {
+        "read": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "mail_*": "allow"
+      }
+    },
+    "web-developer": {
+      "mode": "subagent",
+      "color": "#A855F7",
+      "permission": {
+        "edit": { "*": "ask" },
+        "bash": {
+          "*": "deny",
+          "node --check *": "allow",
+          "npx --no-install *": "allow",
+          "python3 -m http.server *": "allow",
+          "ls *": "allow",
+          "stat *": "allow",
+          "file *": "allow"
+        },
+        "task": {
+          "*": "deny",
+          "rag-search": "allow",
+          "safe-browser": "allow"
+        }
+      }
+    },
+    "diagram-developer": {
+      "mode": "subagent",
+      "color": "#BA68C8",
+      "model": "deepseek/deepseek-flash",
+      "temperature": 0.1,
+      "tools": { "drawio_*": true, "edit": true, "write": true, "read": true, "glob": true, "grep": true },
+      "permission": {
+        "edit": { "*": "ask" },
+        "bash": {
+          "*": "deny",
+          "xmllint *": "allow",
+          "drawio *": "allow",
+          "python3 .opencode/scripts/drawio-xml.py *": "allow",
+          "ls *": "allow",
+          "stat *": "allow",
+          "file *": "allow",
+          "mkdir -p diagrams": "allow"
+        },
+        "task": {
+          "*": "deny",
+          "rag-search": "allow",
+          "safe-browser": "allow"
+        },
+        "webfetch": "deny",
+        "websearch": "deny"
       }
     }
   }

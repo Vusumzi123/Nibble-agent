@@ -1,50 +1,46 @@
 # EXAMPLE configuration — tracked safe-to-share template.
-# Copy to `sysop-config.yaml` (setup.sh does this for you) and adjust to
-# your setup. The real sysop-config.yaml is gitignored: it holds your local
-# settings.
+# Copy to `sysop-config.yaml` (firstboot.sh does this for you) and replace
+# every `you@example.com` / `your-account` placeholder with your own values.
+# The real sysop-config.yaml is gitignored: it holds your personal settings.
 #
-# Knowledge-agent settings — shared by the hooks and sub-agents.
-# Readers: knowledge-hook / lib/knowledge.ts (knowledge: + paths:),
-# retrieval-hook / lib/retrieval.ts (retrieval: + decisions: + paths:),
-# profile-hook / lib/profile.ts (profile: + decisions: + paths:),
-# lib/decisions.ts via all three hooks (decisions: + paths:),
-# lib/decision-gate.ts via all three hooks (decisions: + paths:),
-# audit-hook / lib/audit.ts (audit: + paths:),
+# Sysop agent settings — shared by all sub-agents and hooks.
+# Readers: knowledge-hook / lib/autonomy.ts
+# (knowledge: + paths:), audit-hook / lib/audit.ts (audit: + paths:),
+# telegram-hook / lib/telegram.ts (telegram: +
+# paths:), mail-hook / lib/mail.ts (mail: + paths:), profile-hook /
+# lib/profile.ts (profile: + decisions: + paths:), jev-hook / lib/decisions.ts
+# (decisions: + paths:), retrieval-hook / lib/retrieval.ts (retrieval: +
+# decisions: + paths:), web-scan-hook / lib/browser.ts (browser: + paths:),
+# idea-hook / lib/idea.ts (idea: + paths:),
 # telemetry-hook / lib/telemetry.ts (telemetry: + paths:); web-scan-hook also
 # reads telemetry: for its inner-fetch usage record,
-# web-scan-hook / lib/browser.ts (browser: + paths:),
 # scoped-permissions.ts (paths:), vault-readonly-guard.ts + wikilink-guard.ts
 # (vault: + paths:). Other sections are ignored by each reader.
 #
 # Every structured hook log is written through the shared engine
 # (lib/logfile.ts + lib/logging.ts). Per-section `log_*` keys (bare `*` keys
-# under a block) configure one normalized shape:
+# under `audit:`) configure one normalized shape:
 #   rotate_bytes          size trigger (bytes); <= 0 disables
 #   keep_generations      rotated generations kept (`log.1` .. `log.N`)
 #   retention_days        delete rotated files older than this; <= 0 disables
-#   compress              gzip rotated generations
-#   compress_after        newest N rotated gens stay plain
-#   compress_level        zlib level 1-9
-#   rotate_by             size | daily | weekly (UTC)
-#
-# Canonical path roots — the ONLY place the vault and log directory names
+#   compress              gzip rotated generations            [new]
+#   compress_after        newest N rotated gens stay plain    [new]
+#   compress_level        zlib level 1-9                      [new]
+#   rotate_by             size | daily | weekly (UTC)         [new]
+
+# Canonical path roots — the ONLY place the vault and sysop directory names
 # live. Every section below stores a LEAF path relative to one of these roots
 # (absolute or ~ paths are honored as overrides).
 #
 #   vault:    resolved against the repo root  (e.g. <repo>/Brain)
+#   sysop:    resolved against the home dir   (~ expansion)
 #   diagrams: resolved against the repo root  (diagram-developer write scope)
-#   log:      resolved against the repo root  (every NDJSON channel log:
-#             audit, telemetry, hook ledgers; gitignored)
 #   state:    resolved against the repo root  (project-local transient state:
-#             the knowledge memory buffer + tag index + hook state JSON;
-#             gitignored)
-#
-# Everything is project-scoped — no home-wide directory — so two projects on
-# one machine never share an audit trail or a state file.
+#             the knowledge memory buffer + tag index; gitignored)
 paths:
   vault: Brain
+  sysop: ~/.opencode-sysop
   diagrams: diagrams
-  log: .opencode/logs
   state: .opencode/state
 
 vault:
@@ -57,12 +53,8 @@ vault:
   readonly: Journal
 
 audit:
-  # L5 audit trail (audit-hook.ts + lib/audit.ts). Every `bash` command the
-  # agents execute is appended on `tool.execute.after` — deterministic, no LLM —
-  # after secret redaction (lib/audit.ts `redact`). Rotation/compression/
-  # retention use the BARE keys below (no `log_` prefix).
   enabled: true
-  log: audit.log              # under <log> -> .opencode/logs/audit.log
+  log: audit.log              # under <sysop> -> ~/.opencode-sysop/audit.log
   rotate_bytes: 10485760     # 10 MB — rotate when active log reaches this
   keep_generations: 5        # keep audit.log.1 .. audit.log.5 (shift-and-rename)
   retention_days: 90         # delete any rotated file older than this
@@ -76,7 +68,7 @@ knowledge:
   # Single project-local JSON Lines buffer of un-consumed conversation turns.
   # Owned by knowledge-hook (the only writer); rag-search reads it via the
   # temporal_search tool. `memory_file` / `tag_index_file` are LEAVES under
-  # <state> -> .opencode/state/.
+  # <state> -> .opencode/state/. See docs/temporal-memory-plan.md.
   memory_file: memory.json
   tag_index_file: tag-index.json
   min_ready_turns: 3         # start an ingestion cycle at this many unconsumed turns
@@ -91,12 +83,11 @@ knowledge:
   skip_triage_max_bytes: 800
   # Keyword-prefetched candidate notes handed to the ingestion child per cycle.
   prefetch_candidates: 3
-  # Capture-time decision tagging (tag choice + salience score).
+  # Phase 3: capture-time JEV tagging (tag choice + salience score).
   tag_gate: true
   tag_candidates: 8
   # Per-cycle NDJSON ledger (tokens/cost/steps/outcome). `log` is a LEAF under
-  # <log> -> .opencode/logs/. Written through the shared logging engine (see
-  # the header).
+  # <sysop>. Written through the shared logging engine (see the header).
   log: knowledge-hook.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5
@@ -106,41 +97,81 @@ knowledge:
   log_compress_level: 6
   log_rotate_by: size
 
+telegram:
+  # Deterministic outbound notifier (telegram-hook). Two jobs, both gated by
+  # `enabled`: forward the final assistant reply of each top-level turn, and
+  # raise an attention alert when the window blocks on a permission prompt
+  # (sudo/file-write) or an agent question. Secrets live in the chmod-600
+  # credential files below, never inline here. Read live on every event, so
+  # flipping `enabled` needs no restart.
+  enabled: true             # master on/off — set true to activate
+  bot_token_file: ~/.config/update-reminder/telegram-token
+  chat_id_file: ~/.config/update-reminder/telegram-chat-id
+  agent: ""                  # reply-forward filter; "" = all agents, "plan" = plan-mode only
+  parse_mode: Markdown       # Markdown | MarkdownV2 | HTML | "" (plain)
+  max_chars: 4096            # Telegram per-message cap; longer replies are chunked
+  header: true               # prepend "[agent] <timestamp>" to forwarded replies
+  include_user: false        # prefix the triggering user message
+  notify_permissions: true   # attention alerts on permission prompts (sudo/file-write)
+  notify_questions: true     # attention alerts on agent questions
+
+mail:
+  # Mailbox access for the safe-mail sub-agent (mail-hook plugin -> himalaya).
+  # The Gmail app password lives in the KDE keyring, NEVER here; himalaya reads
+  # it via `secret-tool lookup` from ~/.config/himalaya/config.toml.
+  enabled: true              # master on/off — false disables every mail_* tool
+  account: your-account      # himalaya account name (see ~/.config/himalaya/config.toml)
+  from: you@example.com  # sender identity; passed as --from (himalaya has no account email key)
+  himalaya_bin: himalaya     # binary to invoke (argv only, never a shell)
+  max_body_bytes: 262144     # 256 KiB cap on a single read body
+  max_list: 25               # default envelopes per list/search
+  injection_policy: block    # block = withhold high-severity bodies; flag = always return fenced
+  autonomous_send: true      # safe-mail may send/reply without per-message confirmation
+  new_recipient_warn: true   # flag sends to addresses the mailbox has never written to
+  known_recipients: "you@example.com"  # seed allow-list (state file grows it)
+
 decisions:
-  # Typed-decision "System 1" provider. Backend is
+  # Typed-decision "System 1" provider (docs/jev-decision-provider-plan.md +
+  # docs/openjev-opencode-provider-plan.md). The backend is
   # .opencode/scripts/openjevserver.py + decisions_bridge.py (a stateless
-  # stdin/stdout subprocess). The TS side (lib/decisions.ts, loaded by
-  # knowledge-hook, retrieval-hook and profile-hook through
-  # lib/decision-gate.ts) reads this block live.
-  #   mode: shadow — verdicts are recorded to the ledger, never gate.
-  #   mode: gate   — knowledge-hook lets the model skip (delete) confidently-
-  #                  trivial sessions during drain triage; retrieval-hook
-  #                  suppresses a turn's Brain-First search when judged
-  #                  self-contained. Fail-open / fail-closed semantics are
-  #                  per-hook (see the retrieval: block).
+  # stdin/stdout subprocess). The TS side (lib/decisions.ts + jev-hook.ts /
+  # knowledge-hook.ts) reads this block live.
   #
-  # Default: provider `rules` — deterministic TypeScript heuristics, no
-  # external process, works out of the box. To use the model-backed provider,
-  # set provider: openjev (bridge scripts are shipped), pick a backend, and
-  # point api_key_file (or base_url) at your endpoint.
-  enabled: true               # master on/off — gates only when true
-  mode: gate                   # shadow | gate  (live gating — see header comment)
-  provider: rules              # rules | openjev
-  # backend/base_url/model/api_key_file are read only when provider: openjev.
-  # Set them when enabling the model-backed gate (setup.sh prompts for these):
-  # backend: llamacpp            # llamacpp | openai | ollama | deepseek
-  # transport: chat              # chat (/v1/chat/completions) | completion (native /completion)
-  # base_url: http://127.0.0.1:8090
-  # model: your-model-name
-  # api_key_file: ~/.config/opencode/openjev.key   # chmod-600, never inline
-  temperature_scaling: 1.00    # must stay 1.0 — self-reported confidence is uncalibrated
+  #   `model` is an opencode spec `<provider>/<model>` — the provider id is the
+  #   prefix before the first "/" — and its endpoint + API key are resolved from
+  #   opencode's own models.json / auth.json, so no base_url/api_key_file is
+  #   needed. Pick a model from `opencode models`.
+  #
+  #   mode: shadow — jev-hook.ts records non-gating model verdicts to the ledger.
+  #   mode: gate   — knowledge-hook.ts lets the model skip (delete) confidently-
+  #                  trivial sessions during drain triage; jev-hook keeps logging
+  #                  verdicts to decisions.log (data), while the gate *action*
+  #                  goes to knowledge-hook.log. Fail-open: only a confident
+  #                  non-fallback "trivial" verdict skips; hard-keep reasons
+  #                  (durable-signal/question/over-size) are never model-skippable
+  #                  (plan §12 P5).
+  enabled: true               # master on/off — gate skips only when true
+  mode: gate                  # shadow | gate  (live gating — see header comment)
+  provider: openjev           # openjev | rules
+  model: deepseek/deepseek-chat   # opencode spec: <provider>/<model>
+  # Advanced overrides (only needed for custom/local/SDK-only providers):
+  # api_provider: ""          # provider id when `model` has no <provider>/ prefix
+  # backend: llamacpp         # force the local llama.cpp backend
+  # base_url: ""              # pin an endpoint (no /v1 suffix)
+  # transport: chat           # chat | completion (llama.cpp only)
+  # api_key_file: ""          # chmod-600 key file instead of opencode auth.json
+  # auth_file: ""             # override path to opencode auth.json
+  # models_file: ""           # override path to opencode models.json
+  temperature_scaling: 1.00    # must stay 1.0 — hosted confidence is self-reported (uncalibrated)
   abstain_threshold: 0.45
-  noul_threshold: 0.80         # gates skip only when model p >= this
+  noul_threshold: 0.80         # gate skips only when model p(true) >= this
   timeout_ms: 30000            # per-call subprocess timeout
-  n_probs: 20                  # candidate token depth (unused by deepseek JSON tier)
-  fallback: rules              # on error/abstain/timeout -> deterministic rules
-  # Shadow ledger — one NDJSON line per decision. `ledger` is a LEAF
-  # under <log>. Written through the shared logging engine (see the header).
+  n_probs: 20                  # candidate token depth (unused by the structured tier)
+  fallback: rules
+  # Hosted logprobs is degenerate at temperature 0, so the backend uses JSON-mode
+  # self-reported confidence (UNcalibrated). Shadow ledger — one NDJSON line per
+  # decision (plan §7). `ledger` is a LEAF under <sysop>. Written through the
+  # shared logging engine (see the header).
   ledger: decisions.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5
@@ -151,8 +182,8 @@ decisions:
   log_rotate_by: size
 
 retrieval:
-  # Per-turn "self-RAG" retrieval gate (retrieval-hook.ts). On EVERY user turn
-  # a `noul` decision asks whether the message is self-contained and needs no
+  # Per-turn "self-RAG" retrieval gate (retrieval-hook.ts). On EVERY user turn a
+  # JEV `noul` decision asks whether the message is self-contained and needs no
   # vault search. Unlike the drain gate this one is FAIL-CLOSED: an error, a
   # timeout, or an abstain means NO retrieval (economy-first). The prose prior
   # (the assertion in prompts_file) is deliberately weighted toward "do not
@@ -169,8 +200,8 @@ retrieval:
   max_bytes: 4000              # only the head of the user message is judged
   force_intent: true           # deterministic explicit-intent override -> retrieve
   inject: true                 # push the [brain-first] directive into the system prompt
-  prompts_file: .opencode/decision-prompts.yaml  # JEV question texts (retrieval.assertion); ~/absolute honored
-  # Per-turn NDJSON ledger. `log` is a LEAF under <log>; written through the
+  prompts_file: .opencode/retrieval-prompts.json  # prose prior (assertion); ~/absolute honored
+  # Per-turn NDJSON ledger. `log` is a LEAF under <sysop>; written through the
   # shared logging engine (see the header). One line per decision, with the
   # eventual gate action.
   log: retrieval.log
@@ -185,13 +216,11 @@ retrieval:
 browser:
   # Deterministic web injection scan for webfetch/websearch (web-scan-hook).
   # Read once at plugin startup; changing values takes effect on restart.
-  # The scanner itself is lib/injection.ts (shared with the future mail hook);
-  # lib/browser.ts owns this block + the web-specific policy transform.
   enabled: true              # master on/off — false disables the web scan
   injection_policy: flag     # flag = annotate+fence; block = additionally withhold instruction-family hits
   max_scan_bytes: 200000     # cap on bytes scanned per tool result (larger output is scanned only up to this head)
   # Full scan findings (family/severity/snippet) go here, not into the agent's
-  # context. `scan_log` is a LEAF under <log>; written through the shared
+  # context. `scan_log` is a LEAF under <sysop>; written through the shared
   # logging engine (see the header).
   scan_log: web-scan.log
   log_rotate_bytes: 1048576  # 1 MB
@@ -210,14 +239,15 @@ profile:
   #      (agent persona/behavior + user working context). Injected throughout
   #      the first turn, then cached/disabled until the session ends. Reads use
   #      <vault> + the leaf paths below.
-  #   2. decide — at session.idle, a JEV `choice` decision (profile-hook ->
-  #      lib/decision-gate.ts -> lib/decisions.ts) asks whether the latest turn
-  #      carries durable new info for either profile note. Only a confident,
-  #      non-fallback verdict that names a note triggers an update; the update
-  #      body is drafted by a short-lived `profile-writer` child (small model)
-  #      and written directly by the plugin (atomic rename). Fail-open: a
-  #      fallback/abstain never writes. `log` is a
-  #      LEAF under <log>; rotation mirrors the other hooks.
+  #   2. decide — at session.idle, a JEV `choice` decision (lib/decisions.ts ->
+  #      openjevserver.py) asks whether the latest turn carries durable new info
+  #      for either profile note. Only a confident, non-fallback verdict that
+  #      names a note triggers an update; the update body is drafted by a
+  #      short-lived `profile-writer` child (small model) and written directly
+  #      by the plugin (atomic rename). Fail-open: a fallback/abstain never
+  #      writes. Every write attempt also raises an in-app TUI toast (success
+  #      or failure), gated by `notify`. `log` is a LEAF under <sysop>;
+  #      rotation mirrors audit:.
   #
   #      Visibility: an NDJSON log, one line per event. Below-threshold turns
   #      log `profile-cooldown`; a pass that clears the gate emits one terminal
@@ -225,7 +255,7 @@ profile:
   #      no-op / no-update / update-failed / prefilter-skip / no-transcript /
   #      decision-fallback / decision-abstain). Every event from one pass shares
   #      a `pass` id (p<N>), so a full pass can be grouped. Human view:
-  #        jq -c 'select(.event=="profile-pass")' .opencode/logs/profile-hook.log
+  #        jq -c 'select(.event=="profile-pass")' ~/.opencode-sysop/profile-hook.log
   #
   #      Reviewer: after the writer drafts a note, a second JEV `noul` gate
   #      (`review`) checks the additions are durable and globally applicable,
@@ -234,8 +264,9 @@ profile:
   #      instructions/criteria, live in `prompts_file` (JSON) so update
   #      frequency + precision are tunable without touching the TypeScript.
   enabled: true
-  agent_file: Agent.md         # under <vault> (absolute paths honored)
-  user_file: User.md           # under <vault>
+  notify: true                 # in-app TUI toast on profile update / failure
+  agent_file: Agent.md       # under <vault> (absolute paths honored)
+  user_file: User.md         # under <vault>
   inject: true                 # first-turn system-prompt injection
   inject_max_bytes: 4000       # per-note cap on injected content (frontmatter/Related already stripped)
   decide: true                 # idle JEV decision + conditional update
@@ -245,14 +276,65 @@ profile:
   skip_triage: true            # skip the decision on trivial-chatter turns
   skip_triage_max_bytes: 800   # mirrors knowledge.skip_triage_max_bytes
   writer_agent: profile-writer # generation child (see .opencode/agents/profile-writer.md)
-  # writer_model: provider/model  # profile-writer child model; when omitted the
-  #                               # writer agent's own default model applies
+  writer_model: deepseek/deepseek-flash  # provider/model for the writer child
   child_timeout_ms: 90000      # max wait for the writer child to reply
-  note_max_bytes: 6000         # writer hard budget; draft rejected above this (note is injected, must stay lean)
+  note_max_bytes: 6000        # writer hard budget; draft rejected above this (note is injected, must stay lean)
   prompts_file: .opencode/profile-prompts.json  # choice instructions/criteria + reviewer assertion (project-relative; ~ or absolute honored)
   review: true                 # post-draft durability/globalness gate before write
   review_threshold: 0.60       # noul pTrue needed to accept a drafted update
-  log: profile-hook.log        # under <log>
+  log: profile-hook.log        # under <sysop>
+  log_rotate_bytes: 1048576
+  log_keep_generations: 5
+  log_retention_days: 90
+  log_compress: true
+  log_compress_after: 1
+  log_compress_level: 6
+  log_rotate_by: size
+
+idea:
+  # Idea generation + expression (docs/idea-hook-plan.md). Two decoupled jobs:
+  #
+  #   Generation (idea-hook.ts + lib/idea.ts, in-process): a timer tick (plus a
+  #   startup catch-up and a cheap due-check on session idle) draws 0-2 due times
+  #   per day from `daily_weights`, builds a deterministic context (recent turns +
+  #   bounded profile notes (agent_file/user_file) + a random vault note seed +
+  #   existing idea titles),
+  #   spawns a tool-free `idea-generator` child, then dedupes (keyword Jaccard)
+  #   and reviews (JEV `noul` -> decisions:) before appending to the bucket note.
+  #
+  #   Expression (.opencode/scripts/idea-express.py, standalone systemd timer):
+  #   reads the bucket and delivers one un-expressed idea over each enabled
+  #   channel (Telegram + email), independent of opencode.
+  enabled: true               # master on/off — set true to activate generation
+  bucket_file: Ideas.md      # LEAF under <vault> (absolute paths honored)
+  generator_agent: idea-generator  # generation child (see .opencode/agents/idea-generator.md)
+  generator_model: deepseek/deepseek-flash  # provider/model for the child
+  child_timeout_ms: 90000      # max wait for the generator child to reply
+  interval_ms: 900000          # in-plugin tick (15 min)
+  active_start_hour: 9         # generation + expression window (local time)
+  active_end_hour: 23
+  daily_weights: "25,55,20"    # P(0), P(1), P(2) ideas per day
+  category_weights: "1,1,1"    # improve-self / thought / business
+  seed_notes: 1                # vault notes sampled as context seed (0=off)
+  context_turns: 4             # last N turns surfaced to the generator
+  context_max_bytes: 12000     # cap on that transcript
+  note_max_bytes: 8000         # per-idea body cap
+  dedupe_threshold: 0.60       # keyword Jaccard reject
+  review: true                 # post-draft JEV novelty/usefulness gate
+  review_threshold: 0.60       # noul pTrue needed to accept an idea
+  prompts_file: .opencode/idea-prompts.json  # generator instructions/criteria + reviewer assertion
+  notify: true                 # in-app TUI toast on generate
+  # expression (read by the standalone script)
+  express_min_gap_hours: 48    # min gap between expressed ideas
+  express_telegram: true       # deliver via Telegram
+  express_email: true          # deliver via email
+  express_token_file: ~/.config/update-reminder/telegram-token
+  express_chat_id_file: ~/.config/update-reminder/telegram-chat-id
+  express_parse_mode: Markdown
+  express_email_to: you@example.com  # recipient of expressed ideas (sent via your default msmtp account)
+  express_email_bin: msmtp
+  # logs
+  log: idea-hook.log           # under <sysop>
   log_rotate_bytes: 1048576
   log_keep_generations: 5
   log_retention_days: 90
@@ -262,15 +344,15 @@ profile:
   log_rotate_by: size
 
 telemetry:
-  # Retrieval/comms usage telemetry (telemetry-hook.ts + lib/telemetry.ts; also
-  # read by web-scan-hook.ts). Deterministic NDJSON usage records for the
-  # expensive delegation paths. Contract: logging only, zero behavior change,
-  # no LLM, no prompt text or full URLs in the ledger.
-  #   rag-search delegations    -> brain_log  (one line per Brain-First turn)
-  #   browser delegations       -> web_log    (`web-task`)
-  #      inner webfetch/websearch -> web_log  (`web-fetch`)
+  # Phase 0 retrieval telemetry (telemetry-hook.ts + lib/telemetry.ts; also read
+  # by web-scan-hook.ts). Deterministic NDJSON usage records for the expensive
+  # retrieval paths, so Phases 1-4 are falsifiable. Contract: logging only, zero
+  # behavior change, no LLM, no prompt text or full URLs in the ledger.
+  #   0a rag-search delegations -> brain_log  (one line per Brain-First turn)
+  #   0b browser delegations    -> web_log    (`web-task`)
+  #      inner webfetch/websearch-> web_log    (`web-fetch`)
   # Both channels share one rotation policy via the BARE keys below (the audit:
-  # pattern). Leaves are relative to <log>; absolute or ~ paths are honored.
+  # pattern). Leaves are relative to <sysop>; absolute or ~ paths are honored.
   enabled: true                # master on/off — false disables both ledgers
   watch_agents: rag-search,safe-browser,deep-browser  # measured `task` delegates
   brain_log: rag-search.log

@@ -1,0 +1,3 @@
+{
+  "assertion": "The user's message is self-contained and does NOT require a search of the vault: it needs no stored note, procedure, configuration, preference, past decision, remembered fact, or prior session context. The default is TRUE. Answer FALSE only when the message clearly refers to something previously documented or remembered, builds on earlier vault knowledge, or explicitly asks to search, recall, or remember. When in any doubt, answer TRUE."
+}

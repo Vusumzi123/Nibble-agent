@@ -1,12 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
+import { join } from "node:path"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
-import { readResolvedPaths } from "./lib/paths.ts"
+import { readResolvedPaths, SYSCONFIG } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { automationChildSessions } from "./lib/automation.ts"
-import { openDecisionGate } from "./lib/decision-gate.ts"
-import type { DecisionResult } from "./lib/decisions.ts"
-import { readDecisionPromptsFrom } from "./lib/decision-prompts.ts"
+import { createDecisionProvider, readDecisionsConfig, type DecisionResult } from "./lib/decisions.ts"
 import {
   DEFAULT_RETRIEVAL_PROMPTS,
   buildRetrievalDirective,
@@ -41,37 +40,34 @@ import {
 // skip and a logged reason, never a thrown session.
 export default (async ({ client, directory }) => {
   const resolved = await readResolvedPaths(directory ?? process.cwd(), homedir())
-  const logDir = resolved.logDir
+  const sysopDir = resolved.sysopDir
   const config = await readRetrievalConfig(directory ?? process.cwd())
   if (!config.enabled) return {}
 
+  const decisions = await readDecisionsConfig(directory ?? process.cwd())
+  // No provider configured means no gate (rather than silently skipping every
+  // turn, which the fail-closed predicate would otherwise do).
+  if (!decisions.enabled) return {}
+
   const logger = getLogger(logSettingsFrom(config, "log", "log_"), {
-    logDir,
+    sysopDir,
     home: homedir(),
     channel: "retrieval-hook",
   })
-  const diag = createDiagnostics({ logDir, home: homedir(), channel: "retrieval-hook" })
+  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "retrieval-hook" })
 
   const promptsFile = resolveRetrievalPrompts(directory ?? process.cwd(), config.prompts_file)
-  // Question text source: the commented decision-prompts YAML (the default
-  // prompts_file) first, then a legacy .json prompts_file, then the built-in
-  // default — the fallback is journaled so a broken file is visible.
-  const yamlRetrieval = (await readDecisionPromptsFrom(promptsFile))?.retrieval
-  const legacyPrompts = yamlRetrieval ? null : await readRetrievalPrompts(promptsFile)
-  const prompts: RetrievalPrompts = yamlRetrieval ?? legacyPrompts ?? DEFAULT_RETRIEVAL_PROMPTS
-  if (!yamlRetrieval && !legacyPrompts) {
+  const prompts: RetrievalPrompts = (await readRetrievalPrompts(promptsFile)) ?? DEFAULT_RETRIEVAL_PROMPTS
+  if (prompts === DEFAULT_RETRIEVAL_PROMPTS) {
     await logger.append({ ts: new Date().toISOString(), event: "retrieval-prompts-fallback", file: promptsFile })
   }
 
-  // The shared JEV gate (lib/decision-gate.ts) reads `decisions:` once and owns
-  // the provider wiring. Its `timeoutMs` overlay keeps `retrieval.timeout_ms`
-  // authoritative over the shared `decisions.timeout_ms`. No gate configured
-  // means no retrieval gate (rather than silently skipping every turn, which
-  // the fail-closed predicate would otherwise do).
-  const decisionGate = await openDecisionGate(directory ?? process.cwd(), {
-    timeoutMs: config.timeout_ms,
-  })
-  if (!decisionGate) return {}
+  // The retrieval gate owns its own per-decision budget; overlay it on the
+  // shared provider config so `retrieval.timeout_ms` actually governs.
+  const provider = createDecisionProvider(
+    { ...decisions, timeout_ms: config.timeout_ms },
+    { configPath: join(directory ?? process.cwd(), SYSCONFIG) },
+  )
 
   const sessions = createSessionTools(client, directory ?? process.cwd())
 
@@ -83,14 +79,7 @@ export default (async ({ client, directory }) => {
     const intent = config.force_intent && hasRetrievalIntent(text)
     if (intent) return { gate: { skip: false, reason: "intent" }, result: null }
     try {
-      // FAIL-CLOSED: no rules fallback here — an error-carrying or missing
-      // result becomes a SKIP (lib/retrieval.ts `evaluateRetrieval`).
-      const outcome = await decisionGate.decide(
-        buildRetrievalRequest(text, prompts.assertion, config.max_bytes),
-        { fallback: "closed" },
-      )
-      const result = outcome.result
-      if (!result) return { gate: { skip: true, reason: "error" }, result: null }
+      const result = await provider.decide(buildRetrievalRequest(text, prompts.assertion, config.max_bytes))
       return { gate: evaluateRetrieval(result, config.noul_threshold), result }
     } catch (err) {
       void diag.error("[retrieval-hook] decision failed:", err)

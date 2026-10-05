@@ -12,7 +12,9 @@ import {
   buildProfileReviewRequest,
   buildTurnTranscript,
   buildWriterPrompt,
+  createProfileToast,
   extractNote,
+  formatProfileUpdate,
   hasSubstantiveChange,
   parseProfileConfig,
   parseProfilePrompts,
@@ -39,10 +41,11 @@ test("parseProfileConfig reads flat scalars and ignores comments/unknown keys", 
     "  agent_file: Agent.md       # under <vault>",
     "  inject: false",
     "  inject_max_bytes: 4096",
+    "  notify: false",
     "  review: false",
     "  review_threshold: 0.72",
     "  prompts_file: .opencode/profile-prompts.json",
-    "  writer_model: \"example/model\"",
+    "  writer_model: \"deepseek/deepseek-flash\"",
     "  bogus_key: 1",
     "other:",
     "  enabled: false",
@@ -52,11 +55,16 @@ test("parseProfileConfig reads flat scalars and ignores comments/unknown keys", 
   assert.equal(cfg.agent_file, "Agent.md")
   assert.equal(cfg.inject, false)
   assert.equal(cfg.inject_max_bytes, 4096)
+  assert.equal(cfg.notify, false)
   assert.equal(cfg.review, false)
   assert.equal(cfg.review_threshold, 0.72)
   assert.equal(cfg.prompts_file, ".opencode/profile-prompts.json")
-  assert.equal(cfg.writer_model, "example/model")
+  assert.equal(cfg.writer_model, "deepseek/deepseek-flash")
   assert.equal((cfg as Record<string, unknown>).bogus_key, undefined)
+})
+
+test("DEFAULT_PROFILE enables notifications by default", () => {
+  assert.equal(DEFAULT_PROFILE.notify, true)
 })
 
 test("readProfileConfig overlays the block on defaults, never throws", async () => {
@@ -156,8 +164,8 @@ test("readProfilePrompts never throws and returns null for missing/invalid files
 })
 
 test("resolveProfileFile joins relative leaves and passes absolute ones through", () => {
-  assert.equal(resolveProfileFile("/vault", "Agent.md"), "/vault/Agent.md")
-  assert.equal(resolveProfileFile("/vault", "/abs/Agent.md"), "/abs/Agent.md")
+  assert.equal(resolveProfileFile("/vault", "Kael.md"), "/vault/Kael.md")
+  assert.equal(resolveProfileFile("/vault", "/abs/Kael.md"), "/abs/Kael.md")
 })
 
 test("tickIdleTurn arms only at the cooldown threshold and counts every turn", () => {
@@ -197,11 +205,11 @@ test("buildInjectionBlock frames both notes and caps each", () => {
 test("buildInjectionBlock strips frontmatter, Related, and the end marker", () => {
   const note = [
     "---",
-    "title: Agent",
+    "title: Kael",
     "updated: 2026-09-27",
     "---",
     "",
-    "# Agent — Operating Instructions",
+    "# Kael — Operating Instructions",
     "",
     "## Voice",
     "- Answer first.",
@@ -215,7 +223,7 @@ test("buildInjectionBlock strips frontmatter, Related, and the end marker", () =
   const block = buildInjectionBlock(note, "", 4000)
   assert.ok(block.includes("## Voice"))
   assert.ok(block.includes("- Answer first."))
-  assert.ok(!block.includes("title: Agent"))
+  assert.ok(!block.includes("title: Kael"))
   assert.ok(!block.includes("## Related"))
   assert.ok(!block.includes("[[A]]"))
   assert.ok(!block.includes("<<<END_PROFILE_NOTE"))
@@ -227,6 +235,40 @@ test("buildInjectionBlock keeps a mid-file Related block's later sections", () =
   assert.ok(!block.includes("[[A]]"))
   assert.ok(block.includes("## Behavior"))
   assert.ok(block.includes("- Rule."))
+})
+
+test("formatProfileUpdate renders the leaf and byte delta", () => {
+  assert.equal(formatProfileUpdate("Kael.md", 1770, 2147), "Kael.md updated (1770 → 2147 B)")
+})
+
+test("createProfileToast is gated by notify and calls showToast correctly", async () => {
+  const calls: any[] = []
+  const client = { tui: { showToast: async (a: any) => { calls.push(a) } } }
+
+  await createProfileToast({ notify: false, client, directory: "/d" })("msg", "success")
+  assert.equal(calls.length, 0)
+
+  await createProfileToast({ notify: true, client, directory: "/d" })("hi", "success")
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].body.title, "profile-hook")
+  assert.equal(calls[0].body.variant, "success")
+  assert.equal(calls[0].body.duration, 5000)
+  assert.equal(calls[0].query.directory, "/d")
+})
+
+test("createProfileToast uses a longer error duration, honours title, and swallows failures", async () => {
+  const calls: any[] = []
+  const client = { tui: { showToast: async (a: any) => { calls.push(a) } } }
+  await createProfileToast({ notify: true, client, directory: "/d", title: "custom" })("boom", "error")
+  assert.equal(calls[0].body.duration, 8000)
+  assert.equal(calls[0].body.title, "custom")
+
+  const throwing = createProfileToast({
+    notify: true,
+    client: { tui: { showToast: async () => { throw new Error("headless") } } },
+    directory: "/d",
+  })
+  await throwing("noop", "warning")
 })
 
 test("buildProfileDecisionRequest is a choice over the two notes", () => {
@@ -253,13 +295,13 @@ test("buildProfileDecisionRequest derives candidates and criteria from the promp
 })
 
 test("buildProfileReviewRequest is a non-abstaining noul over current + draft + excerpt", () => {
-  const req = buildProfileReviewRequest("Agent.md", "CURRENT", "DRAFT", "EXCERPT")
+  const req = buildProfileReviewRequest("Kael.md", "CURRENT", "DRAFT", "EXCERPT")
   assert.equal(req.kind, "noul")
   assert.equal(req.allow_abstain, false)
   assert.equal(req.assertion, DEFAULT_PROFILE_PROMPTS.review.assertion)
-  assert.ok(req.state.includes("=== CURRENT NOTE (Agent.md) ==="))
+  assert.ok(req.state.includes("=== CURRENT NOTE (Kael.md) ==="))
   assert.ok(req.state.includes("CURRENT"))
-  assert.ok(req.state.includes("=== PROPOSED NOTE (Agent.md) ==="))
+  assert.ok(req.state.includes("=== PROPOSED NOTE (Kael.md) ==="))
   assert.ok(req.state.includes("DRAFT"))
   assert.ok(req.state.includes("=== SESSION EXCERPT ==="))
   assert.ok(req.state.includes("EXCERPT"))
@@ -281,8 +323,8 @@ test("parseProfileTargets maps verdicts to targets", () => {
   assert.deepEqual(parseProfileTargets("both"), ["agent", "user"])
   assert.deepEqual(parseProfileTargets("agent"), ["agent"])
   assert.deepEqual(parseProfileTargets("user"), ["user"])
-  assert.deepEqual(parseProfileTargets("Agent.md"), [])
-  assert.deepEqual(parseProfileTargets("User.md"), [])
+  assert.deepEqual(parseProfileTargets("Kael"), [])
+  assert.deepEqual(parseProfileTargets("Vusumzi"), [])
   assert.deepEqual(parseProfileTargets("none"), [])
   assert.deepEqual(parseProfileTargets("nonsense"), [])
   assert.deepEqual(parseProfileTargets(null), [])
@@ -300,8 +342,8 @@ test("summarizePass emits the terminal line and omits undefined optionals", () =
     confidence: 0.9,
     fallback: false,
     fallbackReason: "none",
-    targets: ["agent", "user"],
-    updated: ["agent", "user"],
+    targets: ["kael", "user"],
+    updated: ["kael", "user"],
     transcriptTurns: 3,
     transcriptBytes: 1842,
   })
@@ -309,7 +351,7 @@ test("summarizePass emits the terminal line and omits undefined optionals", () =
   assert.equal(line.pass, "p42")
   assert.equal(line.result, "updated")
   assert.equal(line.fallback, false)
-  assert.deepEqual(line.updated, ["agent", "user"])
+  assert.deepEqual(line.updated, ["kael", "user"])
   assert.equal(line.transcriptBytes, 1842)
 
   const withNoop = summarizePass({
@@ -319,13 +361,13 @@ test("summarizePass emits the terminal line and omits undefined optionals", () =
     idleTurns: 3,
     cooldownTurns: 3,
     durationMs: 1,
-    targets: ["agent"],
+    targets: ["kael"],
     updated: [],
     failed: [],
-    noop: ["agent"],
+    noop: ["kael"],
   })
   assert.equal(withNoop.result, "no-op")
-  assert.deepEqual(withNoop.noop, ["agent"])
+  assert.deepEqual(withNoop.noop, ["kael"])
 
   const minimal = summarizePass({
     pass: "p43",
@@ -389,9 +431,9 @@ test("setFrontmatterDate replaces or inserts updated", () => {
 })
 
 test("splitWriterModel parses provider/model and rejects malformed specs", () => {
-  assert.deepEqual(splitWriterModel("example/model"), {
-    providerID: "example",
-    modelID: "model",
+  assert.deepEqual(splitWriterModel("deepseek/deepseek-flash"), {
+    providerID: "deepseek",
+    modelID: "deepseek-flash",
   })
   assert.equal(splitWriterModel(""), null)
   assert.equal(splitWriterModel("nope"), null)
@@ -400,15 +442,15 @@ test("splitWriterModel parses provider/model and rejects malformed specs", () =>
 })
 
 test("buildWriterPrompt embeds the note and excerpt between markers", () => {
-  const prompt = buildWriterPrompt("Agent.md", "CURRENT", "EXCERPT", "2026-09-24")
-  assert.ok(prompt.includes("=== FILE: Agent.md ==="))
+  const prompt = buildWriterPrompt("Kael.md", "CURRENT", "EXCERPT", "2026-09-24")
+  assert.ok(prompt.includes("=== FILE: Kael.md ==="))
   assert.ok(prompt.includes("CURRENT"))
   assert.ok(prompt.includes("EXCERPT"))
   assert.ok(prompt.includes("<<<PROFILE_NOTE"))
 })
 
 test("buildWriterPrompt tells the writer to mirror the note's structure and register", () => {
-  const prompt = buildWriterPrompt("Agent.md", "CURRENT", "EXCERPT", "2026-09-24")
+  const prompt = buildWriterPrompt("Kael.md", "CURRENT", "EXCERPT", "2026-09-24")
   assert.ok(prompt.includes("read the current note"))
   assert.ok(prompt.includes("register"))
   assert.ok(prompt.includes("authoritative"))
@@ -416,7 +458,7 @@ test("buildWriterPrompt tells the writer to mirror the note's structure and regi
 })
 
 test("buildWriterPrompt carries the evolution mandate and hard budget", () => {
-  const prompt = buildWriterPrompt("User.md", "CURRENT", "EXCERPT", "2026-09-24", 6000)
+  const prompt = buildWriterPrompt("Vusumzi.md", "CURRENT", "EXCERPT", "2026-09-24", 6000)
   assert.ok(prompt.includes("OWN this note"))
   assert.ok(prompt.includes("compact"))
   assert.ok(prompt.includes("prune"))
@@ -428,7 +470,7 @@ test("buildWriterPrompt carries the evolution mandate and hard budget", () => {
 })
 
 test("buildWriterPrompt defaults the budget to 6000 bytes", () => {
-  const prompt = buildWriterPrompt("Agent.md", "CURRENT", "EXCERPT", "2026-09-24")
+  const prompt = buildWriterPrompt("Kael.md", "CURRENT", "EXCERPT", "2026-09-24")
   assert.ok(prompt.includes("6000 bytes"))
 })
 

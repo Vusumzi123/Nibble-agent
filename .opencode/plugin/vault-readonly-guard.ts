@@ -21,7 +21,7 @@ export default (async ({ directory }) => {
   const vaultRoot = resolved.vaultDir
   const policy = await readVaultPolicy(dir)
   const readonlyDirs = parseReadonlyDirs(policy.readonly)
-  const diag = createDiagnostics({ logDir: resolved.logDir, home: homedir(), channel: "vault-readonly-guard" })
+  const diag = createDiagnostics({ sysopDir: resolved.sysopDir, home: homedir(), channel: "vault-readonly-guard" })
 
   return {
     "tool.execute.before": async (input, output) => {

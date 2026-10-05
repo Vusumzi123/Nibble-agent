@@ -19,10 +19,9 @@
 // deterministic `hasRetrievalIntent` override runs first and always retrieves,
 // so an explicit "search my notes" can never be mis-skipped by the model.
 //
-// The prose prior (the `retrieval.assertion` in `decision-prompts.yaml`) is
-// weighted toward "do not retrieve"; it is externalized so the economy/
-// accuracy balance is tunable without touching the TS. The reader also
-// honors a legacy .json prompts_file for backward compatibility.
+// The prose prior (the assertion in `retrieval-prompts.json`) is weighted toward
+// "do not retrieve"; it is externalized so the economy/accuracy balance is
+// tunable without touching the TS.
 //
 // Loaded via relative import only (same convention as the other lib files).
 import { readFile } from "node:fs/promises"
@@ -62,7 +61,7 @@ export const DEFAULT_RETRIEVAL: RetrievalConfig = {
   max_bytes: 4000,
   force_intent: true,
   inject: true,
-  prompts_file: ".opencode/decision-prompts.yaml",
+  prompts_file: ".opencode/retrieval-prompts.json",
   log: "retrieval.log",
   log_rotate_bytes: 1048576,
   log_keep_generations: 5,
@@ -126,8 +125,7 @@ export async function readRetrievalConfig(directory: string): Promise<RetrievalC
 }
 
 // ---------------------------------------------------------------------------
-// Externalized prose prior (`.opencode/decision-prompts.yaml`, section
-// `retrieval:`; legacy .json prompts_file still honored by retrieval-hook)
+// Externalized prose prior (`.opencode/retrieval-prompts.json`)
 
 // Built-in fallback. TRUE = no retrieval needed. Weighted toward TRUE on
 // purpose: the mandate is inverted (retrieval is opt-in, not default), so the

@@ -3,13 +3,19 @@ import { homedir } from "node:os"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
-import { readResolvedPaths } from "./lib/paths.ts"
+import { readResolvedPaths, SYSCONFIG } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { automationChildSessions } from "./lib/automation.ts"
-import { classifyTranscript } from "./lib/knowledge.ts"
-import { openDecisionGate, type DecisionGate } from "./lib/decision-gate.ts"
+import { classifyTranscript } from "./lib/autonomy.ts"
+import {
+  RulesProvider,
+  createDecisionProvider,
+  decideWithFallback,
+  readDecisionsConfig,
+  type DecisionProvider,
+} from "./lib/decisions.ts"
 import {
   DEFAULT_PROFILE_PROMPTS,
   atomicWriteFile,
@@ -18,7 +24,9 @@ import {
   buildProfileReviewRequest,
   buildTurnTranscript,
   buildWriterPrompt,
+  createProfileToast,
   extractNote,
+  formatProfileUpdate,
   hasSubstantiveChange,
   parseProfileTargets,
   readProfileConfig,
@@ -57,9 +65,10 @@ import {
 //      session-specific/task-decision additions before anything is written. Only
 //      an accepted, changing draft is written directly (atomic rename).
 //      Fail-open: a provider error/abstain never writes (the reviewer gate is
-//      fail-closed). The choice instructions/criteria and the reviewer
-//      assertion live in `profile.prompts_file`, so update frequency +
-//      precision are tunable without touching the TS.
+//      fail-closed). Each write attempt raises an in-app TUI toast (success or
+//      failure), gated by `profile.notify`. The choice instructions/criteria and
+//      the reviewer assertion live in `profile.prompts_file`, so update
+//      frequency + precision are tunable without touching the TS.
 //
 // All work is fire-and-forget and serialized through a queue so a slow model or
 // child can never block the session idle handler.
@@ -88,19 +97,18 @@ type WriteOutcome =
 
 export default (async ({ client, directory }) => {
   const resolved = await readResolvedPaths(directory ?? process.cwd(), homedir())
-  const logDir = resolved.logDir
-  const stateDir = resolved.stateDir
+  const sysopDir = resolved.sysopDir
   const vaultDir = resolved.vaultDir
   const profile = await readProfileConfig(directory ?? process.cwd())
-  const STATE_FILE = join(stateDir, "profile-hook.json")
+  const STATE_FILE = join(sysopDir, "profile-hook.json")
   if (!profile.enabled) return {}
 
   const logger = getLogger(logSettingsFrom(profile, "log", "log_"), {
-    logDir,
+    sysopDir,
     home: homedir(),
     channel: "profile-hook",
   })
-  const diag = createDiagnostics({ logDir, home: homedir(), channel: "profile-hook" })
+  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "profile-hook" })
 
   // Externalized prompts (choice instructions/criteria + reviewer assertion).
   // Missing/unreadable/malformed -> built-in defaults, logged once at startup.
@@ -114,12 +122,18 @@ export default (async ({ client, directory }) => {
     })
   }
 
-  // Shared JEV gate (lib/decision-gate.ts) for the idle profile question and
-  // the post-draft reviewer. `profile.decide` is this hook's switch and
-  // `decisions.enabled` is the provider's master switch; either off (or a
-  // failed gate) simply means the pass never writes.
-  const gate: DecisionGate | null =
-    profile.decide ? await openDecisionGate(directory ?? process.cwd()) : null
+  // In-app toast for profile update outcomes. Gated by `profile.notify`; a
+  // missing/headless TUI is a silent no-op (same pattern as the other hooks).
+  const toast = createProfileToast({ notify: profile.notify, client, directory })
+
+  // Decision provider for the idle profile question. `decisions.enabled` is the
+  // master switch; a missing/failed provider simply means the pass never writes.
+  const decisions = await readDecisionsConfig(directory ?? process.cwd())
+  const provider: DecisionProvider | null =
+    profile.decide && decisions.enabled
+      ? createDecisionProvider(decisions, { configPath: join(directory ?? process.cwd(), SYSCONFIG) })
+      : null
+  const rules = new RulesProvider()
 
   const stateStore = createStateStore<ProfileHookState>(STATE_FILE, DEFAULT_STATE, {
     onError: (err) => {
@@ -233,7 +247,7 @@ export default (async ({ client, directory }) => {
     target: "agent" | "user",
     transcript: string,
     prompts: ProfilePrompts,
-    decisionGate: DecisionGate,
+    prov: DecisionProvider,
   ): Promise<WriteOutcome> => {
     const leaf = target === "agent" ? profile.agent_file : profile.user_file
     const filePath = resolveProfileFile(vaultDir, leaf)
@@ -242,6 +256,7 @@ export default (async ({ client, directory }) => {
       current = await readFile(filePath, "utf8")
     } catch {
       await logger.append({ ts: nowIso(), event: "profile-missing", pass, session: sid, file: filePath })
+      await toast(`${leaf} not found — update skipped`, "warning")
       return "missing"
     }
 
@@ -252,6 +267,7 @@ export default (async ({ client, directory }) => {
     )
     if (!reply) {
       await logger.append({ ts: nowIso(), event: "writer-no-reply", pass, session: sid, file: filePath })
+      await toast(`${leaf} not updated — no writer reply`, "warning")
       return "writer-no-reply"
     }
 
@@ -265,6 +281,7 @@ export default (async ({ client, directory }) => {
         file: filePath,
         replyBytes: Buffer.byteLength(reply, "utf8"),
       })
+      await toast(`${leaf} not updated — draft rejected`, "warning")
       return "writer-invalid"
     }
 
@@ -275,13 +292,12 @@ export default (async ({ client, directory }) => {
     }
 
     // Post-draft durability/globalness gate: reject additions that only make
-    // sense for the current session. Fail-closed for the write: the open
-    // polarity reports `fallback` for a rules substitute, and a substituted
-    // (abstaining) verdict never satisfies `accepted`.
+    // sense for the current session. Fail-closed for the write.
     if (profile.review) {
-      const { result, fallback, reason: fallbackReason } = await decisionGate.decide(
+      const { result, fallback, fallbackReason } = await decideWithFallback(
+        prov,
         buildProfileReviewRequest(leaf, current, note, transcript, prompts),
-        { fallback: "open" },
+        rules,
       )
       const pTrue = typeof result.probabilities?.true === "number" ? result.probabilities.true : 0
       const accepted =
@@ -316,6 +332,7 @@ export default (async ({ client, directory }) => {
           fallback,
           fallbackReason,
         })
+        await toast(`${leaf} update rejected — not durable enough`, "warning")
         return "review-rejected"
       }
     }
@@ -335,6 +352,7 @@ export default (async ({ client, directory }) => {
         beforeBytes,
         afterBytes,
       })
+      await toast(formatProfileUpdate(leaf, beforeBytes, afterBytes), "success")
       return "updated"
     } catch (err) {
       await logger.append({
@@ -345,12 +363,13 @@ export default (async ({ client, directory }) => {
         file: filePath,
         error: err instanceof Error ? err.message : String(err),
       })
+      await toast(`${leaf} write failed`, "error")
       return "write-failed"
     }
   }
 
   const runProfilePass = async (sid: string): Promise<void> => {
-    if (!profile.enabled || !profile.decide || !gate) return
+    if (!profile.enabled || !profile.decide || !provider) return
 
     const started = Date.now()
     const pass = `p${++state.passSeq}`
@@ -414,9 +433,10 @@ export default (async ({ client, directory }) => {
     state.idleTurns = 0
     await stateStore.write(state)
 
-    const { result, fallback, reason: fallbackReason } = await gate.decide(
+    const { result, fallback, fallbackReason } = await decideWithFallback(
+      provider,
       buildProfileDecisionRequest(recent.text, prompts),
-      { fallback: "open" },
+      rules,
     )
     const verdict = typeof result.value === "string" ? result.value : undefined
     const targets = parseProfileTargets(result.value)
@@ -484,7 +504,7 @@ export default (async ({ client, directory }) => {
     const failed: string[] = []
     const noop: string[] = []
     for (const target of targets) {
-      const outcome = await updateProfileFile(pass, sid, target, recent.text, prompts, gate)
+      const outcome = await updateProfileFile(pass, sid, target, recent.text, prompts, provider)
       if (outcome === "updated") updated.push(target)
       else if (outcome === "no-op") noop.push(target)
       else failed.push(target)
