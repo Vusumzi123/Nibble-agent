@@ -1,0 +1,4 @@
+# Plugin test/runtime dependencies are installed from the tracked
+# package.json (npm ci in .opencode/) — keep those tracked.
+node_modules
+bun.lock

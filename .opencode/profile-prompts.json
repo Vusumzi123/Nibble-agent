@@ -1,0 +1,14 @@
+{
+  "choice": {
+    "instructions": "Which pairing profile note(s), if any, should be updated from this exchange? Pay special attention to feedback about how the agent responded — corrections, stated preferences, or hits/misses (\"prefer it listed like this\", \"too long\", \"get to the point\", \"route X the same way every time\") — because those are durable response-improvement instructions that should shape future replies.",
+    "criteria": {
+      "none": "no durable, lasting information; reserve for exchanges with nothing worth remembering and no feedback on how the agent responded",
+      "agent": "agent persona or behavior traits (voice, style, operating rules, personality) — including response-improvement feedback: how the agent should answer in general (format, structure, detail level, ordering, routing, tone) derived from the user's hits/misses, not just this one reply",
+      "user": "user identity, preferences, stack, projects, career, hardware — including durable preferences for how they want information presented to them",
+      "both": "spans persona response-style instructions and user facts"
+    }
+  },
+  "review": {
+    "assertion": "Every change in the proposed note — additions, updates, merges, and removals alike — is consistent with the note's charter: the note curates durable, globally-applicable facts and standing preferences (identity, contact, stack, career, persona/behavior traits, response-style rules phrased as general rules), and carries no one-off task decision, session-specific instruction, project status/implementation detail, or job-application record. Pruning, compaction, and restructuring are expected and welcome; a removal is acceptable when the content is redundant, stale, out of charter, or its facts remain reachable elsewhere in the note. The single failure mode to reject is silent loss of a durable fact or the introduction of out-of-charter content — not deletion as such."
+  }
+}

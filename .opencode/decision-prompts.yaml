@@ -1,0 +1,59 @@
+# JEV decision prompts — the exact question texts ("assertions" / "criteria")
+# handed to the typed-decision provider (openjev bridge or deterministic
+# rules). One section per gate; each key's comment says what the question
+# decides, who asks it, and what consumes the answer.
+#
+# Editing this file changes WHAT the model is asked — never the gate logic
+# (thresholds, fail-open/fail-closed polarity, verdict handling, ledgers),
+# which lives in the hooks and their lib modules.
+#
+# Format: flat two-level YAML (one top-level section per gate, indented
+# `key: value` scalars). Keep values on a single line, quoted, without any
+# ` #` sequence inside, and do NOT put blank lines inside a section — the
+# dependency-free loader (lib/decision-prompts.ts) reads one key per line.
+# Every key falls back to the built-in default in lib/decision-prompts.ts
+# when this file or the key is missing/malformed; a change here is live on
+# the next plugin boot.
+#
+# Not covered here: TRIAGE_ASSERTION (dead export, mirrored in
+# openjevserver.py's selftest) and the profile/idea prompts (externalized
+# per-hook in profile-prompts.json / idea prompts — milestones M3/M7).
+
+retrieval:
+  # Gate 1 — retrieval-hook, once per user turn (kind: noul, FAIL-CLOSED).
+  # "Does this message need a vault search?" TRUE = self-contained → skip the
+  # Brain-First rag-search this turn and inject [brain-first: SKIP]; a
+  # confident FALSE injects [brain-first: RETRIEVE]. Error/abstain also maps
+  # to SKIP (economy-first), but the deterministic hasRetrievalIntent pattern
+  # runs FIRST, so "search my notes" always retrieves no matter what this
+  # text says. Weighted toward TRUE on purpose: retrieval is opt-in.
+  # Consumed by: retrieval-hook decideTurn() → evaluateRetrieval().
+  assertion: "The user's message is self-contained and does NOT require a search of the vault: it needs no stored note, procedure, configuration, preference, past decision, remembered fact, or prior session context. The default is TRUE. Answer FALSE only when the message clearly refers to something previously documented or remembered, builds on earlier vault knowledge, or explicitly asks to search, recall, or remember. When in any doubt, answer TRUE."
+
+ingest:
+  # Gate 2 — knowledge-hook consolidation drain, one call per buffered turn
+  # (kind: noul, FAIL-OPEN, decisions.mode: gate|shadow). "Is this turn
+  # trivial chatter that must NOT reach a vault note?" TRUE = no durable
+  # knowledge → the turn is pruned before batching. Only a confident,
+  # non-fallback TRUE at/above decisions.noul_threshold drops it; abstain,
+  # error, or rules-fallback always keeps the turn. Shadow mode journals the
+  # verdict to decisions.log but ingests everything.
+  # Consumed by: knowledge-hook ingestIfNeeded() phase 2 → isGateSkip().
+  assertion: "This turn carries no durable knowledge worth remembering (it is trivial chatter, already documented, or a one-off with no lasting value)."
+
+tags:
+  # Gate 3a — knowledge-hook capture-time tag gate (kind: choice, FAIL-OPEN
+  # to empty). Asked once per durable turn (after the hasDurableSignal
+  # prefilter) with the candidate tag list + NEW appended. The answer becomes
+  # the buffer entry's `tags` (or `NEW` mints the first keyword as a new tag
+  # candidate); any error/abstain leaves the turn untagged — capture never
+  # blocks on the JEV.
+  # Consumed by: knowledge-hook tagTurn().
+  choice_criteria: "Pick the existing tags that best categorize this turn. Choose NEW only if none of the existing tags fit."
+  # Gate 3b — knowledge-hook capture-time salience score (kind: score,
+  # FAIL-OPEN to null). 1-5 ordinal stored on the buffer entry; hints
+  # retrieval ranking for un-consumed turns (surfaced by temporal_search).
+  # The bridge returns a leveled label (string); the hook coerces + clamps
+  # to 1-5. Error/abstain → salience stays null.
+  # Consumed by: knowledge-hook tagTurn().
+  score_criteria: "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)"

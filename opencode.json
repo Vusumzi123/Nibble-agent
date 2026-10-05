@@ -1,0 +1,101 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md", "SETUP.md"],
+  "subagent_depth": 2,
+  "permission": {
+    "edit": { "*": "ask" },
+    "bash": {
+      "*": "allow",
+      "pkexec *": "ask",
+      "sudo *": "ask",
+      "systemctl *": "ask"
+    },
+    "external_directory": {
+      "~/.ssh/**": "deny",
+      "~/.gnupg/**": "deny",
+      "~/.password-store/**": "deny",
+      "*": "allow"
+    },
+    "websearch": "deny",
+    "webfetch": "deny",
+    "temporal_search": "deny"
+  },
+  "mcp": {
+    "markdown-vault": {
+      "type": "local",
+      "command": ["npx", "-y", "@wirux/mcp-markdown-vault@2.3.0"],
+      "enabled": true,
+      "environment": {
+        "VAULT_PATH": "Brain",
+        "VAULT_CONTEXT_MODE": "assisted"
+      }
+    }
+  },
+  "tools": {
+    "markdown-vault_*": false
+  },
+  "agent": {
+    "security-locks": {
+      "mode": "subagent",
+      "color": "#FF4444",
+      "tools": { "read": true, "glob": true, "grep": true, "write": true, "edit": true },
+      "permission": {
+        "edit": { "*": "deny" },
+        "external_directory": {
+          "~/.ssh/**": "deny",
+          "~/.gnupg/**": "deny",
+          "~/.password-store/**": "deny",
+          "*": "allow"
+        }
+      }
+    },
+    "package-manager": {
+      "mode": "subagent",
+      "color": "#44AAFF"
+    },
+    "sandbox-runner": {
+      "mode": "subagent",
+      "color": "#FFAA44"
+    },
+    "rag-search": {
+      "mode": "subagent",
+      "color": "#FFC940",
+      "tools": { "markdown-vault_*": true },
+      "permission": {
+        "read": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "markdown-vault_edit": "deny",
+        "markdown-vault_vault": "deny",
+        "markdown-vault_system": "deny",
+        "markdown-vault_workflow": "deny",
+        "temporal_search": "allow"
+      }
+    },
+    "rag-brain": {
+      "mode": "subagent",
+      "color": "#FFD700",
+      "tools": { "markdown-vault_*": true },
+      "permission": { "markdown-vault_edit": "deny", "task": "deny" }
+    },
+    "safe-browser": {
+      "mode": "subagent",
+      "color": "#44CCFF",
+      "permission": {
+        "read": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "websearch": "allow",
+        "webfetch": "allow"
+      }
+    }
+  }
+}

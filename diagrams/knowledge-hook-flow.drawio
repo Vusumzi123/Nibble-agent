@@ -1,0 +1,231 @@
+<mxfile host="app.diagrams.net" agent="diagram-developer" version="24.0.0">
+  <diagram id="knowledge-hook-flow" name="knowledge-hook flow (Nibble)">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="2250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="knowledge-hook flow (Nibble)" style="text;html=1;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="800" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="init" value="Plugin init (once, at load)" style="swimlane;startSize=36;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;verticalAlign=middle;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="1520" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="i-paths" value="readResolvedPaths + readKnowledgeConfig + logging/diag&#xa;(sysop / vault / state dirs; memory.json, tag-index.json)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="init">
+          <mxGeometry x="25" y="55" width="330" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="i-jev" value="JEV decision bootstrap: readDecisionsConfig &#x2192; gateActive / shadowActive / tagActive; provider = bridge | RulesProvider; decisionLogger (decisions.log)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;fontStyle=1;" vertex="1" parent="init">
+          <mxGeometry x="375" y="55" width="350" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="i-state" value="stateStore (knowledge-hook.json) + per-session maps: pendingUserText, lastCaptured, childIdleResolvers; tagIndex cache" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="init">
+          <mxGeometry x="745" y="55" width="340" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="i-catchup" value="setTimeout &#x2192; startupCatchUp: normalizeMemoryFile, readMemory; if backlog: create session + ingestIfNeeded(force:true)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="init">
+          <mxGeometry x="1105" y="55" width="385" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="e-init-1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="init" source="i-paths" target="i-jev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-init-2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="init" source="i-jev" target="i-state">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-init-3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="init" source="i-state" target="i-catchup">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="surface" value="Hook surface &amp; capture path" style="swimlane;startSize=36;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;verticalAlign=middle;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="360" width="440" height="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="a-tool" value="tool temporal_search: searchTemporal &#x2014; deterministic BM25 over memory.json &#x2192; renderTemporalHits&#xa;scope: rag-search only (deny elsewhere)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="60" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-chat" value="chat.message guards: automation child? &#x00b7; config.enabled? &#x00b7; isChild? &#x2192; stash pendingUserText (no capture here)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="170" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-idle" value="event session.idle (top-level)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="290" width="380" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a-wait" value="waiter for an awaited drain-child idle?" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="400" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-stop" value="resolve waiter &#x2192; stop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="surface">
+          <mxGeometry x="270" y="400" width="140" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-guards" value="guards: automation child? &#x00b7; config.enabled? &#x00b7; isChild? &#x2192; else silent return" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="530" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-capture" value="captureTurn: fetch session messages &#x2192; last assistant + user text (pendingUserText wins) &#x2192; dedupe via lastCaptured &#x2192; tagTurn &#x2192; appendMemoryEntry &#x2192; mark captured" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="660" width="380" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="a-tag" value="tagTurn &#x2014; JEV TAG GATE: hasDurableSignal prefilter &#x2192; candidateTags (tag index) &#x2192; decideWithFallback choice (tags / NEW) &#x2192; decideWithFallback score (salience 1-5) &#x2192; fail-open: error/abstain &#x2192; tags [] / salience null" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;fontStyle=1;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="830" width="380" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="a-entry" value="memory.json entry: {session, ts, user, assistant, tags, salience, newTag, hash}" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="1020" width="380" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a-note" value="Capture is deterministic and best-effort: a failed append logs and retries on the next idle (pending text is consumed only after a successful append)." style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;spacingRight=8;fillColor=#fffde7;strokeColor=#d6b656;" vertex="1" parent="surface">
+          <mxGeometry x="30" y="1130" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-idle-wait" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-idle" target="a-wait">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-wait-stop" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-wait" target="a-stop">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-wait-guards" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-wait" target="a-guards">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-guards-capture" value="captureTurn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-guards" target="a-capture">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-capture-tag" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-capture" target="a-tag">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-a-tag-entry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="surface" source="a-tag" target="a-entry">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="drain" value="ingestIfNeeded &#x2014; consolidation drain (try phases 0-7; catch &#x2192; ingest-error; one cycle at a time)" style="swimlane;startSize=36;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;verticalAlign=middle;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="520" y="360" width="560" height="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="d0" value="Phase 0 &#x2014; readiness: readMemory; empty? min_ready_turns / force / stale (max_turn_age) / drain_cooldown?" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="50" width="500" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" value="Phase 1 &#x2014; deterministic prefilter: classifyTurn per turn &#x2192; auto-prune trivial &#x2192; 'prefilter-skip' log" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="165" width="500" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="Phase 2 &#x2014; JEV INGEST GATE: decideWithFallback(buildIngestRequest) per turn &#x2192; decisions.log ledger; gateActive AND isGateSkip &#x2192; drop &#x2192; 'gate-skip'; shadow = journal only" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;fontStyle=1;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="290" width="500" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="Phase 3: selectDrainBatch &#x2192; prefetch candidate notes &#x2192; buildDrainPrompt &#x2192; spawnDrainChild (rag-brain child)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="430" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="Phase 4: waitForChildIdle &#x2192; getChildReply (DRAIN_TIMEOUT_MS)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="560" width="500" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="Phase 5 &#x2014; write-guard verification: blockingIssues(takeIssues) &#x2192; if any: retain turns + surfaceFailure &#x2192; 'ingest-verification-blocked'" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="660" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="d6" value="Phase 6: parseConsolidated / parseSkipped / recoverMislabeled &#x2192; if nothing reported: one reaskForOutcome" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="790" width="500" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="d7" value="Phase 7: pruneConsumed(consumed only) &#x2192; tagIndex = null &#x2192; surface retained failures &#x2192; 'ingest' ledger" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="940" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="dcatch" value="catch (wraps phases 0-7): any error &#x2192; 'ingest-error'; turns retained; finally draining = false" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="drain">
+          <mxGeometry x="30" y="1090" width="500" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-0-1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d0" target="d1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-1-2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d1" target="d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-2-3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d2" target="d3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-3-4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d3" target="d4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-4-5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d4" target="d5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-5-6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d5" target="d6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-6-7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="drain" source="d6" target="d7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-d-7-catch" value="any error" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;dashed=1;" edge="1" parent="drain" source="d7" target="dcatch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exits" value="Side exits &amp; failure handling" style="swimlane;startSize=36;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#888888;verticalAlign=middle;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="360" width="440" height="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="c-ready" value="readiness not met / empty &#x2192; return (no cycle)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="50" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="c-prefilter" value="trivial turns &#x2192; pruneConsumed + 'prefilter-skip'" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="165" width="380" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="c-gate" value="gate-skip &#x2192; pruneConsumed + 'gate-skip'&#xa;(shadow: journal only, ingest all)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;fontStyle=1;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="290" width="380" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c-spawn" value="spawn failed / child timeout / no reply &#x2192; recordFailure + retain turns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="430" width="380" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c-verify" value="'ingest-verification-blocked' &#x2192; surface + retain (no prune)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="660" width="380" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c-reask" value="'ingest-reask' &#x2192; re-parse; still unnamed turns &#x2192; retain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="790" width="380" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="c-ledger" value="'ingest' ledger: batch, outcome, gateDropped, overshoot, durationMs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="940" width="380" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="c-note" value="Every branch event ('prefilter-skip', 'gate-skip', 'ingest-*', 'ingest-error') is appended as NDJSON to knowledge-hook.log." style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=8;spacingTop=6;spacingRight=8;fillColor=#fffde7;strokeColor=#d6b656;" vertex="1" parent="exits">
+          <mxGeometry x="30" y="1090" width="380" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="x-d0-ready" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d0" target="c-ready">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d1-prefilter" value="auto-drop" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d1" target="c-prefilter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d2-gate" value="gate-skip" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d2" target="c-gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d3-spawn" value="spawn fail" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d3" target="c-spawn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d4-spawn" value="timeout / no reply" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d4" target="c-spawn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d5-verify" value="issues" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d5" target="c-verify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d6-reask" value="none reported" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d6" target="c-reask">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-d7-ledger" value="always" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="d7" target="c-ledger">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="x-guards-d0" value="then ingestIfNeeded(sid)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;" edge="1" parent="1" source="a-guards" target="d0">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="x-catchup-d0" value="force:true" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=classic;dashed=1;" edge="1" parent="1" source="i-catchup" target="d0">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="Legend" style="swimlane;startSize=30;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#888888;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1700" width="980" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-start" value="hook entry / start" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="legend">
+          <mxGeometry x="20" y="60" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-process" value="process / phase" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="legend">
+          <mxGeometry x="205" y="60" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-exit" value="branch outcome" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="legend">
+          <mxGeometry x="390" y="60" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-jev" value="JEV decision touchpoint" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;fontStyle=1;" vertex="1" parent="legend">
+          <mxGeometry x="575" y="60" width="190" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-fail" value="retain / failure" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="legend">
+          <mxGeometry x="780" y="60" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="note-invariant" value="&lt;b&gt;Failure-handling invariant&lt;/b&gt;&lt;br&gt;A turn is never lost &#x2014; any failure (spawn, timeout, unverified write, unparsed outcome) retains the batch for retry; turns are pruned only after verified outcomes (pruneConsumed over the reported seq set)." style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;spacingRight=10;fillColor=#fffde7;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="1700" width="500" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="note-seam" value="&lt;b&gt;Refactor seam (pre-M3):&lt;/b&gt; the JEV decision-gate bootstrap (readDecisionsConfig &#x2192; provider = bridge | RulesProvider) plus the decideWithFallback call sites are generic wiring shared with retrieval-hook and the coming profile-hook &#x2014; an extraction candidate for &lt;b&gt;lib/decision-gate.ts&lt;/b&gt;. Gate polarity (both fail-open), thresholds, verdict predicates and the ledgers stay hook-local." style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=12;spacingTop=8;spacingRight=12;fillColor=#e6d0ff;strokeColor=#7b3fe4;strokeWidth=3;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1940" width="1520" height="180" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
