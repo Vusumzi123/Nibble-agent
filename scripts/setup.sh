@@ -168,20 +168,15 @@ fs.writeFileSync(f, s.replace(re,"  writer_model: "+m+"\n"));
 ' "$CONFIG" "$1"
 }
 
-apply_decisions_openjev() { # backend base_url model keyfile
+apply_decisions_openjev() { # apply_decisions_openjev provider/model
   node -e '
-const fs=require("fs"),f=process.argv[1];
-const b=process.argv[2],u=process.argv[3],mo=process.argv[4],k=process.argv[5];
+const fs=require("fs"),f=process.argv[1],m=process.argv[2];
 let s=fs.readFileSync(f,"utf8");
 s=s.replace(/^(\s*provider:\s*)rules\b.*$/m,(m0,p1)=>p1+"openjev");
-s=s.replace(/^  # backend: llamacpp.*$/m,()=>"  backend: "+b);
-s=s.replace(/^  # transport: chat.*$/m,()=>"  transport: chat");
-s=s.replace(/^  # base_url: .*$/m,()=>"  base_url: "+u);
-s=s.replace(/^  # model: .*$/m,()=>"  model: "+mo);
-if(k) s=s.replace(/^  # api_key_file: .*$/m,()=>"  api_key_file: "+k);
+s=s.replace(/^  # model: .*$/m,()=>"  model: "+m);
 fs.writeFileSync(f,s);
 if(!/\n  provider: openjev/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
-' "$CONFIG" "$1" "$2" "$3" "$4"
+' "$CONFIG" "$1"
 }
 
 set_block_key() { # set_block_key <file> <block> <key> <value>
@@ -247,18 +242,19 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
 
     echo "  decision gate provider:" >&2
     echo "    1) rules — deterministic, no model (default)" >&2
-    echo "    2) openjev — model-backed (local or endpoint)" >&2
+    echo "    2) openjev — model-backed (uses your opencode provider)" >&2
     D="$(ask 'Choose' 1)"
     if [ "$D" = 2 ]; then
-      BE="$(ask 'Backend (llamacpp|openai|ollama|deepseek)' llamacpp)"
-      BU="$(ask 'Base URL' 'http://127.0.0.1:8090')"
-      BM="$(ask 'Model name')"
-      BK="$(ask 'API key file (blank for local)' '')"
-      if [ "$DRY" -eq 1 ]; then
-        echo "  [dry-run] decisions: openjev backend=$BE model=$BM"
+      DM="$(pick_model 'Decision model')"
+      if [ -n "$DM" ]; then
+        if [ "$DRY" -eq 1 ]; then
+          echo "  [dry-run] decisions: openjev model=$DM"
+        else
+          apply_decisions_openjev "$DM"
+          echo "  decisions = openjev ($DM)"
+        fi
       else
-        apply_decisions_openjev "$BE" "$BU" "$BM" "$BK"
-        echo "  decisions = openjev ($BE, $BM)"
+        echo "  decision model — left as rules (no model picked)"
       fi
     fi
   else

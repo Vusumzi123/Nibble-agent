@@ -121,23 +121,27 @@ decisions:
   #
   # Default: provider `rules` — deterministic TypeScript heuristics, no
   # external process, works out of the box. To use the model-backed provider,
-  # set provider: openjev (bridge scripts are shipped), pick a backend, and
-  # point api_key_file (or base_url) at your endpoint.
+  # set provider: openjev and pick a model from `opencode models`: its endpoint
+  # and API key are resolved from opencode's own models.json / auth.json, so no
+  # base_url/api_key_file is needed (setup.sh prompts for the model).
   enabled: true               # master on/off — gates only when true
   mode: gate                   # shadow | gate  (live gating — see header comment)
   provider: rules              # rules | openjev
-  # backend/base_url/model/api_key_file are read only when provider: openjev.
-  # Set them when enabling the model-backed gate (setup.sh prompts for these):
-  # backend: llamacpp            # llamacpp | openai | ollama | deepseek
-  # transport: chat              # chat (/v1/chat/completions) | completion (native /completion)
-  # base_url: http://127.0.0.1:8090
-  # model: your-model-name
-  # api_key_file: ~/.config/opencode/openjev.key   # chmod-600, never inline
+  # `model` is the ONLY provider setting; the provider id is the prefix before
+  # the first "/". Advanced overrides (custom/local/SDK-only providers):
+  # model: deepseek/deepseek-chat   # opencode spec: <provider>/<model>
+  # api_provider: ""           # provider id when `model` has no <provider>/ prefix
+  # backend: llamacpp          # force the local llama.cpp backend
+  # base_url: ""               # pin an endpoint (no /v1 suffix)
+  # transport: chat            # chat | completion (llama.cpp only)
+  # api_key_file: ""           # chmod-600 key file instead of opencode auth.json
+  # auth_file: ""              # override path to opencode auth.json
+  # models_file: ""            # override path to opencode models.json
   temperature_scaling: 1.00    # must stay 1.0 — self-reported confidence is uncalibrated
   abstain_threshold: 0.45
   noul_threshold: 0.80         # gates skip only when model p >= this
   timeout_ms: 30000            # per-call subprocess timeout
-  n_probs: 20                  # candidate token depth (unused by deepseek JSON tier)
+  n_probs: 20                  # candidate token depth (unused by the structured tier)
   fallback: rules              # on error/abstain/timeout -> deterministic rules
   # Shadow ledger — one NDJSON line per decision. `ledger` is a LEAF
   # under <log>. Written through the shared logging engine (see the header).

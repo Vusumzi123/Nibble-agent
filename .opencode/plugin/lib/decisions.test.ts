@@ -77,6 +77,36 @@ test("DEFAULT_DECISIONS ships shadow-only and disabled", () => {
   assert.ok(DEFAULT_DECISIONS.log_rotate_bytes > 0)
 })
 
+test("parseDecisionsConfig reads the opencode model spec and override keys", () => {
+  const cfg = parseDecisionsConfig(
+    [
+      "decisions:",
+      "  provider: openjev",
+      "  model: deepseek/deepseek-chat",
+      "  api_provider: custom",
+      "  auth_file: /tmp/auth.json",
+      "  models_file: /tmp/models.json",
+      "",
+      "retrieval:",
+      "  enabled: true",
+    ].join("\n"),
+  )
+  assert.equal(cfg.provider, "openjev")
+  assert.equal(cfg.model, "deepseek/deepseek-chat")
+  assert.equal(cfg.api_provider, "custom")
+  assert.equal(cfg.auth_file, "/tmp/auth.json")
+  assert.equal(cfg.models_file, "/tmp/models.json")
+})
+
+test("DEFAULT_DECISIONS defaults to the opencode spec with no forced backend", () => {
+  assert.equal(DEFAULT_DECISIONS.model, "")
+  assert.equal(DEFAULT_DECISIONS.backend, "")
+  assert.equal(DEFAULT_DECISIONS.base_url, "")
+  assert.equal(DEFAULT_DECISIONS.api_provider, "")
+  assert.equal(DEFAULT_DECISIONS.auth_file, "")
+  assert.equal(DEFAULT_DECISIONS.models_file, "")
+})
+
 // ---------------------------------------------------------------------------
 // Triage request
 

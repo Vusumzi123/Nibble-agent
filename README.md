@@ -90,8 +90,10 @@ Ships fully deterministic out of the box; two features are opt-in:
 - **Smart retrieval gate** — the default `decisions.provider: rules` makes the
   per-turn Brain-First gate fail closed to SKIP (retrieval still fires on an
   explicit "search my notes" intent). For a model-backed gate set
-  `decisions.provider: openjev` in `.opencode/sysop-config.yaml` and configure a
-  backend (local llama.cpp/ollama, or a hosted API key) — requires `python3`.
+  `decisions.provider: openjev` and `decisions.model: <provider>/<model>` (any
+  model from `opencode models`) in `.opencode/sysop-config.yaml` — the endpoint
+  and API key are resolved from opencode's own credentials, so no separate
+  `base_url`/`api_key_file` is needed. Requires `python3`.
 - **Profile auto-writes** — `profile.writer_model` is empty by default, so the
   agent inherits the session model. Set it to a registered `provider/model` to
   pin the writer; a missing or failed model is a logged no-op and never blocks
