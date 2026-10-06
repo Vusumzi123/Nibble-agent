@@ -1,7 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { tempHome, writeSection } from "./test-utils.ts"
@@ -14,19 +14,20 @@ const { default: createHook } = await import("../knowledge-hook.ts")
 const { automationChildSessions } = await import("../lib/automation.ts")
 const { recordIssue, resetVerification } = await import("../lib/verification.ts")
 
-const LOG_FILE = join(TEST_HOME, ".opencode-sysop", "knowledge-hook.log")
-const STATE_FILE = join(TEST_HOME, ".opencode-sysop", "knowledge-hook.json")
-
-// The hooks share one sysop home, so reset the persisted state + ledger between
-// tests (otherwise a prior cycle's `lastDrainAt` cooldown suppresses the next).
-async function resetState(): Promise<void> {
-  await rm(STATE_FILE, { force: true })
-  await rm(LOG_FILE, { force: true })
+// Project-local roots: logs under <project>/.opencode/logs, hook state under
+// <project>/.opencode/state. Every test uses a fresh project dir, so no state
+// leaks between them (a prior cycle's `lastDrainAt` cooldown included).
+function logFile(dir: string): string {
+  return join(dir, ".opencode", "logs", "knowledge-hook.log")
 }
 
-async function readLog(): Promise<any[]> {
+function stateFile(dir: string): string {
+  return join(dir, ".opencode", "state", "knowledge-hook.json")
+}
+
+async function readLog(dir: string): Promise<any[]> {
   try {
-    return (await readFile(LOG_FILE, "utf8"))
+    return (await readFile(logFile(dir), "utf8"))
       .trim()
       .split("\n")
       .filter(Boolean)
@@ -158,7 +159,6 @@ const DURABLE_ASSISTANT = "run sudo pacman -S htop"
 
 test("captures a completed turn into the memory buffer", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const hooks = await createHook({
     client: makeClient({
@@ -187,7 +187,6 @@ test("captures a completed turn into the memory buffer", async () => {
 
 test("re-asks once when the child omits its outcome blocks, then prunes", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const client = makeClient({
     childReplies: [
@@ -208,7 +207,7 @@ test("re-asks once when the child omits its outcome blocks, then prunes", async 
   assert.deepEqual(await readMem(dir), [])
   // The spawn prompt + the single re-ask prompt.
   assert.equal(client.calls.prompts.length, 2)
-  const events = await readLog()
+  const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "ingest-reask"))
   const ingest = events.find((e) => e.event === "ingest")
   assert.ok(ingest, "expected an ingest ledger event")
@@ -218,7 +217,6 @@ test("re-asks once when the child omits its outcome blocks, then prunes", async 
 
 test("ingests a batch, prunes consumed turns, and logs the cycle", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const hooks = await createHook({
     client: makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" }),
@@ -234,7 +232,7 @@ test("ingests a batch, prunes consumed turns, and logs the cycle", async () => {
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
   assert.deepEqual(await readMem(dir), [])
-  const events = await readLog()
+  const events = await readLog(dir)
   const ingest = events.find((e) => e.event === "ingest")
   assert.ok(ingest, "expected an ingest ledger event")
   assert.equal(ingest.turns, 3)
@@ -243,7 +241,6 @@ test("ingests a batch, prunes consumed turns, and logs the cycle", async () => {
 
 test("drains FIFO: the oldest turns are batched first regardless of file order", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const hooks = await createHook({
     client: makeClient({ childReply: "```consolidated\n#1\n#2\n#3\n```" }),
@@ -259,7 +256,7 @@ test("drains FIFO: the oldest turns are batched first regardless of file order",
 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
-  const events = await readLog()
+  const events = await readLog(dir)
   const ingest = events.find((e) => e.event === "ingest")
   assert.ok(ingest, "expected an ingest ledger event")
   assert.deepEqual(ingest.batch, [1, 2, 3])
@@ -267,7 +264,6 @@ test("drains FIFO: the oldest turns are batched first regardless of file order",
 
 test("prefilter auto-drops trivial turns without spawning a child", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const client = makeClient({})
   const hooks = await createHook({ client, directory: dir } as any)
@@ -284,13 +280,12 @@ test("prefilter auto-drops trivial turns without spawning a child", async () => 
 
   assert.deepEqual(await readMem(dir), [])
   assert.equal(client.calls.create, 0)
-  const events = await readLog()
+  const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "prefilter-skip"))
 })
 
 test("retains turns when the write guard reports an unresolved issue", async () => {
   automationChildSessions.clear()
-  await resetState()
   resetVerification()
   const dir = await freshProject()
   const hooks = await createHook({
@@ -313,14 +308,13 @@ test("retains turns when the write guard reports an unresolved issue", async () 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
   assert.equal((await readMem(dir)).length, 3)
-  const events = await readLog()
+  const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "ingest-verification-blocked"))
   resetVerification()
 })
 
 test("temporal_search returns rendered hits from the buffer", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   const hooks = await createHook({ client: makeClient({}), directory: dir } as any)
   await delay(20)
@@ -336,7 +330,6 @@ test("temporal_search returns rendered hits from the buffer", async () => {
 
 test("startup catch-up ingests a backlog left by a previous exit", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   await seedMemory(dir, [
     memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
@@ -364,7 +357,6 @@ test("startup catch-up ingests a backlog left by a previous exit", async () => {
 
 test("max_turn_age: 0 disables the age bound (backlog below min_ready_turns stays)", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   await writeSection(dir, "knowledge", [
     "enabled: true",
@@ -388,7 +380,6 @@ test("max_turn_age: 0 disables the age bound (backlog below min_ready_turns stay
 
 test("a stale turn is force-eligible below min_ready_turns and bypasses cooldown", async () => {
   automationChildSessions.clear()
-  await resetState()
   const dir = await freshProject()
   await writeSection(dir, "knowledge", [
     "enabled: true",
@@ -403,8 +394,8 @@ test("a stale turn is force-eligible below min_ready_turns and bypasses cooldown
   await delay(20)
   // A recent cycle time would normally suppress a new pass; the stale turn must
   // bypass the cooldown.
-  await mkdir(dirname(STATE_FILE), { recursive: true })
-  await writeFile(STATE_FILE, JSON.stringify({ lastDrainAt: Date.now() }), "utf8")
+  await mkdir(dirname(stateFile(dir)), { recursive: true })
+  await writeFile(stateFile(dir), JSON.stringify({ lastDrainAt: Date.now() }), "utf8")
   const old = new Date(Date.now() - 10 * 60 * 1000).toISOString()
   await seedMemory(dir, [memEntry(1, DURABLE_USER, DURABLE_ASSISTANT, old)])
 

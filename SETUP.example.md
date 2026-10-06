@@ -2,7 +2,7 @@
 
 Last updated: $TODAY
 
-<!-- Generated from SETUP.example.md by scripts/firstboot.sh; the `$TOKEN`s
+<!-- Generated from SETUP.example.md by scripts/setup.sh; the `$TOKEN`s
      below are filled via platform detection. To change your machine data,
      edit the generated SETUP.md (local-only, gitignored), not this file. -->
 

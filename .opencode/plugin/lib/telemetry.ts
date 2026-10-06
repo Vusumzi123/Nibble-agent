@@ -9,7 +9,7 @@
 // Contract: logging only, zero behavior change, deterministic (no LLM), and
 // NO prompt text or full URLs in the ledger — only byte counts, a short task
 // description, and a `sanitizeTarget`-capped target. Usage is embedded verbatim
-// from `drainAccounting` (lib/autonomy.ts) so its camelCase keys are preserved.
+// from `drainAccounting` (lib/knowledge.ts) so its camelCase keys are preserved.
 //
 // Config lives in the `telemetry:` block of .opencode/sysop-config.yaml. The
 // two channels share one rotation policy via the bare keys (audit: pattern).
@@ -23,9 +23,9 @@ export type TelemetryConfig = {
   enabled: boolean
   /** Comma-separated sub-agent names whose `task` delegations are measured. */
   watch_agents: string
-  /** Leaf under <sysop>: 0a Brain-First delegation ledger. */
+  /** Leaf under <log>: 0a Brain-First delegation ledger. */
   brain_log: string
-  /** Leaf under <sysop>: 0b browser delegation + inner fetch ledger. */
+  /** Leaf under <log>: 0b browser delegation + inner fetch ledger. */
   web_log: string
   rotate_bytes: number
   keep_generations: number

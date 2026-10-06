@@ -6,20 +6,20 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { atomicWrite } from "./lib/fsx.ts"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
-import { readResolvedPaths, SYSCONFIG } from "./lib/paths.ts"
+import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso } from "./lib/util.ts"
 import { blockingIssues, takeIssues } from "./lib/verification.ts"
 import {
-  RulesProvider,
   buildDecisionsLogEntry,
   buildIngestRequest,
-  createDecisionProvider,
-  decideWithFallback,
+  buildSalienceRequest,
+  buildTagChoiceRequest,
   isGateSkip,
-  readDecisionsConfig,
 } from "./lib/decisions.ts"
+import { openDecisionGate } from "./lib/decision-gate.ts"
+import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import {
   buildDrainPrompt,
   buildTagIndex,
@@ -40,7 +40,7 @@ import {
   TURN_AGENT,
   type CandidateNote,
   type TagIndexEntry,
-} from "./lib/autonomy.ts"
+} from "./lib/knowledge.ts"
 import {
   appendMemoryEntry,
   normalizeMemoryFile,
@@ -110,39 +110,57 @@ function renderTemporalHits(hits: TemporalHit[]): string {
 }
 
 export default (async ({ client, directory }) => {
+  // --- Init: canonical paths, knowledge config, logging/diagnostics ---------
   const resolved = await readResolvedPaths(directory, homedir())
-  const sysopDir = resolved.sysopDir
   const vaultDir = resolved.vaultDir
   const stateDir = resolved.stateDir
+  const logDir = resolved.logDir
   const config = await readKnowledgeConfig(directory)
   const memoryFile = resolveMemoryFile(stateDir, config)
   const tagIndexFile = resolveTagIndexFile(stateDir, config)
-  const STATE_FILE = join(sysopDir, "knowledge-hook.json")
+  const STATE_FILE = join(stateDir, "knowledge-hook.json")
   const logger = getLogger(logSettingsFrom(config, "log", "log_"), {
-    sysopDir,
+    logDir,
     home: homedir(),
     channel: "knowledge-hook",
   })
-  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "knowledge-hook" })
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "knowledge-hook" })
 
-  const decisions = await readDecisionsConfig(directory)
-  const gateActive = decisions.enabled && decisions.mode === "gate"
-  const shadowActive = decisions.enabled && decisions.mode === "shadow"
-  const tagActive = config.tag_gate && decisions.enabled
-  const provider = decisions.enabled
-    ? createDecisionProvider(decisions, { configPath: join(directory, SYSCONFIG) })
-    : null
-  const rules = decisions.enabled ? new RulesProvider() : null
+  // --- JEV decision gate (one seam, three call sites) -----------------------
+  // lib/decision-gate.ts reads the `decisions:` block once at init and owns the
+  // provider + RulesProvider fallback wiring shared with retrieval-hook and
+  // profile-hook. `gate` is null when decisions are disabled, which is this
+  // hook's disabled policy (no gate, no ledger).
+  // Gate polarity is deliberate per-gate policy (stays in this hook):
+  //   tag gate    — fail-open to EMPTY (never blocks capture)
+  //   ingest gate — fail-open (only a confident, non-fallback "no durable
+  //                 knowledge" verdict drops a turn; shadow mode journals only)
+  const gate = await openDecisionGate(directory)
+  const decisions = gate?.config ?? null
+  const gateActive = decisions !== null && decisions.mode === "gate"
+  const shadowActive = decisions !== null && decisions.mode === "shadow"
+  const tagActive = config.tag_gate && gate !== null
   // Shadow/gate decisions are journaled here now that the legacy raw-session
   // jev-hook is retired (it was the sole writer of decisions.log).
-  const decisionLogger = decisions.enabled
+  const decisionLogger = decisions
     ? getLogger(logSettingsFrom(decisions, "ledger", "log_"), {
-        sysopDir,
+        logDir,
         home: homedir(),
         channel: "knowledge-hook",
       })
     : null
 
+  // Question texts for this hook's three JEV calls (tag choice, salience
+  // score, ingest assertion) come from the commented YAML doc
+  // (.opencode/decision-prompts.yaml); a missing file or key falls back to
+  // the built-in defaults inside the loader.
+  const decisionPrompts = await readDecisionPrompts(directory)
+
+  // --- Persistent state + per-session transient maps ------------------------
+  // state:        knowledge-hook.json (drain timestamps, error dedupe)
+  // pendingUserText: user text stashed at chat.message, consumed at capture
+  // lastCaptured: assistant-message id already appended (capture dedupe)
+  // childIdleResolvers: pending waitForChildIdle() callbacks per child session
   const stateStore = createStateStore<KnowledgeHookState>(STATE_FILE, DEFAULT_STATE, {
     onError: (err) => {
       void diag.error("[knowledge-hook] failed to write state file:", err)
@@ -179,6 +197,10 @@ export default (async ({ client, directory }) => {
     return tagIndex
   }
 
+  // --- Child-session plumbing for the drain cycle ---------------------------
+  // The consolidation child runs as its own session; we wait for its
+  // session.idle event (never a message poll loop) and then read its final
+  // assistant message as the outcome report.
   const readChildMessages = async (childID: string): Promise<any[]> => {
     try {
       const res = await client.session.messages({ path: { id: childID }, query: { directory } })
@@ -194,6 +216,8 @@ export default (async ({ client, directory }) => {
     },
   })
 
+  // Resolve when the child session idles, or false on timeout
+  // (DRAIN_TIMEOUT_MS). Registered from the event hook below.
   const waitForChildIdle = (childID: string): Promise<boolean> =>
     new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -207,6 +231,8 @@ export default (async ({ client, directory }) => {
       })
     })
 
+  // Wait for idle, then read the child's final assistant text (short retry
+  // window for message-store propagation).
   const getChildReply = async (childID: string): Promise<{ reply: string; timedOut: boolean }> => {
     const idled = await waitForChildIdle(childID)
     for (let i = 0; i < 5; i++) {
@@ -247,6 +273,10 @@ export default (async ({ client, directory }) => {
     return ""
   }
 
+  // --- Failure surfacing ----------------------------------------------------
+  // Both helpers report back into the session as a noReply system-ish prompt
+  // (so the user sees the problem in-app) with dedupe via state.notifiedError.
+  // recordFailure additionally persists the error into the state file.
   const recordFailure = async (sid: string, err: unknown): Promise<void> => {
     const errorText = err instanceof Error ? err.message : String(err)
     state.lastError = errorText
@@ -288,16 +318,18 @@ export default (async ({ client, directory }) => {
     }
   }
 
-  // Capture-time JEV tagging (Phase 3, plan §11). Only durable turns are
-  // tagged/scored, and any failure degrades to empty tags / null salience —
-  // capture must never block on the JEV.
+  // --- Capture-time JEV TAG GATE (Phase 3, plan §11) ------------------------
+  // Two decideWithFallback calls (choice → tags/new-tag, score → salience),
+  // both fail-open: any error/abstain degrades to empty tags / null salience —
+  // capture must never block on the JEV. Only durable turns reach the JEV at
+  // all (hasDurableSignal prefilter).
   const tagTurn = async (entry: Pick<MemoryDraft, "user" | "assistant">): Promise<{
     tags: string[]
     salience: number | null
     newTag: string | null
   }> => {
     const empty = { tags: [] as string[], salience: null as number | null, newTag: null as string | null }
-    if (!tagActive || !provider || !rules) return empty
+    if (!tagActive || !gate) return empty
     const content = entry.user + "\n" + entry.assistant
     if (!hasDurableSignal(content)) return empty
 
@@ -308,18 +340,15 @@ export default (async ({ client, directory }) => {
     let tags: string[] = []
     let newTag: string | null = null
     try {
-      const { result } = await decideWithFallback(
-        provider,
-        {
-          kind: "choice",
-          state: content,
-          candidates: [...candidates, "NEW"],
-          criteria:
-            "Pick the existing tags that best categorize this turn. Choose NEW only if none of the existing tags fit.",
-        },
-        rules,
+      const { result } = await gate.decide(
+        buildTagChoiceRequest(
+          content,
+          [...candidates, "NEW"],
+          decisionPrompts.tags.choice_criteria,
+        ),
+        { fallback: "open" },
       )
-      if (!result.abstained && typeof result.value === "string") {
+      if (result && !result.abstained && typeof result.value === "string") {
         if (result.value === "NEW") newTag = keywords[0] ?? null
         else tags = [result.value]
       }
@@ -329,19 +358,13 @@ export default (async ({ client, directory }) => {
 
     let salience: number | null = null
     try {
-      const { result } = await decideWithFallback(
-        provider,
-        {
-          kind: "score",
-          state: content,
-          criteria:
-            "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)",
-        },
-        rules,
+      const { result } = await gate.decide(
+        buildSalienceRequest(content, decisionPrompts.tags.score_criteria),
+        { fallback: "open" },
       )
       // The bridge returns the score as a leveled label (a string like "3"),
       // not a number — accept either, then clamp to the 1-5 ordinal scale.
-      if (!result.abstained) {
+      if (result && !result.abstained) {
         const raw = result.value
         const n =
           typeof raw === "number"
@@ -358,6 +381,10 @@ export default (async ({ client, directory }) => {
     return { tags, salience, newTag }
   }
 
+  // --- Capture: session.idle → one memory.json entry per completed turn -----
+  // Pulls the last assistant reply + user text from the session (the stashed
+  // chat.message text wins over the message-store copy), runs the tag gate,
+  // then appends {session, ts, user, assistant, tags, salience, newTag}.
   const captureTurn = async (sid: string): Promise<void> => {
     let assistant = ""
     let assistantId = ""
@@ -406,11 +433,20 @@ export default (async ({ client, directory }) => {
     }
   }
 
+  // --- Consolidation (the "drain"): memory.json → rag-brain child → prune ---
+  // Runs one cycle at a time (draining mutex). Failure at any phase RETAINS
+  // the turns (no prune) so the next idle/startup retries them — a turn is
+  // never lost. Phases:
+  //   0 readiness → 1 deterministic prefilter → 2 JEV ingest gate
+  //   → 3 batch+spawn → 4 await child → 5 write-guard verification
+  //   → 6 parse outcomes (one re-ask) → 7 prune + ledger
   const ingestIfNeeded = async (sid: string, opts: { force?: boolean } = {}): Promise<void> => {
     if (draining) return
     draining = true
     const startedAt = Date.now()
     try {
+      // Phase 0: readiness — non-empty, min_ready_turns (or forced/stale),
+      // and drain_cooldown elapsed.
       const entries = (await readMemory(memoryFile)).sort((a, b) => a.seq - b.seq)
       if (entries.length === 0) return
 
@@ -424,8 +460,8 @@ export default (async ({ client, directory }) => {
       if (entries.length < config.min_ready_turns && !forced) return
       if (!forced && state.lastDrainAt && now - state.lastDrainAt < config.drain_cooldown_ms) return
 
-      // Deterministic per-turn prefilter: auto-prune only unambiguously trivial
-      // turns, no LLM.
+      // Phase 1: deterministic per-turn prefilter: auto-prune only
+      // unambiguously trivial turns, no LLM.
       const autoDropped: number[] = []
       let candidates: MemoryEntry[] = entries
       if (config.skip_triage) {
@@ -448,33 +484,33 @@ export default (async ({ client, directory }) => {
       }
       if (candidates.length === 0) return
 
-      // Per-turn JEV ingest gate. Fail-open: only a confident, non-fallback "no
-      // durable knowledge" verdict drops a turn. In shadow mode the decision is
-      // journaled but every turn is ingested.
+      // Phase 2: per-turn JEV INGEST GATE. Fail-open: only a confident,
+      // non-fallback "no durable knowledge" verdict drops a turn. In shadow
+      // mode the decision is journaled but every turn is ingested. Each
+      // decision is also appended to the shared decisions.log ledger.
       const gateDropped: number[] = []
       let kept = candidates
-      if ((gateActive || shadowActive) && provider && rules) {
+      if ((gateActive || shadowActive) && gate) {
         kept = []
         for (const e of candidates) {
           const content = e.user + "\n" + e.assistant
-          const { result, fallback, fallbackReason } = await decideWithFallback(
-            provider,
-            buildIngestRequest(content, config.skip_triage_max_bytes),
-            rules,
+          const { result, fallback, reason } = await gate.decide(
+            buildIngestRequest(content, config.skip_triage_max_bytes, decisionPrompts.ingest.assertion),
+            { fallback: "open" },
           )
-          if (decisionLogger) {
+          if (decisionLogger && result) {
             await decisionLogger.append(
               buildDecisionsLogEntry({
                 session: e.session,
                 result,
                 rulesVerdict: classifyTurn(e, config.skip_triage_max_bytes),
                 fallback,
-                fallbackReason,
-                mode: decisions.mode,
+                fallbackReason: reason,
+                mode: gate.config.mode,
               }),
             )
           }
-          if (gateActive && isGateSkip(result, fallback, decisions.noul_threshold)) {
+          if (gateActive && result && isGateSkip(result, fallback, gate.config.noul_threshold)) {
             gateDropped.push(e.seq)
           } else {
             kept.push(e)
@@ -493,6 +529,8 @@ export default (async ({ client, directory }) => {
       }
       if (kept.length === 0) return
 
+      // Phase 3: batch selection → deterministic candidate-note prefetch →
+      // spawn one rag-brain child with the drain prompt.
       const selection = selectDrainBatch(kept, config.batch_turns, config.drain_max_tokens)
       state.lastDrainAt = now
       await stateStore.write(state)
@@ -514,6 +552,7 @@ export default (async ({ client, directory }) => {
         return
       }
 
+      // Phase 4: await the child (idle-based) and read its outcome reply.
       const { reply, timedOut } = await getChildReply(spawned.sessionID)
       const childMessages = await readChildMessages(spawned.sessionID)
       const acct = drainAccounting(childMessages)
@@ -530,6 +569,10 @@ export default (async ({ client, directory }) => {
         return
       }
 
+      // Phase 5: write-guard verification — wikilink-guard recorded
+      // per-session receipts while the child wrote notes; any unresolved
+      // (blocking) issue means we cannot prove the writes were clean, so the
+      // whole batch is retained for retry (never pruned on unverified writes).
       const guardIssues = blockingIssues(takeIssues(spawned.sessionID))
       if (guardIssues.length > 0) {
         await surfaceFailure(
@@ -548,6 +591,9 @@ export default (async ({ client, directory }) => {
         return
       }
 
+      // Phase 6: parse the outcome blocks (consolidated/skipped), recover
+      // mislabeled ones, and re-ask ONCE if the child reported nothing for
+      // this batch.
       const batchSeqs = new Set(selection.batch.map((e) => e.seq))
       let ok = parseConsolidated(reply)
       let skipped = parseSkipped(reply)
@@ -575,6 +621,9 @@ export default (async ({ client, directory }) => {
         })
       }
 
+      // Phase 7: prune consumed turns only, invalidate the tag index cache
+      // (a new tag may have been minted), surface any retained failures, and
+      // append the full cycle ledger entry.
       const consumed = new Set([...ok, ...skipped].filter((s) => batchSeqs.has(s)))
       const failed = selection.batch.filter((e) => !consumed.has(e.seq))
       const pruned = await pruneConsumed(memoryFile, consumed)
@@ -662,6 +711,13 @@ export default (async ({ client, directory }) => {
     void startupCatchUp()
   }, 0)
 
+  // --- Hook surface (what opencode wires up) --------------------------------
+  //  tool.temporal_search   deterministic BM25 over un-consumed turns
+  //                         (rag-search only; permission-gated in opencode.json)
+  //  chat.message           stash the user text for the next capture
+  //  session.idle           resolve drain-child waiters, else
+  //                         captureTurn → ingestIfNeeded (see flow diagram:
+  //                         diagrams/knowledge-hook-flow.drawio)
   return {
     tool: {
       temporal_search: tool({
@@ -690,6 +746,8 @@ export default (async ({ client, directory }) => {
       }),
     },
 
+    // Stash only — capture itself happens at session.idle, when the
+    // assistant's reply exists. Automation children are never captured.
     "chat.message": async (input, output) => {
       const sid = input.sessionID
       if (!sid || automationChildSessions.has(sid)) return
@@ -700,6 +758,7 @@ export default (async ({ client, directory }) => {
       pendingUserText.set(sid, text)
     },
 
+    // Main entry: idle = "a top-level turn just finished".
     event: async ({ event }) => {
       if (event.type !== "session.idle") return
       const sid = event.properties.sessionID

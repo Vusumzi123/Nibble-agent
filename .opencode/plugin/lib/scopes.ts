@@ -3,20 +3,24 @@
 // logic is deterministic and unit-testable without file I/O.
 //
 // Vault scope  (rag-brain edits + markdown-vault MCP path):
-//               <vaultDir>   e.g. .../sysop-brain/Brain
+//               <vaultDir>   e.g. .../Nibble/Brain
 //               Granted ONLY to the rag-brain sub-agent. The main agent and
 //               every other sub-agent keep `edit: ask` on the vault — they
 //               have no legitimate silent vault-write need, so a rogue write
 //               stops at the prompt (least privilege).
 // Diagram scope (diagram-developer edits):
-//               <diagramsDir> e.g. .../sysop-brain/diagrams
+//               <diagramsDir> e.g. .../Nibble/diagrams
 //               Granted ONLY to the diagram-developer sub-agent, whose sole
 //               write surface is draw.io XML. Uses an `ask` fallback (NOT
 //               deny): a catch-all deny disables the edit/write tools outright,
 //               whereas ask + anchored allows keeps them enabled and still
 //               stops any write outside the diagrams directory at the prompt.
-// Home scope   (security-locks + audit-logger edits):
-//               <sysopDir>   e.g. ~/.opencode-sysop
+// Log scope     (security-locks edits):
+//               <logDir>     e.g. .../Nibble/.opencode/logs
+//               The project-local NDJSON log root. security-locks keeps its
+//               broad `deny` and gains anchored allows here only — the audit
+//               trail itself is written in-process by audit-hook, never by an
+//               agent hand-crafting lines.
 //
 // Allow rules are anchored to these EXACT paths. A bare `**/<name>/**` would
 // auto-allow edits under ANY directory with that name anywhere on the machine,
@@ -40,9 +44,9 @@ export function vaultEditRules(vaultDirAbs: string): PermissionMap {
   return appendAnchoredAllows({ "*": "ask" }, vaultDirAbs)
 }
 
-// Home scope rule map: everything is denied except the sysop directory.
-export function sysopEditRules(sysopDirAbs: string): PermissionMap {
-  return appendAnchoredAllows({ "*": "deny" }, sysopDirAbs)
+// Log scope rule map: everything is denied except the project log directory.
+export function logEditRules(logDirAbs: string): PermissionMap {
+  return appendAnchoredAllows({ "*": "deny" }, logDirAbs)
 }
 
 // Diagram scope rule map: everything asks except the diagrams directory. The
@@ -70,23 +74,23 @@ export function applyVaultScope(cfg: any, vaultDirAbs: string): void {
   }
 }
 
-// Apply the home scope to deny-everything-else agents: keeps their existing
-// broad `deny` first, then appends the anchored sysop allows.
-export function applyHomeScope(cfg: any, sysopDirAbs: string): void {
-  if (!sysopDirAbs) return
-  const sysopRules = sysopEditRules(sysopDirAbs)
-  for (const name of ["security-locks", "audit-logger"]) {
+// Apply the log scope to deny-everything-else agents: keeps their existing
+// broad `deny` first, then appends the anchored log-dir allows.
+export function applyLogScope(cfg: any, logDirAbs: string): void {
+  if (!logDirAbs) return
+  const logRules = logEditRules(logDirAbs)
+  for (const name of ["security-locks"]) {
     const agent = cfg.agent?.[name]
     if (!agent) continue
     agent.permission = agent.permission ?? {}
     const existing = agent.permission.edit
     if (existing && typeof existing === "object") {
       // Preserve static broad deny (and any future keys); append anchored allows.
-      for (const [k, v] of Object.entries(sysopRules)) {
+      for (const [k, v] of Object.entries(logRules)) {
         if (k !== "*") existing[k] = v
       }
     } else {
-      agent.permission.edit = { ...sysopRules }
+      agent.permission.edit = { ...logRules }
     }
   }
 }
@@ -104,10 +108,10 @@ export function applyDiagramScope(cfg: any, diagramsDirAbs: string): void {
 export function applyConfig(
   cfg: any,
   vaultDirAbs: string,
-  sysopDirAbs: string,
+  logDirAbs: string,
   diagramsDirAbs: string,
 ): void {
   applyVaultScope(cfg, vaultDirAbs)
-  applyHomeScope(cfg, sysopDirAbs)
+  applyLogScope(cfg, logDirAbs)
   applyDiagramScope(cfg, diagramsDirAbs)
 }

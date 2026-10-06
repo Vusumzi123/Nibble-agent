@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
-import { drainAccounting } from "./lib/autonomy.ts"
+import { drainAccounting } from "./lib/knowledge.ts"
 import {
   buildTaskTelemetryEntry,
   parseWatchAgents,
@@ -38,22 +38,22 @@ const MAX_STAMPS = 512
 export default (async ({ client, directory }) => {
   const dir = directory ?? process.cwd()
   const resolved = await readResolvedPaths(dir, homedir())
-  const sysopDir = resolved.sysopDir
+  const logDir = resolved.logDir
   const cfg = await readTelemetryConfig(dir)
   if (!cfg.enabled) return {}
 
   const watch = parseWatchAgents(cfg.watch_agents)
   const brainLog = getLogger(logSettingsFrom(cfg, "brain_log", ""), {
-    sysopDir,
+    logDir,
     home: homedir(),
     channel: "telemetry-brain",
   })
   const webLog = getLogger(logSettingsFrom(cfg, "web_log", ""), {
-    sysopDir,
+    logDir,
     home: homedir(),
     channel: "telemetry-web",
   })
-  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "telemetry-hook" })
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "telemetry-hook" })
   const sessions = createSessionTools(client, dir, {
     onError: (err) => void diag.error("[telemetry-hook] session lookup failed:", err),
   })

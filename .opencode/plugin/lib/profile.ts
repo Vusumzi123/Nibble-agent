@@ -13,7 +13,6 @@ import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { expandHome } from "./paths.ts"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
-import { createNotifier } from "./notify.ts"
 import type { DecisionRequest } from "./decisions.ts"
 
 export type ProfileConfig = {
@@ -28,7 +27,6 @@ export type ProfileConfig = {
   decision_max_bytes: number
   skip_triage: boolean
   skip_triage_max_bytes: number
-  notify: boolean
   writer_agent: string
   writer_model: string
   child_timeout_ms: number
@@ -58,9 +56,8 @@ export const DEFAULT_PROFILE: ProfileConfig = {
   decision_max_bytes: 24000,
   skip_triage: true,
   skip_triage_max_bytes: 800,
-  notify: true,
   writer_agent: "profile-writer",
-  writer_model: "deepseek/deepseek-flash",
+  writer_model: "",
   child_timeout_ms: 90000,
   note_max_bytes: 6000,
   prompts_file: ".opencode/profile-prompts.json",
@@ -82,7 +79,6 @@ const BOOL_KEYS = new Set([
   "inject",
   "decide",
   "skip_triage",
-  "notify",
   "review",
   "log_compress",
 ])
@@ -288,43 +284,6 @@ export function buildInjectionBlock(agent: string, user: string, maxBytes: numbe
     "## User (user context)",
     u,
   ].join("\n")
-}
-
-// Human-readable line for the success toast when a profile note is written,
-// e.g. "Agent.md updated (1770 → 2147 B)".
-export function formatProfileUpdate(
-  leaf: string,
-  beforeBytes: number,
-  afterBytes: number,
-): string {
-  return `${leaf} updated (${beforeBytes} → ${afterBytes} B)`
-}
-
-export type ProfileToastVariant = "info" | "success" | "warning" | "error"
-
-// Minimal structural view of the opencode client the toaster needs. Loose on
-// purpose: keeps this module free of SDK imports and unit-testable with a plain
-// mock, while the real client remains assignable.
-export type ProfileToastClient = {
-  tui: { showToast: (args: any) => Promise<unknown> }
-}
-
-// Build the emitter the profile hook uses to surface update outcomes in the TUI.
-// Gated by `notify`; a missing/headless renderer is a silent no-op, so a toast
-// failure can never disturb the write path. Shared implementation: lib/notify.ts.
-export function createProfileToast(opts: {
-  notify: boolean
-  client: ProfileToastClient
-  directory: string
-  title?: string
-}): (message: string, variant: ProfileToastVariant) => Promise<void> {
-  const notifier = createNotifier({
-    client: opts.client,
-    directory: opts.directory,
-    enabled: opts.notify,
-    channel: opts.title ?? "profile-hook",
-  })
-  return (message, variant) => notifier.toast(message, variant)
 }
 
 export const PROFILE_NOTE_OPEN = "<<<PROFILE_NOTE"

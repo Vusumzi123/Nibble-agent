@@ -3,7 +3,7 @@ description: Handles package lifecycle operations (install, remove, upgrade, pur
 mode: subagent
 color: "#44AAFF"
 permission:
-  bash: { "apt*": "ask", "dnf*": "ask", "pacman*": "ask", "brew*": "ask", "snap*": "ask", "flatpak*": "ask", "*": "deny" }
+  bash: { "apt*": "ask", "dnf*": "ask", "pacman*": "ask", "yay*": "ask", "paru*": "ask", "brew*": "ask", "snap*": "ask", "flatpak*": "ask", "*": "deny" }
   edit: "deny"
   task: "deny"
 ---

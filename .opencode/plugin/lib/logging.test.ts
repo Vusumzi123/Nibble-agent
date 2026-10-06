@@ -70,22 +70,22 @@ test("logSettingsFrom accepts the ledger/scan_log filename keys", () => {
   assert.equal(logSettingsFrom({ scan_log: "web-scan.log" }, "scan_log").file, "web-scan.log")
 })
 
-test("resolveLogPath honors absolute, ~, and sysop-relative leaves", () => {
-  const sysop = "/sysop"
-  assert.equal(resolveLogPath(sysop, "/abs/x.log", "/home/u"), "/abs/x.log")
-  assert.equal(resolveLogPath(sysop, "~/y.log", "/home/u"), "/home/u/y.log")
-  assert.equal(resolveLogPath(sysop, "z.log", "/home/u"), join(sysop, "z.log"))
+test("resolveLogPath honors absolute, ~, and log-root-relative leaves", () => {
+  const logRoot = "/logs"
+  assert.equal(resolveLogPath(logRoot, "/abs/x.log", "/home/u"), "/abs/x.log")
+  assert.equal(resolveLogPath(logRoot, "~/y.log", "/home/u"), "/home/u/y.log")
+  assert.equal(resolveLogPath(logRoot, "z.log", "/home/u"), join(logRoot, "z.log"))
 })
 
 test("getLogger caches one instance per resolved file", async () => {
   clearLoggerCache()
   const dir = await tmpDir()
   const settings = { ...LOG_DEFAULTS, file: "a.log" }
-  const a = getLogger(settings, { sysopDir: dir })
-  const b = getLogger(settings, { sysopDir: dir })
+  const a = getLogger(settings, { logDir: dir })
+  const b = getLogger(settings, { logDir: dir })
   assert.equal(a, b)
   clearLoggerCache()
-  const c = getLogger(settings, { sysopDir: dir })
+  const c = getLogger(settings, { logDir: dir })
   assert.notEqual(a, c)
 })
 
@@ -98,7 +98,7 @@ test("createDiagnostics writes a structured line and keeps console output", asyn
     consoleArgs.push(args)
   }
   try {
-    const diag = createDiagnostics({ sysopDir: dir })
+    const diag = createDiagnostics({ logDir: dir })
     await diag.error("[demo] something broke", new Error("boom"))
   } finally {
     console.error = original

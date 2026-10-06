@@ -11,9 +11,14 @@ const TEST_HOME = tempHome("telhook-home-")
 
 const { default: createHook } = await import("../telemetry-hook.ts")
 
-const SYSOp = join(TEST_HOME, ".opencode-sysop")
-const BRAIN_LOG = join(SYSOp, "rag-search.log")
-const WEB_LOG = join(SYSOp, "web-usage.log")
+// Logs are project-local: <project>/.opencode/logs/ (fresh dir per test).
+function brainLog(dir: string): string {
+  return join(dir, ".opencode", "logs", "rag-search.log")
+}
+
+function webLogPath(dir: string): string {
+  return join(dir, ".opencode", "logs", "web-usage.log")
+}
 
 // One assistant step carrying usage + a tool call, matching drainAccounting's
 // expected `info.tokens` shape.
@@ -27,9 +32,10 @@ const childRow = {
   parts: [{ type: "tool" }, { type: "text", text: "ok" }],
 }
 
+// Fresh project dirs carry no logs; only the process-wide logger cache needs
+// resetting between tests.
 async function reset(): Promise<void> {
   clearLoggerCache()
-  await rm(SYSOp, { recursive: true, force: true })
 }
 
 async function freshProject(config?: string[]): Promise<string> {
@@ -116,7 +122,7 @@ test("a rag-search delegation emits one brain line with summed usage", async () 
     }),
   )
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain.length, 1)
   const e = brain[0]
   assert.equal(e.event, "rag-search")
@@ -135,7 +141,7 @@ test("a rag-search delegation emits one brain line with summed usage", async () 
   assert.equal(e.usage.toolCalls, 1)
   assert.equal(e.usage.usageKnown, true)
   assert.equal(typeof e.wallMs, "number")
-  assert.equal((await readLog(WEB_LOG)).length, 0)
+  assert.equal((await readLog(webLogPath(dir))).length, 0)
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -150,11 +156,11 @@ test("a browser delegation routes to the web ledger as web-task", async () => {
     taskOutput({ sessionId: "ses_child", parentSessionId: "ses_parent" }),
   )
 
-  const web = await readLog(WEB_LOG)
+  const web = await readLog(webLogPath(dir))
   assert.equal(web.length, 1)
   assert.equal(web[0].event, "web-task")
   assert.equal(web[0].delegate, "safe-browser")
-  assert.equal((await readLog(BRAIN_LOG)).length, 0)
+  assert.equal((await readLog(brainLog(dir))).length, 0)
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -169,8 +175,8 @@ test("an unwatched agent emits nothing", async () => {
     taskOutput({ sessionId: "ses_child", parentSessionId: "ses_parent" }),
   )
 
-  assert.equal((await readLog(BRAIN_LOG)).length, 0)
-  assert.equal((await readLog(WEB_LOG)).length, 0)
+  assert.equal((await readLog(brainLog(dir))).length, 0)
+  assert.equal((await readLog(webLogPath(dir))).length, 0)
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -185,7 +191,7 @@ test("a missing child session id degrades to an error line and never throws", as
     taskOutput({ parentSessionId: "ses_parent" }),
   )
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain.length, 1)
   assert.equal(brain[0].outcome, "error")
   assert.equal(brain[0].reason, "no-child")
@@ -206,7 +212,7 @@ test("a duplicate after for one callID emits exactly one line", async () => {
     output as any,
   )
 
-  assert.equal((await readLog(BRAIN_LOG)).length, 1)
+  assert.equal((await readLog(brainLog(dir))).length, 1)
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -222,7 +228,7 @@ test("a background task records outcome background without reading usage", async
     taskOutput({ sessionId: "ses_child", parentSessionId: "ses_parent", background: true, jobId: "job_1" }, "running"),
   )
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain.length, 1)
   assert.equal(brain[0].outcome, "background")
   assert.ok(!("usage" in brain[0]))
@@ -241,7 +247,7 @@ test("a child-messages read failure becomes an error line and never throws", asy
     taskOutput({ sessionId: "ses_child", parentSessionId: "ses_parent" }),
   )
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain.length, 1)
   assert.equal(brain[0].outcome, "error")
   assert.ok(!("usage" in brain[0]))
@@ -258,7 +264,7 @@ test("a resume call resolves the agent from the child session meta", async () =>
 
   await fire(hooks, { description: "continue", prompt: "x", task_id: "t1" }, taskOutput({ sessionId: "ses_child" }))
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain.length, 1)
   assert.equal(brain[0].delegate, "rag-search")
   await rm(dir, { recursive: true, force: true })
@@ -275,7 +281,7 @@ test("an error envelope overrides an otherwise-ok outcome", async () => {
     taskOutput({ sessionId: "ses_child", parentSessionId: "ses_parent" }, "error"),
   )
 
-  const brain = await readLog(BRAIN_LOG)
+  const brain = await readLog(brainLog(dir))
   assert.equal(brain[0].outcome, "error")
   await rm(dir, { recursive: true, force: true })
 })

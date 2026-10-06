@@ -32,14 +32,14 @@ const DRY_RE =
 
 async function recordFailure(
   stateFile: string,
-  sysopDir: string,
+  stateDir: string,
   err: unknown,
   diag: ReturnType<typeof createDiagnostics>,
 ): Promise<void> {
   const msg = err instanceof Error ? err.message : String(err)
   await diag.error("[audit-hook] write failed:", msg)
   try {
-    await mkdir(sysopDir, { recursive: true })
+    await mkdir(stateDir, { recursive: true })
     await writeFile(
       stateFile,
       JSON.stringify(
@@ -60,22 +60,23 @@ async function recordFailure(
 export default (async ({ directory }) => {
   const dir = directory ?? process.cwd()
   const resolved = await readResolvedPaths(dir, homedir())
-  const sysopDir = resolved.sysopDir
+  const logDir = resolved.logDir
+  const stateDir = resolved.stateDir
   const audit = await readAuditConfig(dir)
   if (!audit.enabled) return {}
 
-  const STATE_FILE = join(sysopDir, "audit-hook.json")
-  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "audit-hook" })
+  const STATE_FILE = join(stateDir, "audit-hook.json")
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "audit-hook" })
   // sessionID -> agent name, populated from `chat.message` (input.agent).
   const sessionAgent = new Map<string, string>()
 
   const logger = getLogger(logSettingsFrom(audit, "log", ""), {
-    sysopDir,
+    logDir,
     home: homedir(),
     channel: "audit",
     rotationEntry: auditRotationEntry,
     onError: (err) => {
-      void recordFailure(STATE_FILE, sysopDir, err, diag)
+      void recordFailure(STATE_FILE, stateDir, err, diag)
     },
   })
 

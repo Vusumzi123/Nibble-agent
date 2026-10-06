@@ -4,10 +4,10 @@ import { join } from "node:path"
 import {
   applyConfig,
   applyVaultScope,
-  applyHomeScope,
+  applyLogScope,
   applyDiagramScope,
   vaultEditRules,
-  sysopEditRules,
+  logEditRules,
   diagramEditRules,
   appendAnchoredAllows,
 } from "./scopes.ts"
@@ -16,7 +16,7 @@ import {
   expandHome,
   parsePathsConfig,
   resolveVaultDir,
-  resolveSysopDir,
+  resolveLogDir,
   resolveDiagramsDir,
 } from "./paths.ts"
 
@@ -24,16 +24,16 @@ const DIR = "/home/x/project"
 const HOME = "/home/x"
 
 const vaultDir = () => resolveVaultDir(DIR, DEFAULT_PATHS.vault)
-const sysopDir = () => resolveSysopDir(HOME, DEFAULT_PATHS.sysop)
+const logDir = () => resolveLogDir(DIR, DEFAULT_PATHS.log)
 const diagramsDir = () => resolveDiagramsDir(DIR, DEFAULT_PATHS.diagrams)
 const strip = (p: string) => p.replace(/^\/+/, "")
 
-test("paths: defaults resolve vault/diagrams under project and sysop under home", () => {
+test("paths: defaults resolve vault/log/diagrams under project", () => {
   assert.equal(DEFAULT_PATHS.vault, "Brain")
-  assert.equal(DEFAULT_PATHS.sysop, "~/.opencode-sysop")
+  assert.equal(DEFAULT_PATHS.log, ".opencode/logs")
   assert.equal(DEFAULT_PATHS.diagrams, "diagrams")
   assert.equal(vaultDir(), join(DIR, "Brain"))
-  assert.equal(sysopDir(), join(HOME, ".opencode-sysop"))
+  assert.equal(logDir(), join(DIR, ".opencode/logs"))
   assert.equal(diagramsDir(), join(DIR, "diagrams"))
 })
 
@@ -41,11 +41,11 @@ test("paths: parsePathsConfig reads flat keys and ignores unknown/comments", () 
   const yaml = [
     "paths:",
     "  vault: Notes", // comment stripped
-    "  sysop: ~/.sysop",
+    "  log: /var/log/x",
     "  other: x",
   ].join("\n")
   const cfg = parsePathsConfig(yaml)
-  assert.deepEqual(cfg, { vault: "Notes", sysop: "~/.sysop" })
+  assert.deepEqual(cfg, { vault: "Notes", log: "/var/log/x" })
   assert.deepEqual(parsePathsConfig("other:\n  file: /x\n"), {})
 })
 
@@ -65,13 +65,13 @@ test("vault rules: ask fallback + only anchored allows (no **/Brain/**)", () => 
   assert.equal(rules["**/Brain/**"], undefined)
 })
 
-test("sysop rules: deny fallback + only anchored allows (no **/.opencode-sysop/**)", () => {
-  const rules = sysopEditRules(sysopDir())
+test("log rules: deny fallback + only anchored allows (no **/.opencode/logs/**)", () => {
+  const rules = logEditRules(logDir())
   assert.equal(rules["*"], "deny")
-  assert.equal(rules[`${sysopDir()}/**`], "allow")
-  assert.equal(rules[`${strip(sysopDir())}/**`], "allow")
+  assert.equal(rules[`${logDir()}/**`], "allow")
+  assert.equal(rules[`${strip(logDir())}/**`], "allow")
   assert.equal(Object.keys(rules).length, 3)
-  assert.equal(rules["**/.opencode-sysop/**"], undefined)
+  assert.equal(rules["**/.opencode/logs/**"], undefined)
 })
 
 test("applyVaultScope leaves the top-level edit alone; allows only rag-brain vault edits + MCP VAULT_PATH", () => {
@@ -90,21 +90,18 @@ test("applyVaultScope leaves the top-level edit alone; allows only rag-brain vau
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
 })
 
-test("applyHomeScope appends anchored allows to security-locks and audit-logger, preserving deny", () => {
+test("applyLogScope appends anchored allows to security-locks, preserving deny", () => {
   const cfg: any = {
     agent: {
       "security-locks": { permission: { edit: { "*": "deny" } } },
-      "audit-logger": { permission: { edit: { "*": "deny" } } },
       "rag-brain": { permission: {} },
     },
   }
-  applyHomeScope(cfg, sysopDir())
-  for (const name of ["security-locks", "audit-logger"]) {
-    const edit = cfg.agent[name].permission.edit
-    assert.equal(edit["*"], "deny")
-    assert.equal(edit[`${sysopDir()}/**`], "allow")
-    assert.equal(edit[`${strip(sysopDir())}/**`], "allow")
-  }
+  applyLogScope(cfg, logDir())
+  const edit = cfg.agent["security-locks"].permission.edit
+  assert.equal(edit["*"], "deny")
+  assert.equal(edit[`${logDir()}/**`], "allow")
+  assert.equal(edit[`${strip(logDir())}/**`], "allow")
   assert.equal(cfg.agent["rag-brain"].permission.edit, undefined, "other agents untouched")
 })
 
@@ -142,11 +139,11 @@ test("applyConfig wires all three scopes from resolved roots", () => {
     },
     mcp: { "markdown-vault": { environment: {} } },
   }
-  applyConfig(cfg, vaultDir(), sysopDir(), diagramsDir())
+  applyConfig(cfg, vaultDir(), logDir(), diagramsDir())
   assert.equal(cfg.permission.edit, undefined, "no vault allow injected at top level")
   assert.equal(cfg.agent["rag-brain"].permission.edit[`${strip(vaultDir())}/**`], "allow")
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
-  assert.equal(cfg.agent["security-locks"].permission.edit[`${strip(sysopDir())}/**`], "allow")
+  assert.equal(cfg.agent["security-locks"].permission.edit[`${strip(logDir())}/**`], "allow")
   assert.equal(cfg.agent["diagram-developer"].permission.edit[`${strip(diagramsDir())}/**`], "allow")
 })
 
@@ -159,7 +156,7 @@ test("appendAnchoredAllows emits both absolute and slash-stripped forms", () => 
 test("no-ops safely without a directory/home", () => {
   const cfg: any = { mcp: {}, agent: {} }
   applyVaultScope(cfg, "")
-  applyHomeScope(cfg, "")
+  applyLogScope(cfg, "")
   applyDiagramScope(cfg, "")
   assert.deepEqual(cfg, { mcp: {}, agent: {} })
 })

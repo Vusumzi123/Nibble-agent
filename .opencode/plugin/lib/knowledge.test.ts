@@ -25,7 +25,7 @@ import {
   resolveTagIndexFile,
   selectDrainBatch,
   spawnDrainChild,
-} from "./autonomy.ts"
+} from "./knowledge.ts"
 import { entryHash, type MemoryEntry } from "./temporal.ts"
 
 // The shared guard set spawnDrainChild registers into.
@@ -34,7 +34,7 @@ import { automationChildSessions } from "./automation.ts"
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..")
 
 async function tmpDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "autonomy-"))
+  return mkdtemp(join(tmpdir(), "knowledge-"))
 }
 
 function entry(seq: number, user: string, assistant: string, over: Partial<MemoryEntry> = {}): MemoryEntry {

@@ -9,7 +9,9 @@ import { tempHome } from "./test-utils.ts"
 const TEST_HOME = tempHome("rhook-home-")
 const { default: createHook } = await import("../retrieval-hook.ts")
 
-const LOG_FILE = join(TEST_HOME, ".opencode-sysop", "retrieval.log")
+function logFile(dir: string): string {
+  return join(dir, ".opencode", "logs", "retrieval.log")
+}
 
 // The decision provider is `rules`, which abstains on the retrieval noul (it only
 // answers the triage question). That makes the fail-closed path deterministic:
@@ -42,9 +44,9 @@ async function project(retrieval: string[], decisions: string[] = ["enabled: tru
   return dir
 }
 
-async function readLog(): Promise<any[]> {
+async function readLog(dir: string): Promise<any[]> {
   try {
-    const raw = await readFile(LOG_FILE, "utf8")
+    const raw = await readFile(logFile(dir), "utf8")
     return raw
       .trim()
       .split("\n")
@@ -71,7 +73,7 @@ test("fail-closed: an abstaining provider yields a SKIP directive", async () => 
   await fire(hooks, "ses_1", "install htop")
   const block = await directiveFor(hooks, "ses_1")
   assert.match(block, /\[brain-first: SKIP\]/)
-  const entry = (await readLog()).at(-1)
+  const entry = (await readLog(dir)).at(-1)
   assert.equal(entry.event, "retrieval")
   assert.equal(entry.skip, true)
   assert.equal(entry.reason, "error")
@@ -84,7 +86,7 @@ test("explicit retrieval intent overrides the gate and injects RETRIEVE", async 
   await fire(hooks, "ses_1", "search my notes for the WAL policy")
   const block = await directiveFor(hooks, "ses_1")
   assert.match(block, /\[brain-first: RETRIEVE\]/)
-  const entry = (await readLog()).at(-1)
+  const entry = (await readLog(dir)).at(-1)
   assert.equal(entry.reason, "intent")
   assert.equal(entry.retrieve, true)
   await rm(dir, { recursive: true, force: true })

@@ -12,9 +12,9 @@ import { applyConfig } from "./lib/scopes.ts"
 //
 //   vault root  (rag-brain edits + markdown-vault MCP VAULT_PATH):
 //               <project-dir>/<paths.vault>
-//   sysop root  (security-locks + audit-logger edit allows):
-//               ~/<paths.sysop>
-//   diagrams root  (diagram-developer edit allows):
+//   log root    (security-locks edit allows):
+//               <project-dir>/<paths.log>
+//   diagrams root (diagram-developer edit allows):
 //               <project-dir>/<paths.diagrams>
 //
 // The plugin auto-discovery loader requires every export of this file to be a
@@ -24,12 +24,12 @@ export default (async ({ directory }) => {
   // Resolve the canonical roots once at startup. Never throws (defaults on a
   // missing/broken config), so a config error cannot take the MCP server down.
   const resolved = await readResolvedPaths(directory ?? process.cwd(), homedir())
-  const diag = createDiagnostics({ sysopDir: resolved.sysopDir, home: homedir(), channel: "scoped-permissions" })
+  const diag = createDiagnostics({ logDir: resolved.logDir, home: homedir(), channel: "scoped-permissions" })
 
   return {
     config: (cfg: any) => {
       try {
-        applyConfig(cfg, resolved.vaultDir, resolved.sysopDir, resolved.diagramsDir)
+        applyConfig(cfg, resolved.vaultDir, resolved.logDir, resolved.diagramsDir)
       } catch (err) {
         void diag.error("[scoped-permissions] failed to inject permission config:", err)
       }

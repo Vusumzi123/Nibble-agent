@@ -18,33 +18,32 @@ import { readResolvedPaths } from "./lib/paths.ts"
 // one-line [web-scan: …] brief — mirroring what the mail-hook does for mail_*.
 //
 // Full finding detail (family / severity / snippet) is written to an NDJSON
-// audit log under <sysop>/<browser.scan_log>, never into the agent's context,
+// audit log under <log>/<browser.scan_log>, never into the agent's context,
 // so hostile snippets are not echoed back and the brief stays tiny.
 //
-// Phase 0 (0b, docs/phase0-retrieval-telemetry-plan.md): this hook also emits
-// one `web-fetch` usage record for EVERY webfetch/websearch call to
-// <sysop>/<telemetry.web_log> — tool, child session, sanitized target/domain,
+// This hook also emits one `web-fetch` usage record for EVERY webfetch/websearch
+// call to <log>/<telemetry.web_log> — tool, child session, sanitized target,
 // pre-transform byte count, scan verdict, wall time, outcome. The web-usage
 // ledger is gated by `telemetry.enabled` INDEPENDENTLY of `browser.enabled`
 // (which gates the scan), so disabling the scan still leaves the telemetry on
 // (and vice versa). No fetched text or query is stored.
 //
-// Only the safe-browser and deep-browser sub-agents are permitted to run
-// webfetch/websearch (denied globally in opencode.json), so this hook only ever
-// touches output destined for those read-only agents.
+// Only the safe-browser sub-agent is permitted to run webfetch/websearch
+// (denied globally in opencode.json), so this hook only ever touches output
+// destined for that read-only agent.
 export default (async ({ directory }) => {
   const dir = directory ?? process.cwd()
   const cfg = await readBrowserConfig(dir)
   const telemetry = await readTelemetryConfig(dir)
   const resolved = await readResolvedPaths(dir, homedir())
   const scanLog = getLogger(logSettingsFrom(cfg, "scan_log", "log_"), {
-    sysopDir: resolved.sysopDir,
+    logDir: resolved.logDir,
     home: homedir(),
     channel: "web-scan",
   })
   const webLog = telemetry.enabled
     ? getLogger(logSettingsFrom(telemetry, "web_log", ""), {
-        sysopDir: resolved.sysopDir,
+        logDir: resolved.logDir,
         home: homedir(),
         channel: "telemetry-web",
       })

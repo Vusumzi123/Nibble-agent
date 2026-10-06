@@ -30,7 +30,6 @@ decisions:
 You must also return:
 - The **dry-run command** the main agent should use for preview (for `APPROVED_DRY_RUN`)
 - The **live command** including the correct escalation wrapper (for `APPROVED_LIVE`)
-- The **audit log entry** to be written
 
 ---
 
@@ -46,9 +45,6 @@ failure.
   DENY and suggest dropping `sudo`.
 - If root IS needed, ensure the escalation wrapper will be used (pkexec, kdialog+sudo -S, zenity+sudo -S, or sudo -A).
 - Ensure no `sudo -i`, `sudo -s`, or `sudo su` is proposed.
-- Remote root access via an allowlisted, key-only SSH alias (see L4) is
-  permitted and treated as per-target escalation, not as persistent local root;
-  SSH sessions must stay per-command (L6).
 
 ### L2 — User Confirmation
 
@@ -101,22 +97,6 @@ via safe-browser before live approval.
 Model provenance should be sanity-checked via safe-browser before live approval
 (official registry only; record the manifest digest on first pull).
 
-**Remote host access (scoped):** `ssh` is whitelisted ONLY to hosts in the
-documented homelab allowlist, referenced by their `~/.ssh/config` alias:
-`proxmox` / `pve`, `proxmox-human` / `pve-human`, `docker`, `orangepi`,
-`orangepi-human`. The target's `HostName` must resolve to a private LAN
-address (RFC1918: `10/8`, `172.16/12`, `192.168/16`). DENY `ssh` to a bare IP
-or hostname not in the allowlist, `-o StrictHostKeyChecking=no`, `-o
-UserKnownHostsFile=/dev/null`, `ProxyCommand`, or an explicit `-i` that bypasses
-the alias. Because a remote payload is opaque to this gate, the SAME locks
-apply remotely: the main agent must issue **discrete, single-purpose** SSH
-invocations (no `&&`-chained multi-step root sessions — see L6); destructive
-remote steps (writing `/etc`, enabling/disabling services, removing files)
-require user confirmation per L2; and a downloaded binary executed as root must
-have its provenance/digest recorded before first run. `scp` / `sftp` / `rsync`
-to an allowlisted host fall under the same scope; to any other host they are
-DENIED.
-
 **System info (read-only):** `uname`, `lsb_release`, `hostnamectl`, `timedatectl`, `localectl`, `df`, `du`, `lsblk`, `mount`, `findmnt`, `free`, `lscpu`, `lsmem`, `lspci`, `lsusb`, `dmidecode`, `uptime`, `who`, `w`, `id`, `groups`, `getent`, `env`, `printenv`, `ulimit`
 
 - If the command IS in the whitelist: allow progression to L5.
@@ -124,10 +104,14 @@ DENIED.
 
 ### L5 — Audit Trail
 
-- Every approved command gets an audit log entry. Generate the JSON line:
-  `{"ts":"<ISO8601>","agent":"<caller>","cmd":"<full command>","exit":null,"root":<bool>,"sandbox":"opencode","dry":<bool>}`
-- Return this JSON in your response so the main agent can forward it to
-  the AuditLoggerAgent.
+- Every `bash` command — dry or live, root or user, approved or failed — is
+  logged **automatically** by the `audit-hook` plugin on `tool.execute.after`
+  as a redacted NDJSON line (command, exit code, timestamp, escalation flag)
+  appended to `.opencode/logs/audit.log`. This is deterministic plugin
+  behaviour: no agent writes, forwards, or formats an audit entry by hand.
+- Your job under L5 is only to confirm the command will run through the
+  normal tool pipeline (so the hook captures it). DENY any proposal to
+  execute a command outside the tool pipeline.
 
 ### L6 — No Persistent Sudo
 
@@ -136,9 +120,6 @@ DENIED.
   sudoers `NOPASSWD` pattern.
 - DENY any proposal that chains multiple escalated commands (each must
   be a separate invocation with its own graphical prompt).
-- For remote work, each SSH invocation must be a single command/purpose; DENY
-  `ssh host 'a && b && c'` chains that bundle multiple privileged remote
-  operations into one session.
 
 ### L7 — Sandboxing
 
@@ -148,8 +129,6 @@ DENIED.
 - If the command must run on the host (package installs do), ensure the main
   agent will invoke it directly (not via sandbox-runner) but with the
   escalation wrapper.
-- For allowlisted remote hosts reached over SSH (see L4), the remote machine is
-  the execution environment; apply the same hardening expectations there.
 
 ---
 
@@ -164,7 +143,6 @@ LOCK_FAILED: <L# — Reason, or N/A>
 ESCALATION: <pkexec | kdialog+sudo -S | zenity+sudo -S | sudo -A | none>
 DRY_RUN_CMD: <command for dry-run preview, or N/A>
 LIVE_CMD: <full command with escalation wrapper, or N/A>
-AUDIT: <JSON log line>
 NOTES: <any additional context>
 ```
 
@@ -184,7 +162,6 @@ LOCK_FAILED: N/A
 ESCALATION: pkexec
 DRY_RUN_CMD: apt remove --dry-run firefox
 LIVE_CMD: pkexec apt remove --purge -y firefox
-AUDIT: {"ts":"2026-06-10T12:00:00Z","agent":"sysop","cmd":"apt remove --dry-run firefox","exit":null,"root":false,"sandbox":"opencode","dry":true}
 NOTES: Destructive (purge). Requires user confirmation for live execution.
 ```
 
@@ -197,8 +174,7 @@ LOCK_FAILED: N/A
 ESCALATION: pkexec
 DRY_RUN_CMD: N/A
 LIVE_CMD: pkexec apt remove --purge -y firefox
-AUDIT: {"ts":"2026-06-10T12:00:30Z","agent":"sysop","cmd":"apt remove --purge -y firefox","exit":null,"root":true,"sandbox":"opencode","dry":false}
-NOTES: User confirmed. Ready for live execution.
+NOTES: User confirmed. Ready for live execution. audit-hook will append the entry to .opencode/logs/audit.log when the command runs.
 ```
 
 **Input:** `sudo rm -rf /etc/nginx/nginx.conf`
@@ -209,7 +185,6 @@ LOCK_FAILED: L2 — Destructive (rm -rf on /etc). User confirmation required. Ad
 ESCALATION: none
 DRY_RUN_CMD: echo "[DRY-RUN] rm -rf /etc/nginx/nginx.conf"
 LIVE_CMD: N/A
-AUDIT: N/A
 NOTES: Both L2 and L3 failed. Use echo for dry-run preview. User must explicitly confirm.
 ```
 
@@ -222,6 +197,5 @@ LOCK_FAILED: L6 — Persistent sudo shell (sudo -i) is forbidden. Each command m
 ESCALATION: none
 DRY_RUN_CMD: N/A
 LIVE_CMD: N/A
-AUDIT: N/A
 NOTES: Re-design the workflow to use per-command escalation.
 ```

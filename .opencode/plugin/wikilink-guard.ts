@@ -39,11 +39,12 @@ type Snapshot = { path: string; content: string | null; at: number }
 export default (async ({ directory }) => {
   const resolved = await readResolvedPaths(directory ?? process.cwd(), homedir())
   const vaultRoot = resolved.vaultDir
-  const sysopDir = resolved.sysopDir
+  const stateDir = resolved.stateDir
+  const logDir = resolved.logDir
   const policy = await readVaultPolicy(directory ?? process.cwd())
   const readonlyDirs = parseReadonlyDirs(policy.readonly)
-  const STATE_FILE = join(sysopDir, "wikilink-guard.json")
-  const diag = createDiagnostics({ sysopDir, home: homedir(), channel: "wikilink-guard" })
+  const STATE_FILE = join(stateDir, "wikilink-guard.json")
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "wikilink-guard" })
   const notified = new Set<string>()
 
   const snapshots = new Map<string, Snapshot>()

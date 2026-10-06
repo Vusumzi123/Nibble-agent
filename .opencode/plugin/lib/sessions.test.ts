@@ -40,17 +40,17 @@ test("textOf joins real text parts and drops synthetic/ignored/non-text", () => 
 })
 
 test("meta caches the lookup and reports child/parent/agent", async () => {
-  const m = mockClient({ s1: { parentID: "p1", agent: "kael" } })
+  const m = mockClient({ s1: { parentID: "p1", agent: "agent" } })
   const tools = createSessionTools(m.client as any, "/d")
-  assert.deepEqual(await tools.meta("s1"), { child: true, parentID: "p1", agent: "kael" })
-  assert.deepEqual(await tools.meta("s1"), { child: true, parentID: "p1", agent: "kael" })
+  assert.deepEqual(await tools.meta("s1"), { child: true, parentID: "p1", agent: "agent" })
+  assert.deepEqual(await tools.meta("s1"), { child: true, parentID: "p1", agent: "agent" })
   assert.equal(m.getCalls.length, 1)
 })
 
 test("meta defaults to a top-level session when the parentID is absent", async () => {
-  const m = mockClient({ s1: { agent: "kael" } })
+  const m = mockClient({ s1: { agent: "agent" } })
   const tools = createSessionTools(m.client as any, "/d")
-  assert.deepEqual(await tools.meta("s1"), { child: false, parentID: null, agent: "kael" })
+  assert.deepEqual(await tools.meta("s1"), { child: false, parentID: null, agent: "agent" })
 })
 
 test("meta reports lookup failures and caches the fallback", async () => {
