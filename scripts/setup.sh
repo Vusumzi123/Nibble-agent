@@ -2,10 +2,12 @@
 # Nibble setup — install dependencies, connect a model, and generate the
 # local-only layer from the tracked templates.
 #   0. preflight  — Arch Linux only; must not run as root
-#   1. deps       — opencode, nodejs+npm (markdown-vault MCP + tests), gettext
+#   1. deps       — opencode, nodejs+npm (markdown-vault MCP + tests), gettext,
+#                   python3 (openjev decision provider, stdlib-only)
 #   2. LLM        — connect a provider (`opencode providers login`)
 #   3. config     — .opencode/sysop-config.yaml + model selection
 #   4. skip       — disable LLM-dependent features when no provider connected
+#   4b. models     — optional subagent model pins (.opencode/agents/*.md)
 #   5. profiles   — Brain/Agent.md + Brain/User.md interactive Q&A
 #   6. SETUP.md   — platform detection (rendered from SETUP.example.md)
 #   7. summary
@@ -88,6 +90,7 @@ install_pkg opencode opencode
 install_pkg nodejs node
 install_pkg npm npx
 install_pkg gettext envsubst
+install_pkg python3 python3
 
 if ! have node; then
   echo "setup: node is required after the dependency step." >&2
@@ -168,15 +171,60 @@ fs.writeFileSync(f, s.replace(re,"  writer_model: "+m+"\n"));
 ' "$CONFIG" "$1"
 }
 
-apply_decisions_openjev() { # apply_decisions_openjev provider/model
+apply_decisions_model() { # provider/model
+  # openjev now links to opencode: `model` is an opencode spec and the endpoint
+  # + credential are resolved from opencode at runtime, so backend/base_url/
+  # api_key_file stay commented as advanced overrides. Never writes a secret.
   node -e '
-const fs=require("fs"),f=process.argv[1],m=process.argv[2];
+const fs=require("fs"),f=process.argv[1],model=process.argv[2];
 let s=fs.readFileSync(f,"utf8");
-s=s.replace(/^(\s*provider:\s*)rules\b.*$/m,(m0,p1)=>p1+"openjev");
-s=s.replace(/^  # model: .*$/m,()=>"  model: "+m);
+s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"openjev");
+const setKey=(key,val)=>{ const re=new RegExp("^(\\s*)(#\\s*)?"+key+":.*$","m");
+  if(re.test(s)) s=s.replace(re,(m0,ind)=>ind+key+": "+val);
+  else s=s.replace(/^(\s*)provider:\s*openjev\s*$/m,(m0,ind)=>m0+"\n"+ind+key+": "+val);
+};
+setKey("model",model);
 fs.writeFileSync(f,s);
 if(!/\n  provider: openjev/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
 ' "$CONFIG" "$1"
+}
+
+apply_decisions_rules() { # force the deterministic provider
+  node -e '
+const fs=require("fs"),f=process.argv[1];
+let s=fs.readFileSync(f,"utf8");
+s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"rules");
+fs.writeFileSync(f,s);
+if(!/\n  provider: rules/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
+' "$CONFIG"
+}
+
+configure_decision_gate() { # interactive: pick rules vs openjev (opencode model)
+  echo "  decision gate provider:" >&2
+  echo "    1) rules — deterministic, no model (default)" >&2
+  echo "    2) openjev — use a model already connected in opencode" >&2
+  local D BM
+  D="$(ask 'Choose' 1)"
+  if [ "$D" != 2 ]; then
+    if [ "$DRY" -eq 1 ]; then
+      echo "  [dry-run] decisions: provider=rules"
+    else
+      apply_decisions_rules
+      echo "  decisions = rules"
+    fi
+    return 0
+  fi
+  BM="$(pick_model 'Decision model (from opencode)')"
+  if [ -z "$BM" ]; then
+    echo "  no model chosen — decision provider left unchanged"
+    return 0
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    echo "  [dry-run] decisions: provider=openjev model=$BM"
+  else
+    apply_decisions_model "$BM"
+    echo "  decisions = openjev ($BM)"
+  fi
 }
 
 set_block_key() { # set_block_key <file> <block> <key> <value>
@@ -196,6 +244,33 @@ for(let i=bi+1;i<end;i++){ const mm=lines[i].match(kRe); if(mm){ lines[i]=mm[1]+
 if(!found){ lines.splice(end,0,"  "+key+": "+val); }
 fs.writeFileSync(f,lines.join("\n"));
 ' "$1" "$2" "$3" "$4"
+}
+
+agents_have_model() { # 0 if any agent already carries a `model:` frontmatter pin
+  grep -lqE '^model:' .opencode/agents/*.md 2>/dev/null
+}
+
+pin_agents_model() { # pin_agents_model provider/model  (injects into agent frontmatter)
+  node -e '
+const fs=require("fs"),path=require("path");
+const dir=".opencode/agents", model=process.argv[1];
+for(const f of fs.readdirSync(dir).filter(x=>x.endsWith(".md"))){
+  const p=path.join(dir,f);
+  let s=fs.readFileSync(p,"utf8");
+  if(!s.startsWith("---\n")) continue;
+  const end=s.indexOf("\n---",4);
+  if(end<0) continue;
+  let fm=s.slice(4,end), body=s.slice(end);
+  if(/^model:\s/m.test(fm)){
+    fm=fm.replace(/^model:\s.*$/m,"model: "+model);
+  } else if(/^description:/m.test(fm)){
+    fm=fm.replace(/^(description:.*)$/m,"$1\nmodel: "+model);
+  } else {
+    fm="model: "+model+"\n"+fm;
+  }
+  fs.writeFileSync(p,"---\n"+fm+body);
+}
+' "$1"
 }
 
 # ---------------------------------------------------------------- 3. config
@@ -240,23 +315,7 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
       fi
     fi
 
-    echo "  decision gate provider:" >&2
-    echo "    1) rules — deterministic, no model (default)" >&2
-    echo "    2) openjev — model-backed (uses your opencode provider)" >&2
-    D="$(ask 'Choose' 1)"
-    if [ "$D" = 2 ]; then
-      DM="$(pick_model 'Decision model')"
-      if [ -n "$DM" ]; then
-        if [ "$DRY" -eq 1 ]; then
-          echo "  [dry-run] decisions: openjev model=$DM"
-        else
-          apply_decisions_openjev "$DM"
-          echo "  decisions = openjev ($DM)"
-        fi
-      else
-        echo "  decision model — left as rules (no model picked)"
-      fi
-    fi
+    configure_decision_gate
   else
     echo "== disabling LLM-dependent features =="
     if [ "$DRY" -eq 1 ]; then
@@ -271,7 +330,40 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
     DISABLED=1
   fi
 else
-  echo "  config already exists — skipping model questions (edit it manually or remove it to re-run)"
+  echo "  config already exists — model questions skipped (edit it manually or remove it to re-run)"
+  if confirm "Configure the openjev decision provider now?" n; then
+    configure_decision_gate
+  fi
+fi
+
+# ------------------------------------------------------- 4. subagent models
+# Only asked on a fresh config, like the other model questions.
+if [ "$FRESH_CONFIG" -eq 1 ] && [ "$LLM_OK" -eq 1 ]; then
+  echo "== subagent models =="
+  if agents_have_model; then
+    echo "  subagent model pins already present (kept)"
+    SKIPPED+=("subagent-models")
+  else
+    echo "  Subagents inherit the session model unless pinned. Set one model for" >&2
+    echo "  all of them to run subagents + plugin children (writer, rag-brain) on" >&2
+    echo "  a cheaper/faster model than the session. Empty = inherit." >&2
+    if confirm "Pin all subagents to one model now?" n; then
+      SM="$(pick_model 'Subagent model')"
+      if [ -n "$SM" ]; then
+        if [ "$DRY" -eq 1 ]; then
+          echo "  [dry-run] set model: $SM in .opencode/agents/*.md"
+        else
+          pin_agents_model "$SM"
+          echo "  pinned all subagents = $SM"
+          CHANGED+=("subagent-models")
+        fi
+      else
+        echo "  no model chosen — subagents inherit the session model"
+      fi
+    else
+      echo "  skipped — subagents inherit the session model"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------- 5. profiles
