@@ -69,6 +69,11 @@ DEFAULTS: dict[str, Any] = {
     "timeout_ms": 30000,
     "fallback": "rules",
     "n_probs": 20,
+    # Output budget for the structured JSON tier (OpenAICompatBackend). Must
+    # cover the reasoning trace + the answer: reasoning models spend their
+    # whole budget on reasoning_content and return an empty `content`, which
+    # aborts the decision (abstain -> rules fallback).
+    "structured_max_tokens": 512,
 }
 
 # Native llama.cpp endpoint used when `backend: llamacpp` (or a base_url override)
@@ -413,11 +418,18 @@ class OpenAICompatBackend:
     supports_logprobs = False
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 timeout_ms: int = 30000, n_probs: int = 20):
+                 timeout_ms: int = 30000, n_probs: int = 20,
+                 structured_max_tokens: int = 512):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
         self.timeout = max(1.0, float(timeout_ms) / 1000.0)
         self.n_probs = n_probs
+        try:
+            self.structured_max_tokens = int(structured_max_tokens)
+        except (TypeError, ValueError):
+            self.structured_max_tokens = 512
+        if self.structured_max_tokens <= 0:
+            self.structured_max_tokens = 512
         self._api_key: str = api_key
 
     def _key(self) -> str:
@@ -443,7 +455,7 @@ class OpenAICompatBackend:
                 {"role": "user", "content": prompt + "\n" + _json_instruction(labels)},
             ],
             "temperature": 0.0,
-            "max_tokens": 64,
+            "max_tokens": self.structured_max_tokens,
             "response_format": {"type": "json_object"},
         }
         try:
@@ -529,6 +541,7 @@ def make_backend(cfg: dict[str, Any]) -> Any:
     return OpenAICompatBackend(
         resolved["base_url"], resolved["api_key"], resolved["model"],
         timeout_ms=cfg.get("timeout_ms", 30000), n_probs=cfg.get("n_probs", 20),
+        structured_max_tokens=cfg.get("structured_max_tokens", 512),
     )
 
 
@@ -1027,6 +1040,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noul-threshold", type=float)
     p.add_argument("--timeout-ms", type=int)
     p.add_argument("--n-probs", type=int)
+    p.add_argument("--structured-max-tokens", type=int,
+                   help="JSON-mode output budget for the structured tier "
+                        "(reasoning models need room for the reasoning trace)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8091)
     mode = p.add_mutually_exclusive_group()
@@ -1046,6 +1062,7 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
         "abstain_threshold": args.abstain_threshold,
         "noul_threshold": args.noul_threshold,
         "timeout_ms": args.timeout_ms, "n_probs": args.n_probs,
+        "structured_max_tokens": args.structured_max_tokens,
     }
     for key, value in mapping.items():
         if value is not None:

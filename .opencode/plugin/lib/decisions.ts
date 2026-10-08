@@ -91,6 +91,7 @@ export type DecisionsConfig = {
   noul_threshold: number
   timeout_ms: number
   n_probs: number
+  structured_max_tokens: number
   fallback: string
   ledger: string
   log_rotate_bytes: number
@@ -119,6 +120,7 @@ export const DEFAULT_DECISIONS: DecisionsConfig = {
   noul_threshold: 0.8,
   timeout_ms: 30000,
   n_probs: 20,
+  structured_max_tokens: 512,
   fallback: "rules",
   ledger: "decisions.log",
   log_rotate_bytes: 1048576,
@@ -135,6 +137,7 @@ const BOOL_KEYS = new Set(["enabled", "log_compress"])
 const INT_KEYS = new Set([
   "timeout_ms",
   "n_probs",
+  "structured_max_tokens",
   "log_rotate_bytes",
   "log_keep_generations",
   "log_retention_days",
@@ -170,6 +173,9 @@ export async function readDecisionsConfig(directory: string): Promise<DecisionsC
   if (typeof cfg.provider !== "string" || !cfg.provider.trim()) cfg.provider = DEFAULT_DECISIONS.provider
   if (typeof cfg.backend !== "string" || !cfg.backend.trim()) cfg.backend = DEFAULT_DECISIONS.backend
   if (!Number.isFinite(cfg.timeout_ms) || cfg.timeout_ms <= 0) cfg.timeout_ms = DEFAULT_DECISIONS.timeout_ms
+  if (!Number.isFinite(cfg.structured_max_tokens) || cfg.structured_max_tokens <= 0) {
+    cfg.structured_max_tokens = DEFAULT_DECISIONS.structured_max_tokens
+  }
   if (!Number.isFinite(cfg.temperature_scaling) || cfg.temperature_scaling <= 0) {
     cfg.temperature_scaling = DEFAULT_DECISIONS.temperature_scaling
   }

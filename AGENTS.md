@@ -171,7 +171,7 @@ missing or outdated, run `./scripts/setup.sh` to (re)generate it.
 | Turn capture + consolidation | `knowledge-hook.ts` | `knowledge:` + `decisions:` + `paths:` |
 | Profile injection + idle updates | `profile-hook.ts` (spawns `profile-writer`) | `profile:` + `decisions:` + `paths:` |
 | Web fetch/search (injection-scanned) | `web-scan-hook.ts` + `safe-browser` agent | `browser:` + `paths:` |
-| Vault read (BM25 over notes) | `markdown-vault` MCP (`npx @wirux/mcp-markdown-vault@2.3.0`) | `VAULT_PATH` in `opencode.json` |
+| Vault read (hybrid BM25 + embeddings + rerank) | `markdown-vault` MCP (pinned fork cloned by `setup.sh` at `MCP_SHA` into `.opencode/mcp/markdown-vault/`, spawned via `node .opencode/mcp/markdown-vault/dist/index.js` from the project root; Ollama embeddings + cross-encoder rerank) | `VAULT_PATH` in `opencode.json` |
 | Recent-turn search | `temporal_search` tool (knowledge-hook) | `knowledge:` |
 | Retrieval decisions | `lib/decision-gate.ts` → `lib/decisions.ts` → `openjev` provider | `decisions:` |
 | Audit trail (every `bash` command) | `audit-hook.ts` + `lib/audit.ts` | `audit:` + `paths:` |

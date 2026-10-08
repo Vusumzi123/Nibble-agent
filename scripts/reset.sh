@@ -7,6 +7,7 @@
 #   3. platform file  — SETUP.md
 #   4. transient      — .opencode/state/, .opencode/logs/
 #   5. caches         — .opencode/scripts/__pycache__/
+#   6. pinned MCP     — .opencode/mcp/ (re-cloned + rebuilt by setup.sh)
 # With --dev, also .opencode/node_modules/ and .temp/ (test/build artifacts).
 # Idempotent: missing paths are skipped.
 #
@@ -21,7 +22,7 @@ for arg in "$@"; do
     --dry-run) DRY=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
     --dev)     INCLUDE_DEV=1 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "reset: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -36,6 +37,7 @@ TARGETS=(
   ".opencode/state"
   ".opencode/logs"
   ".opencode/scripts/__pycache__"
+  ".opencode/mcp"
 )
 if [ "$INCLUDE_DEV" -eq 1 ]; then
   TARGETS+=(".opencode/node_modules" ".temp")

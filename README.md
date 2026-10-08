@@ -14,17 +14,33 @@ autonomy harness phases = roadmap.
 ```bash
 git clone https://github.com/Vusumzi123/Nibble-agent.git && cd Nibble-agent
 ./scripts/setup.sh            # install deps, connect a model, generate your local layer
-opencode                      # open the project — the agent reads SETUP.md
+./scripts/run.sh              # start Ollama (if needed) + opencode; stops Ollama on exit
 ```
 
 `setup.sh` is idempotent — it skips anything already done (files, packages, model choice).
 
+`run.sh` is the recommended entry point: it starts the Ollama embedding server on
+demand, waits for it, launches `opencode`, and stops Ollama again when opencode
+exits — **only if the script started it** (a pre-existing server is left alone).
+Run plain `opencode` instead if you don't want Ollama (the MCP then falls back to
+local transformer embeddings).
+
 ## Requirements
 
 - [opencode](https://opencode.ai) with at least one model connected.
-- `node`/`npx` — the RAG MCP is spawned on demand as
-  `npx -y @wirux/mcp-markdown-vault@2.3.0` (pinned; fetched at first launch and
-  cached, no `npm install` needed). The pin is bumped by hand in `opencode.json`.
+- `git` + `node` — the RAG MCP runs from a pinned fork that `setup.sh` clones
+  over **https** into `.opencode/mcp/markdown-vault/` at `MCP_SHA` and installs
+  with `npm ci` (the fork's `prepare` hook compiles `dist/`). `opencode.json`
+  spawns `node .opencode/mcp/markdown-vault/dist/index.js` relative to the
+  project root — no `npx` at launch, so startup is sub-second and immune to
+  npm cache-lock stalls, and no SSH key is needed. The whole directory is
+  gitignored/regenerated; the pin is `MCP_SHA` at the top of the
+  `markdown-vault MCP` block in `scripts/setup.sh` — bump it and re-run
+  `./scripts/setup.sh`.
+- [Ollama](https://ollama.com) with the `qwen3-embedding:0.6b` model pulled —
+  required for the embedding path; `run.sh` starts the server and fails with a
+  `ollama pull …` hint if the model is missing. The cross-encoder reranker
+  (`ms-marco-MiniLM-L-6-v2`) downloads itself from Hugging Face on first use.
 - Linux/macOS (Windows via WSL). `python3` + an API key only for the optional
   `openjev` decision provider.
 
@@ -37,6 +53,7 @@ opencode                      # open the project — the agent reads SETUP.md
 | `SETUP.example.md`, `scripts/setup.sh` | `SETUP.md` — your machine's profile (generated) |
 | | `.opencode/state/` — memory buffer, tag index, hook state |
 | | `.opencode/logs/` — audit trail + every structured hook log |
+| | `.opencode/mcp/` — pinned MCP fork cloned + built by `setup.sh` |
 
 Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 

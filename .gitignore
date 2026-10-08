@@ -29,6 +29,11 @@ __pycache__/
 .temp/
 .vscode/
 
+# Pinned markdown-vault MCP — cloned at a pinned SHA and built by setup.sh
+# (source, deps and dist/ are all regenerated, never vendored). The pin itself
+# lives in scripts/setup.sh (MCP_SHA).
+.opencode/mcp/
+
 # Editor / OS junk
 *.kate-swp
 .scrt*

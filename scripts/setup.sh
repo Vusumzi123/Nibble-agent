@@ -97,6 +97,71 @@ if ! have node; then
   exit 1
 fi
 
+# ------------------------------------------------------- 1b. markdown-vault MCP
+# The RAG MCP is a pinned fork: setup clones it over https at $MCP_SHA into
+# $MCP_DIR (gitignored) and runs `npm ci`, which builds dist/ through the
+# fork's `prepare` hook (tsc). opencode spawns `node $MCP_BIN` through a
+# project-relative path — no npx at launch, no absolute paths, no SSH key.
+# Bump the pin by changing MCP_SHA below and re-running this script.
+echo "== markdown-vault MCP =="
+MCP_DIR=".opencode/mcp/markdown-vault"
+MCP_BIN="$MCP_DIR/dist/index.js"
+MCP_REPO="https://github.com/Vusumzi123/mcp-markdown-vault.git"
+MCP_SHA="c3420632dab84801a94372c0edf4eadb8fd379e2"
+
+mcp_head() { git -C "$MCP_DIR" rev-parse HEAD 2>/dev/null || true; }
+mcp_ready() {
+  [ -f "$MCP_BIN" ] && [ -d "$MCP_DIR/node_modules" ] && [ "$(mcp_head)" = "$MCP_SHA" ]
+}
+mcp_short() { printf '%s' "$MCP_SHA" | cut -c1-12; }
+
+if ! have git; then
+  echo "  git is required to clone the pinned MCP fork ($MCP_REPO)" >&2
+  exit 1
+fi
+
+if mcp_ready; then
+  echo "  installed at $(mcp_head | cut -c1-12) (ok)"
+  SKIPPED+=("mcp:markdown-vault")
+elif [ "$DRY" -eq 1 ]; then
+  echo "  [dry-run] git clone $MCP_REPO -> $MCP_DIR @ $(mcp_short)"
+  echo "  [dry-run] (cd $MCP_DIR && SHARP_IGNORE_GLOBAL_LIBVIPS=true npm ci)"
+else
+  # A legacy layout (wrapper package.json installed by npm, no .git) cannot be
+  # reused — move it aside; that directory is fully regenerable.
+  if [ -d "$MCP_DIR" ] && [ ! -d "$MCP_DIR/.git" ]; then
+    backup="$MCP_DIR.legacy-$(date +%Y%m%d%H%M%S)"
+    echo "  moving legacy npm-install layout aside -> $backup"
+    mv "$MCP_DIR" "$backup"
+  fi
+  if [ ! -d "$MCP_DIR/.git" ]; then
+    echo "  cloning pinned fork ($MCP_REPO) ..."
+    rm -rf "$MCP_DIR.tmp"
+    git clone --filter=blob:none --no-checkout "$MCP_REPO" "$MCP_DIR.tmp"
+    rm -rf "$MCP_DIR"
+    mv "$MCP_DIR.tmp" "$MCP_DIR"
+  fi
+  if [ "$(mcp_head)" != "$MCP_SHA" ]; then
+    echo "  checking out pin $(mcp_short) ..."
+    git -C "$MCP_DIR" cat-file -e "$MCP_SHA^{commit}" 2>/dev/null \
+      || git -C "$MCP_DIR" fetch -q origin
+    git -C "$MCP_DIR" checkout -q --detach "$MCP_SHA"
+  fi
+  # Reinstall when deps are missing, or when the pin moved (a checkout refreshes
+  # package-lock.json, making it newer than the installed lock).
+  if [ ! -d "$MCP_DIR/node_modules" ] \
+     || [ ! -f "$MCP_DIR/node_modules/.package-lock.json" ] \
+     || [ "$MCP_DIR/package-lock.json" -nt "$MCP_DIR/node_modules/.package-lock.json" ]; then
+    echo "  installing deps + building dist (npm ci) ..."
+    (cd "$MCP_DIR" && SHARP_IGNORE_GLOBAL_LIBVIPS=true npm ci --no-audit --no-fund)
+    CHANGED+=("mcp:markdown-vault")
+  else
+    SKIPPED+=("mcp:markdown-vault")
+  fi
+  [ -f "$MCP_BIN" ] || { echo "setup: markdown-vault MCP build failed ($MCP_BIN missing)." >&2; exit 1; }
+  echo "  installed at $(mcp_head | cut -c1-12) -> $MCP_BIN"
+fi
+
 # ---------------------------------------------------------------- 2. LLM
 echo "== LLM provider =="
 count_creds() {

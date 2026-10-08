@@ -142,6 +142,9 @@ decisions:
   noul_threshold: 0.80         # gates skip only when model p >= this
   timeout_ms: 30000            # per-call subprocess timeout
   n_probs: 20                  # candidate token depth (unused by the structured tier)
+  structured_max_tokens: 512   # JSON-mode output budget for openjev — must cover
+                               # the reasoning trace + the answer; a smaller cap
+                               # starves reasoning models (empty content -> abstain)
   fallback: rules              # on error/abstain/timeout -> deterministic rules
   # Shadow ledger — one NDJSON line per decision. `ledger` is a LEAF
   # under <log>. Written through the shared logging engine (see the header).

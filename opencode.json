@@ -23,16 +23,30 @@
   "mcp": {
     "markdown-vault": {
       "type": "local",
-      "command": ["npx", "-y", "@wirux/mcp-markdown-vault@2.3.0"],
+      "command": ["node", ".opencode/mcp/markdown-vault/dist/index.js"],
       "enabled": true,
       "environment": {
         "VAULT_PATH": "Brain",
-        "VAULT_CONTEXT_MODE": "assisted"
+        "VAULT_CONTEXT_MODE": "assisted",
+        "SHARP_IGNORE_GLOBAL_LIBVIPS": "true",
+        "OLLAMA_URL": "http://127.0.0.1:11434",
+        "OLLAMA_MODEL": "qwen3-embedding:0.6b",
+        "OLLAMA_DIMENSIONS": "1024",
+        "QUERY_INSTRUCTION_PREFIX": "",
+        "RERANK_ENABLED": "true",
+        "RERANK_MODEL": "Xenova/ms-marco-MiniLM-L-6-v2",
+        "RERANK_CANDIDATES": "10",
+        "INDEX_EXCLUDE_PREFIXES": "meta/",
+        "CHUNK_MAX_TOKENS": "512",
+        "CHUNK_OVERLAP_TOKENS": "64"
       }
     }
   },
   "tools": {
     "markdown-vault_*": false
+  },
+  "experimental": {
+    "mcp_timeout": 60000
   },
   "agent": {
     "security-locks": {
