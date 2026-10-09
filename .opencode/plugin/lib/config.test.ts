@@ -7,7 +7,12 @@ import {
   DEFAULT_KEY_RE,
   HYPHEN_KEY_RE,
   extractBlock,
+  isDuration,
+  overlayNestedSection,
   parseFlatBlock,
+  parseInlineList,
+  parseNestedSection,
+  readNestedSection,
   readSection,
   schemaFromDefaults,
   sectionCoercer,
@@ -159,4 +164,135 @@ test("readSection overlays defaults, ignores unknown keys, never throws", async 
 test("DEFAULT_KEY_RE rejects hyphen keys that HYPHEN_KEY_RE accepts", () => {
   assert.equal(DEFAULT_KEY_RE.test("  x-y: 1"), false)
   assert.equal(HYPHEN_KEY_RE.test("  x-y: 1"), true)
+})
+
+// ---------------------------------------------------------------------------
+// Nested sections (autonomy harness — card 1)
+
+test("extractBlock tolerates a trailing comment on the section line", () => {
+  const yaml = ["mood:   # harness dials", "  dispatch_influence: true", ""].join("\n")
+  assert.equal(extractBlock(yaml, "mood"), "  dispatch_influence: true\n")
+  // A similar-prefixed section still must not match.
+  assert.equal(extractBlock("mood_x:\n  a: 1\n", "mood"), "")
+})
+
+test("parseInlineList parses bracketed lists and rejects non-lists", () => {
+  assert.deepEqual(parseInlineList("[drain, dream]"), ["drain", "dream"])
+  assert.deepEqual(parseInlineList("[ a , 'b' , \"c\" ]"), ["a", "b", "c"])
+  assert.deepEqual(parseInlineList("[]"), [])
+  assert.equal(parseInlineList("drain"), undefined)
+  assert.equal(parseInlineList("[unclosed"), undefined)
+})
+
+test("isDuration accepts whole hours/minutes only", () => {
+  assert.equal(isDuration("12h"), true)
+  assert.equal(isDuration("30m"), true)
+  assert.equal(isDuration("1.5h"), false)
+  assert.equal(isDuration("off"), false)
+})
+
+test("parseNestedSection splits scalars from one-level sub-blocks", () => {
+  const yaml = [
+    "autonomy:",
+    "  level: 2              # cap dial",
+    "  root_classes: []",
+    "  heartbeat:",
+    "    frequency: 12h",
+    "    in_progress_lock: false  # comment",
+    "  quiet:",
+    '    window: "23:00-08:00"',
+    "    dream_missions: [drain, dream]",
+    "",
+  ].join("\n")
+  const got = parseNestedSection(yaml, "autonomy", {
+    scalarKeys: new Set(["level", "root_classes"]),
+    blockKeys: { heartbeat: new Set(["frequency", "in_progress_lock"]), quiet: new Set(["window", "dream_missions"]) },
+    listKeys: new Set(["root_classes"]),
+    blockListKeys: new Set(["quiet.dream_missions"]),
+    coerce: (path, raw) => ({ ok: true, value: `${path}=${raw}` }),
+  })
+  assert.deepEqual(got.scalars, { level: "level=2", root_classes: "root_classes=[]" })
+  assert.deepEqual(got.blocks, {
+    heartbeat: { frequency: "heartbeat.frequency=12h", in_progress_lock: "heartbeat.in_progress_lock=false" },
+    quiet: { window: 'quiet.window="23:00-08:00"', dream_missions: "quiet.dream_missions=[drain, dream]" },
+  })
+  assert.deepEqual(got.rejects, [])
+})
+
+test("parseNestedSection reads block-form lists and flushes them through coerce", () => {
+  const yaml = [
+    "autonomy:",
+    "  root_classes:",
+    "    - pacman -Syu",
+    "    - systemctl restart foo",
+    "",
+  ].join("\n")
+  const got = parseNestedSection(yaml, "autonomy", {
+    scalarKeys: new Set(["root_classes"]),
+    listKeys: new Set(["root_classes"]),
+    coerce: (path, raw) => ({ ok: true, value: `${path}=${raw}` }),
+  })
+  assert.deepEqual(got.scalars, {
+    root_classes: "root_classes=[pacman -Syu, systemctl restart foo]",
+  })
+  assert.deepEqual(got.rejects, [])
+})
+
+test("parseNestedSection reports unknown keys and coercion failures as rejects", () => {
+  const yaml = [
+    "autonomy:",
+    "  level: 7",
+    "  typo_key: hello",
+    "  empty_scalar:",
+    "  quiet:",
+    "    window: bogus",
+    "    nope: 1",
+    "",
+  ].join("\n")
+  const got = parseNestedSection(yaml, "autonomy", {
+    scalarKeys: new Set(["level", "empty_scalar"]),
+    blockKeys: { quiet: new Set(["window"]) },
+    coerce: (path, raw) =>
+      path === "level"
+        ? /^\d+$/.test(raw)
+          ? { ok: true, value: parseInt(raw, 10) }
+          : { ok: false, reason: "int" }
+        : path === "quiet.window"
+          ? raw === "bogus"
+            ? { ok: false, reason: "bad window" }
+            : { ok: true, value: raw }
+          : { ok: true, value: raw },
+  })
+  assert.deepEqual(got.scalars, { level: 7 })
+  assert.deepEqual(got.rejects.map((r) => r.path), ["typo_key", "empty_scalar", "quiet.window", "quiet.nope"])
+})
+
+test("overlayNestedSection keeps defaults for rejected and absent keys", () => {
+  const defaults = {
+    scalars: { level: 1, budget: 32000 },
+    blocks: { quiet: { window: "23:00-08:00", backoff: true } },
+  }
+  const parsed = {
+    scalars: { level: 3 },
+    blocks: { quiet: { backoff: false } },
+    rejects: [{ path: "quiet.window", raw: "bogus", reason: "bad" }],
+  }
+  const got = overlayNestedSection(defaults, parsed)
+  assert.deepEqual(got.scalars, { level: 3, budget: 32000 })
+  assert.deepEqual(got.blocks, { quiet: { window: "23:00-08:00", backoff: false } })
+  assert.equal(got.rejects.length, 1)
+  // Defaults are not mutated.
+  assert.equal((defaults.scalars as { level: number }).level, 1)
+})
+
+test("readNestedSection falls back to defaults for a missing config dir", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cfg-"))
+  const defaults = { scalars: { a: 1 }, blocks: { b: { c: true } } }
+  const got = await readNestedSection(join(dir, "nope"), "autonomy", defaults, {
+    scalarKeys: new Set(["a"]),
+    blockKeys: { b: new Set(["c"]) },
+  })
+  assert.deepEqual(got.scalars, { a: 1 })
+  assert.deepEqual(got.blocks, { b: { c: true } })
+  assert.deepEqual(got.rejects, [])
 })

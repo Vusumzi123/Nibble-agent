@@ -13,6 +13,7 @@
 # telemetry-hook / lib/telemetry.ts (telemetry: + paths:); web-scan-hook also
 # reads telemetry: for its inner-fetch usage record,
 # web-scan-hook / lib/browser.ts (browser: + paths:),
+# lib/autonomy.ts (autonomy: + mood: + comms: + dashboard: + paths:),
 # scoped-permissions.ts (paths:), vault-readonly-guard.ts + wikilink-guard.ts
 # (vault: + paths:). Other sections are ignored by each reader.
 #
@@ -289,3 +290,56 @@ telemetry:
   compress_after: 1
   compress_level: 6
   rotate_by: size
+
+# ---------------------------------------------------------------------------
+# Autonomy harness (docs/autonomy-harness-plan.md §11) — config plumbing only
+# (kanban card 1). No reader consumes these blocks yet: autonomy-gate.ts
+# (card 2), lib/mood.ts (card 5), the dashboard backend (cards 8/11), and the
+# comms bridges (card 10) land later. Every value is hot-read per call —
+# flipping one takes effect immediately, no restart. An invalid value falls
+# back to its code default and warns once per process in
+# <log>/autonomy-config.log (NDJSON).
+autonomy:
+  level: 2                     # 0..4 capability dial (§4.1); code default 1
+  heartbeat:
+    frequency: 12h             # off | <n>m | <n>h — manual only (§4.2)
+    in_progress_lock: true
+  mission_token_budget: 32000  # K-tokens per mission turn, or `unlimited` (§6.4)
+  root_classes: []             # L4 root allowlist; irreversibility floor applies first
+  chatter:                     # idle chatter mission (§16) — off until card 7b
+    enabled: false
+    max_pokes: 3
+    daily_budget: 2            # conversation openers per day
+    cooldown: 12h              # between conversations
+    reply_window: 24h          # await window before JEV poke/close triage
+  quiet:                       # quiet-hours dream system (§17.9) — nested, NOT top-level
+    window: "23:00-08:00"      # isQuietNow() predicate source
+    dream_cadence: 30m
+    resume_cooldown: 60m       # woken -> dreaming after this much silence
+    dream_chance: 0.5          # pre-JEV roll for the dream candidate
+    dream_token_budget: 8000   # hard per-tick cap (K tokens)
+    nightly_dream_cap: 3
+    backoff: true              # 30->60->120m on consecutive no-ops
+    dream_missions: [drain, dream]   # strict night whitelist (§17.4)
+
+mood:                          # feeling system (§15) — card 5 reads this
+  dispatch_influence: true     # bounded + ledger-journaled; false = expression only
+  decay_half_life: 6h
+
+comms:                         # notification/approval channels (§7) — card 10 reads this
+  default_channel: telegram    # telegram | email
+  session_ttl: 24h             # lazy chat-session expiry (D15)
+  telegram:
+    enabled: false             # M5 not ported yet; card 10 turns this on
+    bot_token_file: ""         # chmod-600 credential file; never inline the secret
+    chat_id_file: ""
+  email:
+    enabled: false             # M5 not ported yet; card 10 turns this on
+    account: your-account      # himalaya account name
+    reply_window_hours: 48
+
+dashboard:                     # local web UI (§9) — cards 8/11 read this
+  bind_address: 127.0.0.1      # loopback only
+  auth:
+    mode: off                  # off | login | login+2fa (§10)
+    require_tls: false

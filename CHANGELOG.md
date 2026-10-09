@@ -8,6 +8,27 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Autonomy-harness config plumbing (kanban card 1, plan §11)** — four new
+  `sysop-config.yaml` sections: `autonomy:` (level dial 0–4 + `heartbeat` /
+  `chatter` / `quiet` sub-blocks), `mood:`, `comms:`, and `dashboard:`.
+  Readers live in the new `lib/autonomy.ts` (`readAutonomyConfig`,
+  `readMoodConfig`, `readCommsConfig`, `readDashboardConfig`): hot-read per
+  call — flipping a value needs no restart — and never throw. Schema
+  validation falls back to code defaults on invalid values (level 1 by
+  default; the live config ships 2) and warns once per process in
+  `<log>/autonomy-config.log` (NDJSON, shared logging engine). Nothing
+  consumes the blocks yet — the gate (card 2), mood (card 5), dashboard
+  (cards 8/11), and comms bridges (card 10) are the future readers.
+- `lib/config.ts` nested-section support for the harness blocks:
+  `parseNestedSection` / `overlayNestedSection` / `readNestedSection` handle
+  flat scalars plus one level of sub-blocks, inline (`[a, b]`) and block-form
+  lists, and return coercion failures as `rejects` (the flat parser keeps
+  silently dropping). `parseInlineList` + `isDuration` helpers. `extractBlock`
+  now tolerates a trailing comment on the section line itself
+  (`mood:   # …`), which previously made the whole section unparseable.
+- Tests: `lib/autonomy.test.ts` (8 cases — full §11 shape, per-section
+  rejects, live-config overlay, warning-log dedupe, hot-read) plus 8
+  nested-parser cases in `lib/config.test.ts`. Suite: 329/329.
 - `scripts/run.sh` — recommended entry point: starts the Ollama embedding
   server if it is not already up, waits for readiness, verifies the
   `OLLAMA_MODEL` is pulled, runs `opencode "$@"`, and stops Ollama **only if

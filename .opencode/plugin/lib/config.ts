@@ -1,13 +1,18 @@
-// Shared flat-YAML section loader for sysop-config.yaml.
+// Shared YAML section loader for sysop-config.yaml.
 //
-// The nine per-section parsers (paths, audit, telegram, mail, browser,
-// decisions, retrieval, profile, knowledge) all repeated the same shape: a regex to slice
+// The per-section parsers (paths, audit, decisions, retrieval, browser,
+// profile, knowledge, telemetry) all repeated the same shape: a regex to slice
 // the indented block, a `key: raw` line scan, comment stripping, then a
 // type-specific coercion. This module owns the block extraction + line scan +
 // overlay; each section keeps its own Config type, DEFAULT_*, key sets, and
 // leaf resolution, passing a `coerce` callback built from the coercion modes
 // below so subtle per-section quirks (signed vs unsigned ints, quote handling,
 // value-inferred scalars) are preserved byte-for-byte.
+//
+// The bottom half adds `parseNestedSection` / `readNestedSection` for the
+// autonomy-harness sections (autonomy:, mood:, comms:, dashboard:) — flat
+// scalars plus one level of sub-blocks, inline/block lists, and reject
+// reporting so invalid values can warn before falling back to defaults.
 //
 // Loaded via relative import only. The plugin auto-discovery glob
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
@@ -29,9 +34,10 @@ function escapeRe(s: string): string {
 
 // Slice the indented body of `section:` out of the YAML text. The body is the
 // run of lines that begin with a space/tab immediately after `section:`, which
-// is how every section in this config is written (flat scalars only).
+// is how every section in this config is written (flat scalars only). A
+// trailing comment on the section line itself (`mood:   # …`) is tolerated.
 export function extractBlock(yamlText: string, section: string): string {
-  const re = new RegExp(`^${escapeRe(section)}:\\s*\\n((?:[ \\t].*\\n?)*)`, "m")
+  const re = new RegExp(`^${escapeRe(section)}:[ \\t]*(?:#[^\\n]*)?\\n((?:[ \\t].*\\n?)*)`, "m")
   return yamlText.match(re)?.[1] ?? ""
 }
 
@@ -190,6 +196,248 @@ export function parseFlatBlock(
     if (value !== undefined) out[key] = value
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Nested-section parsing (autonomy harness config — plan §11)
+//
+// The harness sections (`autonomy:`, `mood:`, `comms:`, `dashboard:`) mix flat
+// scalars with one level of sub-blocks (`autonomy.quiet.window`), inline lists
+// (`root_classes: []`, `dream_missions: [drain, dream]`), and int-or-string
+// unions (`mission_token_budget: 32000 | unlimited`) — shapes `parseFlatBlock`
+// cannot represent. Same conventions as the flat parser (comment stripping,
+// known-keys filtering, never throws) but a coercion failure is RETURNED as a
+// reject instead of silently dropped, so the caller can log a warning before
+// falling back to the default.
+
+export type NestedReject = {
+  /** Dotted path within the section, e.g. `quiet.window`. */
+  path: string
+  /** The offending raw text (after comment stripping). */
+  raw: string
+  reason: string
+}
+
+export type NestedParse = {
+  scalars: Record<string, unknown>
+  blocks: Record<string, Record<string, unknown>>
+  rejects: NestedReject[]
+}
+
+export type NestedDefaults = {
+  scalars: Record<string, unknown>
+  blocks: Record<string, Record<string, unknown>>
+}
+
+// Result of coercing one raw value. `undefined` drops the key silently
+// (matching the flat parser's `continue`); `{ ok: false }` records a reject.
+export type CoerceResult = { ok: true; value: unknown } | { ok: false; reason: string }
+
+export type NestedCoerce = (path: string, raw: string) => CoerceResult | undefined
+
+export type NestedSectionOptions = {
+  /** Known top-level scalar keys. */
+  scalarKeys?: Set<string>
+  /** Known top-level sub-block names → their known keys. */
+  blockKeys?: Record<string, Set<string>>
+  /** Scalar keys whose value is a YAML list (inline `[a, b]` or block `- a`). */
+  listKeys?: Set<string>
+  /** `<block>.<key>` entries whose value is a YAML list. */
+  blockListKeys?: Set<string>
+  /** Per-path coercion. Unknown keys are rejected before this is called. */
+  coerce?: NestedCoerce
+}
+
+const LIST_ITEM_RE = /^\s*-\s+(.*)$/
+
+// Parse an inline YAML list (`[a, b, "c"]`) into trimmed, de-quoted strings.
+// An empty body (`[]`) yields []. Returns undefined for non-list raw text.
+export function parseInlineList(raw: string): string[] | undefined {
+  const t = raw.trim()
+  if (!t.startsWith("[")) return undefined
+  if (!t.endsWith("]")) return undefined
+  const body = t.slice(1, -1).trim()
+  if (body === "") return []
+  return body
+    .split(",")
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+    .filter((s) => s !== "")
+}
+
+/** A duration in whole hours or minutes, e.g. `12h`, `30m` (plan §4.2). */
+export const DURATION_RE = /^\d+[mh]$/
+
+export function isDuration(raw: string): boolean {
+  return DURATION_RE.test(raw)
+}
+
+// Parse one `section:` whose body may mix flat scalars, one level of
+// sub-blocks, and list keys (inline or block form). Unknown keys/blocks,
+// empty non-list values, and comment lines are recorded as rejects or
+// dropped per the options; never throws.
+export function parseNestedSection(
+  yamlText: string,
+  section: string,
+  opts: NestedSectionOptions = {},
+): NestedParse {
+  const out: NestedParse = { scalars: {}, blocks: {}, rejects: [] }
+  const body = extractBlock(yamlText, section)
+  if (body === "") return out
+
+  const reject = (path: string, raw: string, reason: string) =>
+    out.rejects.push({ path, raw, reason })
+
+  const put = (
+    container: Record<string, unknown>,
+    path: string,
+    key: string,
+    raw: string,
+  ) => {
+    if (!opts.coerce) {
+      container[key] = raw
+      return
+    }
+    const res = opts.coerce(path, raw)
+    if (res === undefined) return
+    if (res.ok) container[key] = res.value
+    else reject(path, raw, res.reason)
+  }
+
+  const lines = body.split("\n")
+  let baseIndent = -1
+  for (const line of lines) {
+    const t = line.trim()
+    if (t !== "" && !t.startsWith("#")) {
+      baseIndent = line.length - line.trimStart().length
+      break
+    }
+  }
+  if (baseIndent < 0) return out
+
+  let currentBlock: string | null = null
+  let pendingList: { path: string; container: Record<string, unknown>; key: string; items: string[] } | null = null
+
+  const flushList = () => {
+    if (pendingList === null) return
+    const { path, container, key, items } = pendingList
+    pendingList = null
+    put(container, path, key, "[" + items.join(", ") + "]")
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === "" || trimmed.startsWith("#")) continue
+    const indent = line.length - line.trimStart().length
+    if (indent < baseIndent) break
+
+    // List item under a pending `key:` list opener.
+    const item = trimmed.match(LIST_ITEM_RE)
+    if (item && pendingList !== null) {
+      pendingList.items.push(item[1].trim().replace(/^["']|["']$/g, ""))
+      continue
+    }
+
+    const m = trimmed.match(DEFAULT_KEY_RE)
+    if (!m) continue
+    const key = m[1]
+    // `m[2]` may start with `#` (the key regex already ate the whitespace),
+    // so strip a comment at position 0 as well as one preceded by a space.
+    const raw = m[2].replace(/(^|\s)#.*$/, "$1").trim()
+    const atBase = indent === baseIndent
+
+    if (atBase) {
+      flushList()
+      if (raw === "") {
+        // Block or list opener, unknown key, or an empty non-list scalar.
+        if (opts.blockKeys && key in opts.blockKeys) {
+          currentBlock = key
+          out.blocks[key] = out.blocks[key] ?? {}
+        } else if (opts.listKeys?.has(key)) {
+          currentBlock = null
+          pendingList = { path: key, container: out.scalars, key, items: [] }
+        } else if (opts.scalarKeys?.has(key)) {
+          currentBlock = null
+          reject(key, "", "empty value for non-list key")
+        } else if (opts.scalarKeys || opts.blockKeys) {
+          currentBlock = null
+          reject(key, "", "unknown key")
+        } else {
+          currentBlock = key
+          out.blocks[key] = out.blocks[key] ?? {}
+        }
+        continue
+      }
+      currentBlock = null
+      if (opts.scalarKeys && !opts.scalarKeys.has(key)) {
+        reject(key, raw, "unknown key")
+        continue
+      }
+      put(out.scalars, key, key, raw)
+      continue
+    }
+
+    // Deeper-indented line: must belong to an open block.
+    if (currentBlock !== null) {
+      const known = opts.blockKeys?.[currentBlock]
+      const path = `${currentBlock}.${key}`
+      if (raw === "") {
+        if (opts.blockListKeys?.has(path)) {
+          pendingList = { path, container: out.blocks[currentBlock], key, items: [] }
+        } else {
+          reject(path, "", "nested deeper than supported or empty non-list value")
+        }
+        continue
+      }
+      if (known && !known.has(key)) {
+        reject(path, raw, "unknown key")
+        continue
+      }
+      put(out.blocks[currentBlock], path, key, raw)
+      continue
+    }
+    // Deeper line with no open block (body of an unknown block) — skip.
+  }
+  flushList()
+  return out
+}
+
+// Overlay a parsed result onto defaults: deep-clones the defaults, then
+// applies every coerced value that was actually parsed. Rejects are carried
+// through. Never throws.
+export function overlayNestedSection(defaults: NestedDefaults, parsed: NestedParse): NestedParse {
+  const scalars: Record<string, unknown> = { ...defaults.scalars }
+  const blocks: Record<string, Record<string, unknown>> = {}
+  for (const [name, values] of Object.entries(defaults.blocks)) {
+    blocks[name] = { ...values }
+  }
+  for (const [key, value] of Object.entries(parsed.scalars)) {
+    if (value !== undefined && key in scalars) scalars[key] = value
+  }
+  for (const [name, values] of Object.entries(parsed.blocks)) {
+    if (!(name in blocks)) continue
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== undefined && key in blocks[name]) blocks[name][key] = value
+    }
+  }
+  return { scalars, blocks, rejects: parsed.rejects }
+}
+
+// Read the effective nested `section:` for a project directory, overlaying it
+// on the defaults. Never throws: a missing or malformed config yields the
+// defaults (with whatever rejects the parse produced).
+export async function readNestedSection(
+  directory: string,
+  section: string,
+  defaults: NestedDefaults,
+  opts: NestedSectionOptions = {},
+): Promise<NestedParse> {
+  let raw = ""
+  try {
+    raw = await readFile(join(directory, SYSCONFIG), "utf8")
+  } catch {
+    // defaults
+  }
+  return overlayNestedSection(defaults, parseNestedSection(raw, section, opts))
 }
 
 // Read the effective `section:` config, overlaying the block (if present) on the
