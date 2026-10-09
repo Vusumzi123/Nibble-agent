@@ -77,6 +77,10 @@ export type QuietConfig = {
 export type AutonomyConfig = {
   /** 0..4 capability dial (§4.1). Code default 1; live config ships 2. */
   level: number
+  /** `shadow` logs without blocking; `gate` (default) enforces (card E kill
+   *  switch — mirrors the decisions.mode vocabulary, but defaults to gate so
+   *  enforcement is on unless explicitly opted out). */
+  gate_mode: "shadow" | "gate"
   heartbeat: HeartbeatConfig
   /** K-tokens per mission turn, or `unlimited` (§6.4). */
   mission_token_budget: number | "unlimited"
@@ -122,6 +126,7 @@ export type DashboardConfig = {
 
 export const DEFAULT_AUTONOMY: AutonomyConfig = {
   level: 1,
+  gate_mode: "gate",
   heartbeat: { frequency: "12h", in_progress_lock: true },
   mission_token_budget: 32000,
   root_classes: [],
@@ -165,12 +170,13 @@ export const DEFAULT_DASHBOARD: DashboardConfig = {
 export const NIGHT_MENU = ["drain", "dream"] as const
 export const AUTH_MODES = ["off", "login", "login+2fa"] as const
 export const COMMS_CHANNELS = ["telegram", "email"] as const
+export const GATE_MODES = ["shadow", "gate"] as const
 
 // Fresh nested-default views (never share mutable defaults across reads).
 function autonomyDefaults(): NestedDefaults {
-  const { level, mission_token_budget, root_classes, heartbeat, chatter, quiet } = DEFAULT_AUTONOMY
+  const { level, gate_mode, mission_token_budget, root_classes, heartbeat, chatter, quiet } = DEFAULT_AUTONOMY
   return {
-    scalars: { level, mission_token_budget, root_classes },
+    scalars: { level, gate_mode, mission_token_budget, root_classes },
     blocks: { heartbeat, chatter, quiet },
   }
 }
@@ -328,6 +334,9 @@ function blocksOf(blocks: Record<string, Record<string, Rule>>): Record<string, 
 
 const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   level: { t: "int", min: 0, max: 4 },
+  // Invalid value -> reject -> default `gate` stands (fail-closed: the kill
+  // switch must be an explicit `shadow`).
+  gate_mode: { t: "enum", values: GATE_MODES },
   mission_token_budget: { t: "budget" },
   root_classes: { t: "list" },
 }

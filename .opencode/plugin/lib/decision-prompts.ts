@@ -1,7 +1,8 @@
 // Loader for `.opencode/decision-prompts.yaml` — the commented, single source
 // of truth for the JEV question texts (assertions / criteria) asked by the
 // gates. One section per gate: retrieval (retrieval-hook), ingest
-// (knowledge-hook drain), tags (knowledge-hook capture tag/salience gate).
+// (knowledge-hook drain), tags (knowledge-hook capture tag/salience gate),
+// autonomy (autonomy-gate borderline escalation).
 //
 // Parsing reuses the flat-YAML machinery from lib/config.ts (extractBlock +
 // parseFlatBlock): one top-level `section:` with indented `key: value`
@@ -24,6 +25,7 @@ import { isAbsolute, join } from "node:path"
 import { parseFlatBlock, sectionCoercer } from "./config.ts"
 import { expandHome } from "./paths.ts"
 import { INGEST_ASSERTION } from "./decisions.ts"
+import { DEFAULT_AUTONOMY_ASSERTION } from "./autonomy-gate.ts"
 import { DEFAULT_RETRIEVAL_ASSERTION } from "./retrieval.ts"
 
 export const DECISION_PROMPTS_LEAF = ".opencode/decision-prompts.yaml"
@@ -32,12 +34,14 @@ export type DecisionPrompts = {
   retrieval: { assertion: string }
   ingest: { assertion: string }
   tags: { choice_criteria: string; score_criteria: string }
+  autonomy: { assertion: string }
 }
 
 export type PartialDecisionPrompts = {
   retrieval?: Partial<DecisionPrompts["retrieval"]>
   ingest?: Partial<DecisionPrompts["ingest"]>
   tags?: Partial<DecisionPrompts["tags"]>
+  autonomy?: Partial<DecisionPrompts["autonomy"]>
 }
 
 // Built-in fallbacks: the gate defaults live in their owning modules and are
@@ -53,12 +57,14 @@ export const DEFAULT_DECISION_PROMPTS: DecisionPrompts = {
     score_criteria:
       "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)",
   },
+  autonomy: { assertion: DEFAULT_AUTONOMY_ASSERTION },
 }
 
 const KNOWN_KEYS: Record<keyof DecisionPrompts, Set<string>> = {
   retrieval: new Set(["assertion"]),
   ingest: new Set(["assertion"]),
   tags: new Set(["choice_criteria", "score_criteria"]),
+  autonomy: new Set(["assertion"]),
 }
 
 // Values are single-line quoted (or plain) scalars; pair-quote stripping
@@ -76,7 +82,7 @@ const COERCE = (key: string, raw: string): unknown => {
 // any input (including garbage) yields a partial/empty object, never throws.
 export function parseDecisionPrompts(yamlText: string): PartialDecisionPrompts {
   const out: PartialDecisionPrompts = {}
-  for (const section of ["retrieval", "ingest", "tags"] as const) {
+  for (const section of ["retrieval", "ingest", "tags", "autonomy"] as const) {
     const parsed = parseFlatBlock(yamlText, section, {
       knownKeys: KNOWN_KEYS[section],
       coerce: COERCE,
@@ -99,6 +105,7 @@ export function mergeDecisionPrompts(partial: PartialDecisionPrompts): DecisionP
       choice_criteria: partial.tags?.choice_criteria || d.tags.choice_criteria,
       score_criteria: partial.tags?.score_criteria || d.tags.score_criteria,
     },
+    autonomy: { assertion: partial.autonomy?.assertion || d.autonomy.assertion },
   }
 }
 

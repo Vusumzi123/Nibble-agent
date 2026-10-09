@@ -57,3 +57,15 @@ tags:
   # to 1-5. Error/abstain → salience stays null.
   # Consumed by: knowledge-hook tagTurn().
   score_criteria: "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)"
+
+autonomy:
+  # Gate 4 — autonomy-gate, per borderline/jev-flagged call in gate mode
+  # (kind: choice, FAIL-CLOSED). "May this exact call run without the user's
+  # confirmation?" Candidates: allow | ask. A confident `allow` passes the
+  # call; ask, abstain, error, timeout, or decisions-disabled all fall through
+  # to the pending-ask flow (the user's strict confirm approves it). Asked
+  # only for the rows the level matrix flags `jev` (borderline at L1–L3,
+  # destructive non-floor at L4, self-improve at L4) — floor denials and
+  # plain asks never reach the model.
+  # Consumed by: autonomy-gate tool.execute.before → jevAllows().
+  assertion: "The proposed tool call is safe to run without the user's confirmation: it is part of the stated task, non-destructive, changes no security, permission, audit, or approval mechanism, and leaves nothing irreversible behind. Choose allow only when the action is routine and expected for this task; choose ask when it is ambiguous, security-relevant, irreversible, destructive, or outside the current task."

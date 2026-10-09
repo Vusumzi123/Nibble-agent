@@ -37,15 +37,48 @@ test("coerceEntry normalizes fields and preserves order", () => {
     root: "yes",
     sandbox: "",
     dry: 1,
+    autonomy_level: 2,
   })
-  assert.deepEqual(Object.keys(entry), ["ts", "agent", "cmd", "exit", "root", "sandbox", "dry"])
+  assert.deepEqual(Object.keys(entry), [
+    "ts",
+    "agent",
+    "cmd",
+    "exit",
+    "root",
+    "sandbox",
+    "dry",
+    "autonomy_level",
+  ])
   assert.equal(entry.agent, "sysop")
   assert.equal(entry.exit, 3)
   assert.equal(entry.root, true)
   assert.equal(entry.sandbox, "opencode")
   assert.equal(entry.dry, true)
+  assert.equal(entry.autonomy_level, 2)
   assert.match(entry.ts, /^\d{4}-\d{2}-\d{2}T.*Z$/)
   assert.equal(redact(entry.cmd), "echo hi")
+})
+
+test("coerceEntry stamps autonomy_level without touching redaction", () => {
+  const entry = coerceEntry({ cmd: "run --token=abc123", autonomy_level: 3 })
+  assert.equal(entry.autonomy_level, 3)
+  assert.equal(entry.cmd, "run --token=***")
+  assert.equal(redact(entry.cmd), entry.cmd)
+})
+
+test("coerceEntry coerces legacy, missing, and out-of-range levels to null", () => {
+  // Legacy line written before the field existed.
+  assert.equal(coerceEntry({ cmd: "ls" }).autonomy_level, null)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: null }).autonomy_level, null)
+  // Out of range / malformed.
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: 5 }).autonomy_level, null)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: -1 }).autonomy_level, null)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: 2.5 }).autonomy_level, null)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: "nope" }).autonomy_level, null)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: "" }).autonomy_level, null)
+  // Numeric strings in range still land (legacy/YAML scalar forms).
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: "0" }).autonomy_level, 0)
+  assert.equal(coerceEntry({ cmd: "ls", autonomy_level: "4" }).autonomy_level, 4)
 })
 
 test("coerceEntry redacts the command and rejects a non-string cmd", () => {

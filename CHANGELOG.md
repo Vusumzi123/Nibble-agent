@@ -8,6 +8,67 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Autonomy gate (kanban card 2, plan §4.1/§4.3)** — the autonomy dial is
+  live. New pure core `lib/autonomy-gate.ts` + runtime `plugin/autonomy-gate.ts`:
+  - **`[autonomy]` prompt line** — `experimental.chat.system.transform` pushes
+    `[autonomy] level N (Name) — <envelope>; irreversibility floor always
+    applies`, hot-read every turn (flipping `autonomy.level` needs no restart).
+  - **Level-matrix enforcement** in `tool.execute.before` — `classifyCall`
+    yields allow|ask|deny per the card-2 matrix: reads pass at every level;
+    read-only bash from L1; vault writes and sub-agent spawns from L2;
+    project writes from L3; destructive and self-improve ask until the JEV
+    edge; root at L4 iff `root_classes` match; unclassifiable = borderline.
+  - **Irreversibility floor** — hard-coded deny checked *before* any
+    allowlist: `mkfs*`, `dd`→block devices, `rm -rf` on system roots,
+    `shred`/`wipe`, `fdisk`/`parted`/`lvremove`, and audit/permission
+    tampering (`.opencode/plugin/**` audit machinery, shell mutation of
+    `opencode.json`). Denied at every level, never approvable — not by a
+    user confirm, not via `root_classes`.
+  - **`autonomy.gate_mode: shadow|gate`** (default `gate`; invalid values
+    fall back to `gate`) — the misbehaviour kill switch: `shadow` logs
+    without blocking, `gate` enforces.
+  - **Pending-ask approval flow** — ask records `{session, sha1 fingerprint,
+    ts}` (TTL 10m, latest-only); the user's strict confirm in `chat.message`
+    (`^(?:yes|y|proceed|go ahead|approve|--execute|--live)\b`) approves it;
+    the exact retry then passes once. Floor verdicts never record; the store
+    lives on the plugin (restart clears it — fail-closed); any other user
+    text does not consume.
+  - **JEV borderline escalation** — matrix `jev` rows (borderline at L1–L3,
+    destructive non-floor at L4, self-improve at L4) consult
+    `openDecisionGate` with fallback **closed** and an 8s overlay: error /
+    abstain / timeout / decisions-disabled → ask, never allow. Criteria text
+    lives in `.opencode/decision-prompts.yaml` (`autonomy:` section, built-in
+    default in `lib/autonomy-gate.ts`). The user's confirm outranks the
+    model and skips the JEV on the approved retry.
+  - **Audit `autonomy_level`** — every bash audit line stamps the level that
+    was live when the command ran (`lib/audit.ts` + `audit-hook.ts`);
+    missing/legacy/out-of-range values coerce to `null`; redaction unchanged.
+  - **Verdict log** — `<log>/autonomy-gate.log` (NDJSON, shared engine): one
+    `verdict` line per gated call (level, tool, class, reason, fingerprint,
+    mode) plus `jev` outcome lines; `automationChildSessions` bypass the gate
+    entirely (their JEV gates already cover them).
+  - **Dial-aware security-locks prompt** — new "Autonomy dial awareness"
+    section in `agents/security-locks.md`: the brief must quote the live
+    `[autonomy]` line (missing ⇒ treat as L0); L0–L2 always require the
+    human `yes`, L3+ whitelisted classes skip it; floor, dry-run→live,
+    self-improve L0–L3 always-asks, and mood-never-gates are restated as
+    level-invariant.
+  - **Interpretations recorded:** (1) *reads pass at every level, including
+    L0* — deliberate reading of §4.1's literal "everything asks" as
+    plan-agent-mode semantics; only state-changing actions ask at L0.
+    (2) `automationChildSessions` are exempt from the gate; human sessions
+    and their Task sub-agents stay gated. (3) Shell mutation of
+    `opencode.json` is floor (permission-block tampering); the sanctioned
+    edit-tool path on `.opencode/plugin/**` / `opencode.json` is the
+    self-improve row (ask at L0–L3, JEV at L4) pending card 12's apply
+    pipeline.
+  - Tests: +53 across `autonomy-gate.test.ts` (floor × L0–L4, every matrix
+    row × level, fingerprint, pending-ask lifecycle/TTL/one-shot, JEV
+    helpers), `autonomy-gate-hook.test.ts` (prompt line, verdict log,
+    enforcement, exemption, kill switch, approval flow, JEV fail-closed
+    paths), `audit.test.ts` / `audit-hook.test.ts` (level coercion +
+    stamping), `autonomy.test.ts` (`gate_mode` schema), and
+    `decision-prompts.test.ts` (autonomy section). Suite: **382/382**.
 - **Autonomy-harness config plumbing (kanban card 1, plan §11)** — four new
   `sysop-config.yaml` sections: `autonomy:` (level dial 0–4 + `heartbeat` /
   `chatter` / `quiet` sub-blocks), `mood:`, `comms:`, and `dashboard:`.

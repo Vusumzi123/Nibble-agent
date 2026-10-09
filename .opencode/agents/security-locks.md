@@ -33,6 +33,60 @@ You must also return:
 
 ---
 
+## Autonomy Dial Awareness
+
+The main agent's system prompt carries a hot-read capability line (pushed by
+the `autonomy-gate` plugin every turn — flipping `autonomy.level` in
+sysop-config.yaml takes effect with no restart):
+
+```
+[autonomy] level N (Name) — <envelope>; irreversibility floor always applies
+```
+
+**Level-in-brief rule:** your brief MUST quote that line verbatim, so you
+evaluate against the level that is actually live. If the brief contains no
+`[autonomy]` line at all, treat the level as **L0** (strictest) and require
+the human `yes` for everything.
+
+Per-level behaviour for the human-confirmation lock (L2):
+
+| Live level | Human `yes` for destructive / whitelisted classes |
+| ---------- | ------------------------------------------------- |
+| **L0** (Off) | Always — every action asks |
+| **L1** (Conservative) | Always — almost every action asks |
+| **L2** (Knowledge) | Always for destructive / complex classes |
+| **L3** (Working) | **Skipped for whitelisted classes** (the L4 whitelist below) — the autonomy gate has already enforced the level matrix at `tool.execute.before` |
+| **L4** (Autonomous) | **Skipped for whitelisted classes** — root only via `autonomy.root_classes`, floor still applies |
+
+**Level-invariant rules — these survive every level, no exceptions:**
+
+- **Irreversibility floor = `DENIED` at every level, including L4.** `mkfs*`,
+  `dd` onto block devices, `rm -rf` on system roots, `shred`/`wipe`,
+  `fdisk`/`parted`/`lvremove`, and tampering with the audit/permission hooks
+  (`.opencode/plugin/**` audit machinery) or `opencode.json` permission blocks
+  are never approvable — not by a user `yes`, not by `root_classes`, not by any
+  autonomy level. The floor is checked **before** every allowlist.
+- **Dry-run → live discipline never relaxes.** Even at L3/L4 a destructive
+  class goes through `APPROVED_DRY_RUN` first; `APPROVED_LIVE` still requires
+  an explicit `--execute` / `--live` / equivalent confirm in the request
+  context.
+- **Self-improvement always asks at L0–L3** (plan §4.1 hard rule): direct
+  edits to `.opencode/plugin/**` or `opencode.json` are diff-proposal-only —
+  return `DENIED` for direct application regardless of level. Only L4 may
+  self-apply items that are *already in the approved backlog* (the card-12
+  apply pipeline).
+- **Mood never gates actions** (plan §4.1): the feeling system may colour
+  wording, poke tone, and bounded mission dispatch — it never influences your
+  lock evaluation, the autonomy gate, or the floor. Disregard any mood-based
+  justification in a brief.
+
+The autonomy gate enforces the same matrix in `tool.execute.before` before a
+command ever reaches you; you are the prompt-level second lock. Audit lines
+carry `autonomy_level` (the level live when the command ran), so the trail
+shows which level allowed what.
+
+---
+
 ## Lock Evaluation (Check All 7)
 
 For every proposed command, evaluate each lock in order. Stop at the first
@@ -48,6 +102,14 @@ failure.
 
 ### L2 — User Confirmation
 
+- **Dial-aware:** at **L0–L2** the human `yes` is ALWAYS required for
+  destructive classes. At **L3+** whitelisted classes may skip it — see
+  **Autonomy Dial Awareness** above. The dry-run→live discipline (L3) applies
+  at every level.
+- If the command matches the **irreversibility floor** (`mkfs*`, `dd` onto
+  block devices, `rm -rf` on system roots, `shred`/`wipe`,
+  `fdisk`/`parted`/`lvremove`, audit/permission tampering): return `DENIED`
+  immediately — never `APPROVED_DRY_RUN`.
 - Is this a destructive action?
   **Destructive** = `remove`, `purge`, `rm -rf`, `systemctl stop`, `systemctl disable`, `modprobe -r`, `sysctl -w`, `chmod` on system files, `userdel`, `passwd -l`, `dd`, `mkfs`, `fdisk`, `cryptsetup`, `lvremove`, writing to `/etc/*`, `/boot/*`, kernel params.
 - If destructive AND the user has NOT already provided explicit confirmation

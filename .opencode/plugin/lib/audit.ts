@@ -98,6 +98,21 @@ export type AuditEntry = {
   root: boolean
   sandbox: string
   dry: boolean
+  /** Autonomy dial level (0..4) live when the command ran; null when unknown
+   *  or on legacy lines written before the field existed. */
+  autonomy_level: number | null
+}
+
+// Autonomy level: 0..4 only. Missing (legacy), non-numeric, fractional, and
+// out-of-range values all coerce to null rather than guessing a level.
+function coerceLevel(v: unknown): number | null {
+  if (v == null) return null
+  let n: number
+  if (typeof v === "number") n = v
+  else if (typeof v === "string" && v.trim() !== "") n = Number(v.trim())
+  else return null
+  if (!Number.isInteger(n)) return null
+  return n >= 0 && n <= 4 ? n : null
 }
 
 // Validate/normalize a raw entry into a well-formed, field-ordered object.
@@ -128,6 +143,7 @@ export function coerceEntry(raw: Record<string, unknown>): AuditEntry {
     root: asBool(raw.root, false),
     sandbox,
     dry: asBool(raw.dry, false),
+    autonomy_level: coerceLevel(raw.autonomy_level),
   }
 }
 

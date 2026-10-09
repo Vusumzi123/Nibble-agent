@@ -17,6 +17,7 @@ import {
   resolveDecisionPrompts,
 } from "./decision-prompts.ts"
 import { INGEST_ASSERTION } from "./decisions.ts"
+import { DEFAULT_AUTONOMY_ASSERTION } from "./autonomy-gate.ts"
 import { DEFAULT_RETRIEVAL_ASSERTION } from "./retrieval.ts"
 
 const VALID_YAML = [
@@ -33,6 +34,9 @@ const VALID_YAML = [
   "  choice_criteria: \"Pick a tag.\"",
   "  score_criteria: 'Score it 1-5.'",
   "",
+  "autonomy:",
+  '  assertion: "Custom autonomy assertion."',
+  "",
 ].join("\n")
 
 test("defaults carry every gate key and re-use the owning modules' strings", () => {
@@ -40,6 +44,7 @@ test("defaults carry every gate key and re-use the owning modules' strings", () 
   assert.equal(DEFAULT_DECISION_PROMPTS.ingest.assertion, INGEST_ASSERTION)
   assert.ok(DEFAULT_DECISION_PROMPTS.tags.choice_criteria.includes("NEW"))
   assert.ok(DEFAULT_DECISION_PROMPTS.tags.score_criteria.includes("ephemeral"))
+  assert.equal(DEFAULT_DECISION_PROMPTS.autonomy.assertion, DEFAULT_AUTONOMY_ASSERTION)
 })
 
 test("parseDecisionPrompts reads all sections and strips comment lines + quotes", () => {
@@ -47,6 +52,7 @@ test("parseDecisionPrompts reads all sections and strips comment lines + quotes"
   assert.deepEqual(parsed.retrieval, { assertion: "Custom retrieval assertion." })
   assert.deepEqual(parsed.ingest, { assertion: "Custom ingest assertion." })
   assert.deepEqual(parsed.tags, { choice_criteria: "Pick a tag.", score_criteria: "Score it 1-5." })
+  assert.deepEqual(parsed.autonomy, { assertion: "Custom autonomy assertion." })
 })
 
 test("parseDecisionPrompts ignores unknown sections, keys, and blank input", () => {
@@ -70,6 +76,7 @@ test("mergeDecisionPrompts fills per key, not per section", () => {
   assert.equal(merged.ingest.assertion, DEFAULT_DECISION_PROMPTS.ingest.assertion)
   assert.equal(merged.tags.choice_criteria, DEFAULT_DECISION_PROMPTS.tags.choice_criteria)
   assert.equal(merged.tags.score_criteria, "Custom score.")
+  assert.equal(merged.autonomy.assertion, DEFAULT_DECISION_PROMPTS.autonomy.assertion)
 })
 
 test("readDecisionPromptsFrom returns null for missing and unparseable files", async () => {

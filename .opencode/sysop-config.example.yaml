@@ -14,6 +14,7 @@
 # reads telemetry: for its inner-fetch usage record,
 # web-scan-hook / lib/browser.ts (browser: + paths:),
 # lib/autonomy.ts (autonomy: + mood: + comms: + dashboard: + paths:),
+# autonomy-gate plugin (autonomy: + decisions: + paths: + decision-prompts),
 # scoped-permissions.ts (paths:), vault-readonly-guard.ts + wikilink-guard.ts
 # (vault: + paths:). Other sections are ignored by each reader.
 #
@@ -292,15 +293,18 @@ telemetry:
   rotate_by: size
 
 # ---------------------------------------------------------------------------
-# Autonomy harness (docs/autonomy-harness-plan.md §11) — config plumbing only
-# (kanban card 1). No reader consumes these blocks yet: autonomy-gate.ts
-# (card 2), lib/mood.ts (card 5), the dashboard backend (cards 8/11), and the
-# comms bridges (card 10) land later. Every value is hot-read per call —
-# flipping one takes effect immediately, no restart. An invalid value falls
-# back to its code default and warns once per process in
+# Autonomy harness (docs/autonomy-harness-plan.md §11). The autonomy gate
+# (kanban card 2 — plugin/autonomy-gate.ts) reads `level` + `gate_mode` hot
+# every turn and enforces the level matrix at tool.execute.before; the JEV
+# borderline escalation also reads `decisions:` and `.opencode/decision-prompts.yaml`.
+# lib/mood.ts (card 5), the dashboard backend (cards 8/11), and the comms
+# bridges (card 10) are the future readers of their blocks. Every value is
+# hot-read per call — flipping one takes effect immediately, no restart. An
+# invalid value falls back to its code default and warns once per process in
 # <log>/autonomy-config.log (NDJSON).
 autonomy:
   level: 2                     # 0..4 capability dial (§4.1); code default 1
+  gate_mode: gate              # shadow | gate — kill switch: shadow logs without blocking, gate enforces
   heartbeat:
     frequency: 12h             # off | <n>m | <n>h — manual only (§4.2)
     in_progress_lock: true

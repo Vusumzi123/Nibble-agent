@@ -7,6 +7,7 @@ import {
   coerceEntry,
   readAuditConfig,
 } from "./lib/audit.ts"
+import { readAutonomyConfig } from "./lib/autonomy.ts"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 
@@ -101,6 +102,16 @@ export default (async ({ directory }) => {
         if (Number.isFinite(n)) exit = n
       }
 
+      // Stamp the autonomy level live at command time — the same hot-read the
+      // gate uses, so flipping autonomy.level needs no restart to show up in
+      // the audit trail. A failed read degrades to null, never blocks the log.
+      let autonomy_level: number | null = null
+      try {
+        autonomy_level = (await readAutonomyConfig(dir)).level
+      } catch {
+        autonomy_level = null
+      }
+
       let entry
       try {
         entry = coerceEntry({
@@ -115,6 +126,7 @@ export default (async ({ directory }) => {
               ? "firejail"
               : "opencode",
           dry: DRY_RE.test(cmd),
+          autonomy_level,
         })
       } catch {
         // Non-string command already filtered above; nothing to log.

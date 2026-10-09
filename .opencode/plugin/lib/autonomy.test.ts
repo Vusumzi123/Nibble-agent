@@ -273,3 +273,35 @@ test("hot-read: a config edit is visible on the next call, no restart", async ()
   const second = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
   assert.equal(second.level, 4)
 })
+
+// ---------------------------------------------------------------------------
+// gate_mode (card E) — the misbehaviour kill switch
+
+test("gate_mode defaults to gate, parses shadow, and fails closed on invalid", async () => {
+  // Missing key -> default `gate` (enforcement on unless opted out).
+  const missing = await configDir(["autonomy:", "  level: 2"])
+  const cfgMissing = await readAutonomyConfig(missing, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgMissing.gate_mode, "gate")
+  assert.equal(DEFAULT_AUTONOMY.gate_mode, "gate")
+
+  // Explicit shadow parses (the kill switch).
+  const shadow = await configDir(["autonomy:", "  gate_mode: shadow"])
+  const cfgShadow = await readAutonomyConfig(shadow, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgShadow.gate_mode, "shadow")
+
+  // Invalid value -> reject + default `gate` stands (fail-closed).
+  const invalid = await configDir(["autonomy:", "  gate_mode: passthrough"])
+  const events: string[] = []
+  const cfgInvalid = await readAutonomyConfig(invalid, { onReject: (e) => events.push(e.path) })
+  assert.equal(cfgInvalid.gate_mode, "gate")
+  assert.deepEqual(events, ["gate_mode"])
+})
+
+test("gate_mode is hot-read: a flip applies on the next call, no restart", async () => {
+  const dir = await configDir(["autonomy:", "  gate_mode: gate"])
+  const first = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(first.gate_mode, "gate")
+  await writeFile(join(dir, ".opencode", "sysop-config.yaml"), "autonomy:\n  gate_mode: shadow\n", "utf8")
+  const second = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(second.gate_mode, "shadow")
+})
