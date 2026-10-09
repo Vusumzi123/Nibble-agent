@@ -303,5 +303,29 @@ test("gate_mode is hot-read: a flip applies on the next call, no restart", async
   assert.equal(first.gate_mode, "gate")
   await writeFile(join(dir, ".opencode", "sysop-config.yaml"), "autonomy:\n  gate_mode: shadow\n", "utf8")
   const second = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(second.gate_scope, "main") // absent key keeps the default
   assert.equal(second.gate_mode, "shadow")
+})
+
+// ---------------------------------------------------------------------------
+// gate_scope — sub-agent children are floor-only under `main`
+
+test("gate_scope defaults to main, parses all, and fails closed on invalid", async () => {
+  // Missing key -> default `main` (dial drives the human session only).
+  const missing = await configDir(["autonomy:", "  level: 2"])
+  const cfgMissing = await readAutonomyConfig(missing, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgMissing.gate_scope, "main")
+  assert.equal(DEFAULT_AUTONOMY.gate_scope, "main")
+
+  // Explicit `all` parses (Phase 1 gate-everything behaviour).
+  const all = await configDir(["autonomy:", "  gate_scope: all"])
+  const cfgAll = await readAutonomyConfig(all, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgAll.gate_scope, "all")
+
+  // Invalid value -> reject + default `main` stands.
+  const invalid = await configDir(["autonomy:", "  gate_scope: everywhere"])
+  const events: string[] = []
+  const cfgInvalid = await readAutonomyConfig(invalid, { onReject: (e) => events.push(e.path) })
+  assert.equal(cfgInvalid.gate_scope, "main")
+  assert.deepEqual(events, ["gate_scope"])
 })

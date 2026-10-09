@@ -24,7 +24,7 @@ import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import { LOG_DEFAULTS, getLogger } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
-import { textOf } from "./lib/sessions.ts"
+import { createSessionTools, textOf } from "./lib/sessions.ts"
 
 // Autonomy gate — the runtime wiring for docs/autonomy-harness-plan.md §4.3
 // (kanban cards D–G on [[phase-1-kanban]]). Modelled on scoped-permissions.ts;
@@ -45,12 +45,19 @@ import { textOf } from "./lib/sessions.ts"
 // decisions-disabled all fall through to the pending-ask flow. The user's
 // confirm always outranks the model (approval is consumed first).
 //
+// Scope (`autonomy.gate_scope`, default `main`): a Task sub-agent child
+// session (parentID set) only ever faces the irreversibility floor — asks in
+// a child are unapprovable anyway (the user's confirm lands keyed to the
+// human session), so the dial only drives the top-level session. `all`
+// restores Phase 1's gate-everything behaviour. Floor denies apply to every
+// scope; verdicts are still logged either way.
+//
 // The plugin auto-discovery loader requires every export of this file to be a
 // plugin factory, so this file deliberately exports ONLY the default plugin.
 // `ctx.spawner` is a test-injection seam (openDecisionGate's own convention);
 // opencode never passes it, so production always uses the real bridge.
 export default (async (ctx) => {
-  const { directory } = ctx
+  const { directory, client } = ctx as { directory?: string; client?: unknown }
   const spawner = (ctx as { spawner?: BridgeSpawner }).spawner
   const dir = directory ?? process.cwd()
   const resolved = await readResolvedPaths(dir, homedir())
@@ -59,6 +66,10 @@ export default (async (ctx) => {
     { ...LOG_DEFAULTS, file: "autonomy-gate.log" },
     { logDir, home: homedir(), channel: "autonomy-gate" },
   )
+
+  // Cached child lookup (lib/sessions.ts). No client (tests) = no child
+  // detection = fail closed: every session is gated like a human session.
+  const sessions = client ? createSessionTools(client as Parameters<typeof createSessionTools>[0], dir) : null
 
   // JEV seam (card G): null when decisions are disabled — escalation then
   // fails closed to `ask` (settled decision #5). Assertion text is read once
@@ -73,19 +84,29 @@ export default (async (ctx) => {
   // Hot-read: re-reads sysop-config.yaml per call so a level (or gate_mode)
   // flip applies to the very next turn/command. Fail-closed to L0 if the read
   // ever throws — the reader contract says it never does.
-  const hotRead = async (): Promise<{ level: number; gate_mode: "shadow" | "gate" }> => {
+  const hotRead = async (): Promise<{ level: number; gate_mode: "shadow" | "gate"; gate_scope: "main" | "all" }> => {
     try {
       const cfg = await readAutonomyConfig(dir)
-      return { level: cfg.level, gate_mode: cfg.gate_mode === "shadow" ? "shadow" : "gate" }
+      return {
+        level: cfg.level,
+        gate_mode: cfg.gate_mode === "shadow" ? "shadow" : "gate",
+        gate_scope: cfg.gate_scope === "all" ? "all" : "main",
+      }
     } catch {
-      return { level: 0, gate_mode: "gate" }
+      return { level: 0, gate_mode: "gate", gate_scope: "main" }
     }
   }
 
   return {
-    "experimental.chat.system.transform": async (_input, output) => {
+    "experimental.chat.system.transform": async (input, output) => {
       try {
-        output.system.push(autonomyDirective((await hotRead()).level))
+        const cfg = await hotRead()
+        // Under gate_scope main the dial does not govern sub-agent children —
+        // no directive line for them either.
+        if (cfg.gate_scope === "main" && sessions && (await sessions.isChild((input as { sessionID?: string })?.sessionID ?? ""))) {
+          return
+        }
+        output.system.push(autonomyDirective(cfg.level))
       } catch {
         // A missing/broken transform output must never break the session.
       }
@@ -103,6 +124,8 @@ export default (async (ctx) => {
       let c: Classification | null = null
       let level = 0
       let mode: "shadow" | "gate" = "shadow"
+      let scope: "main" | "all" = "main"
+      let child = false
       let fingerprint = ""
 
       // Automation children bypass the gate entirely — knowledge drain etc.
@@ -113,6 +136,8 @@ export default (async (ctx) => {
         const cfg = await hotRead()
         level = cfg.level
         mode = cfg.gate_mode
+        scope = cfg.gate_scope
+        child = sessions ? await sessions.isChild(input.sessionID) : false
         c = classifyCall(input.tool, input.args, level)
         fingerprint = fingerprintCall(input.tool, input.args)
         await logger.append({
@@ -126,6 +151,8 @@ export default (async (ctx) => {
           fingerprint,
           jev: c.jev,
           mode,
+          scope,
+          child,
         })
       } catch (err) {
         // Instrumentation failure: shadow passes (never blocks), gate fails
@@ -136,6 +163,10 @@ export default (async (ctx) => {
         )
       }
       if (!c || mode === "shadow") return
+
+      // Sub-agent children under gate_scope main: the dial (ask rows) does not
+      // apply — only the floor's deny below still does. `all` gates them too.
+      if (child && scope === "main" && c.verdict !== "deny") return
 
       // deny before anything else: the floor is never approvable — not by the
       // user's confirm, not by JEV, not via root_classes.

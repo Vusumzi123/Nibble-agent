@@ -223,6 +223,97 @@ test("automationChildSessions bypass the gate entirely (settled decision #3)", a
 })
 
 // ---------------------------------------------------------------------------
+// gate_scope — sub-agent children (parentID set) are floor-only under `main`.
+
+/** Minimal opencode client: sessions in `childIDs` report a parentID. */
+function childClient(childIDs: string[]): any {
+  return {
+    session: {
+      get: async ({ path }: any) => ({
+        data: childIDs.includes(path.id)
+          ? { id: path.id, parentID: "ses_parent", agent: "sub" }
+          : { id: path.id },
+      }),
+      messages: async () => ({ data: [] }),
+    },
+  }
+}
+
+test("gate_scope main (default): a sub-agent child skips ask rows but keeps the floor", async () => {
+  const dir = await project(0) // strictest level — would ask everything
+  const hooks = await createHook({ directory: dir, client: childClient(["ses_child"]) } as any)
+
+  // Child: ask rows pass without approval...
+  await before(hooks, "edit", { filePath: "src/app.ts" }, "ses_child") // project-write @L0
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" }, "ses_child") // destructive @L0
+  // ...but the irreversibility floor still refuses (deny is scope-independent).
+  await assert.rejects(
+    () => before(hooks, "bash", { command: "mkfs.ext4 /dev/sdb1" }, "ses_child"),
+    /\[autonomy\] DENIED at level 0 \(Off\)/,
+  )
+
+  // The human (top-level) session stays fully gated.
+  await assert.rejects(() => before(hooks, "edit", { filePath: "src/app.ts" }), /ASK at level 0 \(Off\)/)
+
+  // Every attempt was logged, stamped with scope + child.
+  const lines = await readGateLog(dir)
+  assert.equal(lines.length, 4)
+  assert.deepEqual(
+    lines.map((l) => l.verdict),
+    ["ask", "ask", "deny", "ask"],
+  )
+  assert.deepEqual(
+    lines.map((l) => l.child),
+    [true, true, true, false],
+  )
+  for (const line of lines) assert.equal(line.scope, "main")
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("gate_scope all: sub-agent children are gated like everyone else", async () => {
+  const dir = await project(0, ["gate_scope: all"])
+  const hooks = await createHook({ directory: dir, client: childClient(["ses_child"]) } as any)
+  await assert.rejects(
+    () => before(hooks, "edit", { filePath: "src/app.ts" }, "ses_child"),
+    /ASK at level 0 \(Off\)/,
+  )
+  const lines = await readGateLog(dir)
+  assert.equal(lines[0].child, true)
+  assert.equal(lines[0].scope, "all")
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("gate_scope main: sub-agent children get no [autonomy] line", async () => {
+  const dir = await project(3)
+  const hooks = await createHook({ directory: dir, client: childClient(["ses_child"]) } as any)
+  // Human session: the directive line lands as usual.
+  assert.match((await transform(hooks))[0], /level 3 \(Working\)/)
+  // Child session: the dial does not govern it, so no line.
+  const childSystem: string[] = []
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_child" } as any, { system: childSystem } as any)
+  assert.equal(childSystem.length, 0)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("a session whose child lookup fails stays gated (fail-closed)", async () => {
+  const dir = await project(0)
+  const brokenClient = {
+    session: {
+      get: async () => {
+        throw new Error("lookup down")
+      },
+      messages: async () => ({ data: [] }),
+    },
+  }
+  const hooks = await createHook({ directory: dir, client: brokenClient } as any)
+  await assert.rejects(
+    () => before(hooks, "edit", { filePath: "src/app.ts" }, "ses_1"),
+    /ASK at level 0 \(Off\)/,
+  )
+  await rm(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
 // Card F — pending-ask approval flow.
 
 async function confirm(hooks: any, text: string, sessionID = "ses_1"): Promise<void> {

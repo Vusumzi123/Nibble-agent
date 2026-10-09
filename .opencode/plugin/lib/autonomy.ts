@@ -81,6 +81,11 @@ export type AutonomyConfig = {
    *  switch — mirrors the decisions.mode vocabulary, but defaults to gate so
    *  enforcement is on unless explicitly opted out). */
   gate_mode: "shadow" | "gate"
+  /** `main` (default) gates only top-level human sessions — Task sub-agent
+   *  children (parentID set) face the irreversibility floor alone, since an
+   *  ask in a child session is unapprovable (the confirm arrives keyed to the
+   *  human session). `all` gates every session (Phase 1 behaviour). */
+  gate_scope: "main" | "all"
   heartbeat: HeartbeatConfig
   /** K-tokens per mission turn, or `unlimited` (§6.4). */
   mission_token_budget: number | "unlimited"
@@ -127,6 +132,7 @@ export type DashboardConfig = {
 export const DEFAULT_AUTONOMY: AutonomyConfig = {
   level: 1,
   gate_mode: "gate",
+  gate_scope: "main",
   heartbeat: { frequency: "12h", in_progress_lock: true },
   mission_token_budget: 32000,
   root_classes: [],
@@ -171,12 +177,14 @@ export const NIGHT_MENU = ["drain", "dream"] as const
 export const AUTH_MODES = ["off", "login", "login+2fa"] as const
 export const COMMS_CHANNELS = ["telegram", "email"] as const
 export const GATE_MODES = ["shadow", "gate"] as const
+export const GATE_SCOPES = ["main", "all"] as const
 
 // Fresh nested-default views (never share mutable defaults across reads).
 function autonomyDefaults(): NestedDefaults {
-  const { level, gate_mode, mission_token_budget, root_classes, heartbeat, chatter, quiet } = DEFAULT_AUTONOMY
+  const { level, gate_mode, gate_scope, mission_token_budget, root_classes, heartbeat, chatter, quiet } =
+    DEFAULT_AUTONOMY
   return {
-    scalars: { level, gate_mode, mission_token_budget, root_classes },
+    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes },
     blocks: { heartbeat, chatter, quiet },
   }
 }
@@ -337,6 +345,9 @@ const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   // Invalid value -> reject -> default `gate` stands (fail-closed: the kill
   // switch must be an explicit `shadow`).
   gate_mode: { t: "enum", values: GATE_MODES },
+  // Invalid value -> reject -> default `main` stands (sub-agent children stay
+  // floor-only; `all` must be an explicit opt-in).
+  gate_scope: { t: "enum", values: GATE_SCOPES },
   mission_token_budget: { t: "budget" },
   root_classes: { t: "list" },
 }

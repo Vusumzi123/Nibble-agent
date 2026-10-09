@@ -106,6 +106,18 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Changed
 
+- **Autonomy gate scope — `autonomy.gate_scope: main | all` (default `main`).**
+  A Task sub-agent child session (parentID set) now skips every `ask` row
+  under `main`: the dial drives only the top-level human session. Rationale —
+  an ask in a child is unapprovable anyway (the user's confirm arrives keyed
+  to the human session), so gating children produced a permanent approval
+  loop. The **irreversibility floor still denies children** at every level
+  (scope never weakens the floor), verdicts keep logging with `scope` +
+  `child` stamps, and children get no `[autonomy]` prompt line under `main`.
+  `gate_scope: all` restores the previous gate-everything behaviour; a failed
+  child lookup fails closed (the session is gated). This amends the Phase 1
+  interpretation that "human sessions and their Task sub-agents stay gated".
+  Config is hot-read — no restart. Tests: +5; suite **387/387**.
 - **The markdown-vault MCP is now a pinned fork installed by `setup.sh`
   instead of an `npx` git-spec at launch.** Step 1b clones
   `https://github.com/Vusumzi123/mcp-markdown-vault.git` (https, no SSH key)

@@ -294,9 +294,10 @@ telemetry:
 
 # ---------------------------------------------------------------------------
 # Autonomy harness (docs/autonomy-harness-plan.md §11). The autonomy gate
-# (kanban card 2 — plugin/autonomy-gate.ts) reads `level` + `gate_mode` hot
-# every turn and enforces the level matrix at tool.execute.before; the JEV
-# borderline escalation also reads `decisions:` and `.opencode/decision-prompts.yaml`.
+# (kanban card 2 — plugin/autonomy-gate.ts) reads `level` + `gate_mode` +
+# `gate_scope` hot every turn and enforces the level matrix at
+# tool.execute.before; the JEV borderline escalation also reads `decisions:`
+# and `.opencode/decision-prompts.yaml`.
 # lib/mood.ts (card 5), the dashboard backend (cards 8/11), and the comms
 # bridges (card 10) are the future readers of their blocks. Every value is
 # hot-read per call — flipping one takes effect immediately, no restart. An
@@ -305,6 +306,7 @@ telemetry:
 autonomy:
   level: 2                     # 0..4 capability dial (§4.1); code default 1
   gate_mode: gate              # shadow | gate — kill switch: shadow logs without blocking, gate enforces
+  gate_scope: main             # main | all — main: Task sub-agents face only the floor; all: gate everyone
   heartbeat:
     frequency: 12h             # off | <n>m | <n>h — manual only (§4.2)
     in_progress_lock: true
