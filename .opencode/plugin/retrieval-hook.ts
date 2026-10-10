@@ -22,7 +22,7 @@ import {
 } from "./lib/retrieval.ts"
 
 // Per-turn Brain-First retrieval gate (docs/jev-decision-provider-plan.md
-// adjacent; AGENTS.md §0). The economy half of a Self-RAG-style loop: instead of
+// adjacent). The economy half of a Self-RAG-style loop: instead of
 // always delegating a rag-search on the first turn, every user turn is judged by
 // one `noul` decision ("this message needs no vault search") and the verdict is
 // injected into the system prompt as an authoritative [brain-first] directive.

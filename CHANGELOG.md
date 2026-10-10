@@ -4,6 +4,38 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-09
+
+### Changed
+
+- **AGENTS.md compressed + skills split** — always-loaded instructions cut
+  from 302 lines (15.4 KB) to 114 lines (6.0 KB) by moving task-scoped
+  procedures into on-demand Agent Skills (`.opencode/skills/<name>/SKILL.md`,
+  auto-discovered; body loads only via the `skill` tool) and by making the
+  hooks own what they inject:
+  - `os-security` — root-need checklist, pkexec→kdialog→zenity→askpass
+    escalation ladder, dry-run→confirm→live workflow, worked example
+    (former AGENTS.md §7 ladder + §8 workflow/example).
+  - `architecture-reference` — plugin/hook/agent ↔ config-block map, audit
+    format, project-local logs/state layout (former §5).
+  - `web-delegation` — safe-browser briefing rules and scan-log layout
+    (former §3 detail).
+  - AGENTS.md keeps only the always-on invariants (NEVER-rules, L1–L7 locks
+    table) plus a skill index (§7); the whole former §0 Brain-First block is
+    gone — the directive is self-describing ("authoritative for this turn"
+    + template + result handling inline), explicit vault queries stay in §1,
+    and with the hook disabled auto-retrieval should be off anyway; the §0
+    delegation template, budget, and result-handling rules now ride inside
+    the injected `[brain-first: RETRIEVE]` directive itself
+    (`lib/retrieval.ts buildRetrievalDirective`) — paid only on search
+    turns; the per-search limits stay enforced by `rag-search.md`'s hard
+    rules; the `[profile]` block already carries its own usage line
+    (`lib/profile.ts`); `safe-browser`
+    moved into the §2 delegation table; §3 web-browsing section and the
+    root-need checklist dropped (checklist lives in `os-security`); old
+    §7/§8 merged into a single §6 "OS Security — Escalation & Locks";
+    sections renumbered; README pointer updated.
+
 ## 2026-10-08
 
 ### Added

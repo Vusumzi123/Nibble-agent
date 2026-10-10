@@ -255,6 +255,8 @@ export function buildRetrievalDirective(input: {
   }
   return [
     "[brain-first: RETRIEVE] Retrieval gate (authoritative for this turn): perform the Brain-First rag-search (rag-search sub-agent) before answering.",
+    'Delegate with exactly: "rag-search: <user message verbatim>" / "Task type: relevance search" / "Budget: search once (semantic + keyword, topK <= 5), read <= 3 notes, reply <= 10 lines with [[wikilinks]] + one-line key point each. No re-runs."',
+    'Surface the hits first ([[wikilink]] + one-line key point each), then answer; on "No relevant vault knowledge found" proceed normally.',
     `(${stats})`,
   ].join("\n")
 }

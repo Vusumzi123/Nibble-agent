@@ -197,6 +197,12 @@ test("buildRetrievalDirective emits an authoritative SKIP or RETRIEVE block", ()
   const retrieve = buildRetrievalDirective({ skip: false, reason: "intent", pTrue: null })
   assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
   assert.match(retrieve, /p=n\/a/)
+  // The directive carries the full protocol (template + result handling) so
+  // AGENTS.md does not have to (hook-enforced, paid only on RETRIEVE turns).
+  assert.match(retrieve, /Delegate with exactly: "rag-search: <user message verbatim>"/)
+  assert.match(retrieve, /read <= 3 notes/)
+  assert.match(retrieve, /Surface the hits first/)
+  assert.match(retrieve, /No relevant vault knowledge found/)
 })
 
 test("buildRetrievalLogEntry records the verdict, mode, and usage", () => {

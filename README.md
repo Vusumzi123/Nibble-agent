@@ -93,7 +93,8 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
   `security-locks` go/no-go sub-agent (7 locks: dry-run default, explicit
   confirmation, command whitelist, graphical-only root escalation, no
   persistent sudo), with `package-manager` preparing lifecycle commands and
-  `sandbox-runner` isolating arbitrary execution. Flow: `AGENTS.md` §6–§8.
+  `sandbox-runner` isolating arbitrary execution. Flow: `AGENTS.md` §5–§6 +
+  the `os-security` skill (escalation ladder, dry-run workflow).
 - **Decisions:** every gate routes through `lib/decision-gate.ts` →
   `lib/decisions.ts` — the `openjev` provider
   (`.opencode/scripts/decisions_bridge.py`, stdlib-only Python) with a
