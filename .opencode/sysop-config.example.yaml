@@ -313,6 +313,14 @@ autonomy:
     in_progress_lock: true
   mission_token_budget: 32000  # K-tokens per mission turn, or `unlimited` (§6.4)
   root_classes: []             # L4 root allowlist; irreversibility floor applies first
+  # `kind:name:class` triples mapping external tools/sub-agents into the level
+  # matrix. `tool:` names may end in `*` (prefix glob). Classes:
+  #   pure-read, readonly-bash, vault-write, project-write, subagent-read,
+  #   subagent-web, subagent-web-deep, subagent-write, destructive, root,
+  #   self-improve, borderline. Anything NOT listed stays outside the schema.
+  class_overrides: []          # e.g. [tool:my-mcp_*:vault-write, subagent:my-agent:subagent-write]
+  batch:                       # per-turn manifest approval
+    max_actions: 8             # grant budget per confirmed ```autonomy-batch; 0 = one-shot approvals only
   chatter:                     # idle chatter mission (§16) — off until card 7b
     enabled: false
     max_pokes: 3

@@ -27,11 +27,15 @@ export type CallClass =
   | "readonly-bash"
   | "vault-write"
   | "project-write"
-  | "subagent"
+  | "subagent-read"
+  | "subagent-web"
+  | "subagent-web-deep"
+  | "subagent-write"
   | "destructive"
   | "root"
   | "self-improve"
   | "borderline"
+  | "external"
 
 export type Classification = {
   verdict: GateVerdict
@@ -41,11 +45,16 @@ export type Classification = {
   borderline: boolean
   /** Escalate through JEV before settling; verdict stays `ask` fail-closed. */
   jev: boolean
+  /** External tool outside the autonomy schema — never gated, logged only. */
+  outOfSchema?: boolean
 }
 
 export type ClassifyOpts = {
   /** L4 root allowlist (§4.2). Only consulted for root calls at L4. */
   root_classes?: readonly string[]
+  /** `kind:name:class` triples (`tool:foo_*:vault-write`,
+   *  `subagent:my-agent:subagent-write`). Invalid entries never match. */
+  class_overrides?: readonly string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -57,17 +66,24 @@ type Cell = { v: GateVerdict; jev: boolean }
 const allow: Cell = { v: "allow", jev: false }
 const ask: Cell = { v: "ask", jev: false }
 const askJev: Cell = { v: "ask", jev: true }
+const deny: Cell = { v: "deny", jev: false }
 
-const MATRIX: Record<Exclude<CallClass, "floor" | "root">, Cell[]> = {
+// L0 = Plan mode (reads free, mutations denied), L1 = Build mode (code freely,
+// dangerous classes ask), L2 = Knowledge, L3 = Working, L4 = Autonomous.
+// `floor` and `root` are handled before this table; `external` is out-of-schema.
+const MATRIX: Record<Exclude<CallClass, "floor" | "root" | "external">, Cell[]> = {
   "pure-read": [allow, allow, allow, allow, allow],
-  "readonly-bash": [ask, allow, allow, allow, allow],
-  "vault-write": [ask, ask, allow, allow, allow],
-  "project-write": [ask, ask, ask, allow, allow],
-  subagent: [ask, ask, allow, allow, allow],
-  destructive: [ask, ask, ask, ask, askJev],
-  "self-improve": [ask, ask, ask, ask, askJev],
-  // Borderline: L0 plain ask; L1–L3 JEV-escalated ask; L4 allow.
-  borderline: [ask, askJev, askJev, askJev, allow],
+  "readonly-bash": [allow, allow, allow, allow, allow],
+  "vault-write": [deny, allow, allow, allow, allow],
+  "project-write": [deny, allow, allow, allow, allow],
+  "subagent-read": [allow, allow, allow, allow, allow],
+  "subagent-web": [ask, ask, allow, allow, allow],
+  "subagent-web-deep": [ask, ask, askJev, allow, allow],
+  "subagent-write": [ask, ask, allow, allow, allow],
+  destructive: [deny, ask, ask, askJev, allow],
+  "self-improve": [deny, ask, ask, ask, askJev],
+  // Borderline: unparseable bash only — never free, JEV-tripped L1+.
+  borderline: [deny, askJev, askJev, askJev, askJev],
 }
 
 const REASONS: Record<CallClass, string> = {
@@ -76,11 +92,15 @@ const REASONS: Record<CallClass, string> = {
   "readonly-bash": "read-only bash",
   "vault-write": "vault MCP write",
   "project-write": "project write",
-  subagent: "sub-agent spawn",
+  "subagent-read": "read-only sub-agent",
+  "subagent-web": "web sub-agent",
+  "subagent-web-deep": "deep web research",
+  "subagent-write": "mutating sub-agent",
   destructive: "destructive class",
   root: "root command",
   "self-improve": "self-improve path",
   borderline: "unclassifiable",
+  external: "external tool (outside autonomy schema)",
 }
 
 function normalizeLevel(level: unknown): number {
@@ -90,13 +110,13 @@ function normalizeLevel(level: unknown): number {
 // ---------------------------------------------------------------------------
 // [autonomy] prompt line (card D) — advisory, hot-read per turn.
 
-const LEVEL_NAMES = ["Off", "Conservative", "Knowledge", "Working", "Autonomous"] as const
+const LEVEL_NAMES = ["Plan", "Build", "Knowledge", "Working", "Autonomous"] as const
 const LEVEL_ENVELOPES = [
-  "fully manual, every action asks",
-  "read-only probe, almost any action requires approval",
-  "only destructive actions ask, light knowledge work allowed",
-  "working after JEV triad, self-improvement proposals only",
-  "autonomous, root only via approved command classes",
+  "plan mode — reads are free, nothing mutates; propose, don't implement",
+  "build mode — code and commands run freely; destructive/root/self-improve ask",
+  "knowledge — vault writes and browsing delegate freely; destructive still asks",
+  "working — destructive and root cleared by JEV; self-improvement asks",
+  "autonomous — everything passes except the irreversibility floor and root classes",
 ] as const
 
 /** The system-prompt line for the live dial (plan §4.1 names + envelopes). */
@@ -108,31 +128,42 @@ export function autonomyDirective(level: unknown): string {
 // ---------------------------------------------------------------------------
 // Enforcement messages (card E) — thrown from tool.execute.before.
 
-/** Instructive ask: names the level, the reason, and the approval flow (card F). */
+/** Instructive ask: names the level, the reason, and the batch-approval flow. */
 export function askMessage(c: { reason: string; cls: CallClass }, level: unknown): string {
   const L = normalizeLevel(level)
   return (
     `[autonomy] ASK at level ${L} (${LEVEL_NAMES[L]}): ${c.reason} (class: ${c.cls}). ` +
-    `This call needs the user's approval: they send an explicit confirm in chat ` +
-    `(yes / y / proceed / go ahead / approve / --execute / --live), then this exact ` +
-    `call is retried once. Alternatives: raise autonomy.level or set ` +
-    `autonomy.gate_mode: shadow in .opencode/sysop-config.yaml. ` +
-    `This is NOT a command result: the call did not run, so NEVER report it as ` +
-    `"no output", "nothing found", or a tool failure. Relay the hold to the user ` +
-    `(action + reason + the confirm words above) and wait; do not silently rewrite ` +
-    `the command or switch to an equivalent tool to complete the same blocked intent.`
+    `This call needs the user's approval. To avoid one prompt per action, list ALL ` +
+    `planned actions for this task in a fenced \`\`\`autonomy-batch block (one ` +
+    `\`class target\` per line) and wait for a single confirmation; otherwise the ` +
+    `user's confirm approves just this one call. Confirm words: yes / y / proceed / ` +
+    `go ahead / approve / --execute / --live. Alternatives: raise autonomy.level or ` +
+    `set autonomy.gate_mode: shadow in .opencode/sysop-config.yaml. This is NOT a ` +
+    `command result: the call did not run, so NEVER report it as "no output", ` +
+    `"nothing found", or a tool failure. Relay the hold to the user (action + reason + ` +
+    `the confirm words above) and wait; do not silently rewrite the command or switch ` +
+    `to an equivalent tool to complete the same blocked intent.`
   )
 }
 
-/** Hard refusal — the floor is never approvable, at any level (plan §4.1). */
-export function denyMessage(c: { reason: string }, level: unknown): string {
+/** Hard refusal. The floor is never approvable; other denies only occur at L0
+ *  (Plan mode), where the remedy is raising the dial, not retrying. */
+export function denyMessage(c: { reason: string; cls: CallClass }, level: unknown): string {
   const L = normalizeLevel(level)
+  if (c.cls === "floor") {
+    return (
+      `[autonomy] DENIED at level ${L} (${LEVEL_NAMES[L]}): ${c.reason}. ` +
+      `The irreversibility floor is never approvable — not at any level, not via ` +
+      `root_classes. Do not retry. ` +
+      `This is NOT a command result: the call did not run — never report it as ` +
+      `"nothing found". Tell the user the action is permanently blocked.`
+    )
+  }
   return (
-    `[autonomy] DENIED at level ${L} (${LEVEL_NAMES[L]}): ${c.reason}. ` +
-    `The irreversibility floor is never approvable — not at any level, not via ` +
-    `root_classes. Do not retry. ` +
-    `This is NOT a command result: the call did not run — never report it as ` +
-    `"nothing found". Tell the user the action is permanently blocked.`
+    `[autonomy] DENIED at level ${L} (${LEVEL_NAMES[L]}): ${c.reason} (class: ${c.cls}). ` +
+    `Level 0 is Plan mode — reads only; propose changes, don't implement. Raise ` +
+    `autonomy.level (e.g. to 1, Build mode) to perform this action. ` +
+    `This is NOT a command result: the call did not run.`
   )
 }
 
@@ -141,8 +172,9 @@ function result(cls: CallClass, level: number, reason?: string): Classification 
     return { verdict: "deny", cls, reason: reason ?? REASONS.floor, borderline: false, jev: false }
   }
   if (cls === "root") {
-    // L0–L3 always ask; L4 is resolved by the caller (root_classes match).
-    if (level <= 3) return { verdict: "ask", cls, reason: reason ?? REASONS.root, borderline: false, jev: false }
+    // L0 (Plan mode) denies root; L1–L3 ask; L4 is resolved by the caller
+    // (root_classes match -> allow, otherwise ask).
+    if (level === 0) return { verdict: "deny", cls, reason: reason ?? REASONS.root, borderline: false, jev: false }
     return { verdict: "ask", cls, reason: reason ?? REASONS.root, borderline: false, jev: false }
   }
   const cell = MATRIX[cls][level]
@@ -360,7 +392,12 @@ function isSecurityTarget(raw: string): boolean {
 
 function isConfigTarget(raw: string): boolean {
   const p = normalizeTarget(raw)
-  return p === "opencode.json" || p.endsWith("/opencode.json")
+  return (
+    p === "opencode.json" ||
+    p.endsWith("/opencode.json") ||
+    p === "sysop-config.yaml" ||
+    p.endsWith("/sysop-config.yaml")
+  )
 }
 
 function touchesPath(seg: string, pred: (p: string) => boolean): boolean {
@@ -419,7 +456,7 @@ function floorDetail(cmd: string): string | null {
     // hook + permission tampering (audit-hook/, opencode.json permission blocks)
     if (isMutating(seg)) {
       if (touchesPath(seg, isSecurityTarget)) return "tamper with audit hook"
-      if (touchesPath(seg, isConfigTarget)) return "tamper with opencode.json"
+      if (touchesPath(seg, isConfigTarget)) return "tamper with opencode.json or sysop-config.yaml"
     }
   }
   return null
@@ -538,9 +575,28 @@ function rootMatches(cmd: string, rootClasses: readonly string[]): boolean {
 // ---------------------------------------------------------------------------
 // Non-bash tools
 
-const PURE_READ_TOOLS = new Set(["read", "glob", "grep", "list", "todowrite", "todoread"])
+const PURE_READ_TOOLS = new Set(["read", "glob", "grep", "list", "todowrite", "todoread", "skill", "question"])
 const PROJECT_WRITE_TOOLS = new Set(["edit", "write", "patch", "apply_patch"])
 const VAULT_PREFIX = "markdown-vault_"
+
+// Built-in `task` sub-agent types → tier. The child session is floor-only under
+// gate_scope main, so the SPAWN is the permission event; the tier reflects the
+// worst the child could do. Unknown types fail closed to `subagent-write`.
+const SUBAGENT_TIERS: Record<string, CallClass> = {
+  "rag-search": "subagent-read",
+  explore: "subagent-read",
+  "safe-browser": "subagent-web",
+  "deep-browser": "subagent-web-deep",
+  "rag-brain": "subagent-write",
+  "package-manager": "subagent-write",
+  "os-configurator": "subagent-write",
+  "sandbox-runner": "subagent-write",
+  "security-locks": "subagent-write",
+  "web-developer": "subagent-write",
+  "diagram-developer": "subagent-write",
+  "profile-writer": "subagent-write",
+  general: "subagent-write",
+}
 
 // Vault MCP actions (presentation/mcp-tools.ts): reads pass at every level,
 // writes take the vault-write row. Anything unrecognised fails closed.
@@ -573,13 +629,24 @@ function classifyVault(tool: string, args: Record<string, unknown>): CallClass {
   return tool === VAULT_PREFIX + "view" ? "pure-read" : "vault-write"
 }
 
-// Self-improve paths: writes to .opencode/plugin/** or opencode.json (the
-// sanctioned self-improve surfaces — plan §4.1; shell mutation of
-// opencode.json is the floor instead, see floorDetail).
+// Self-improve paths: writes to .opencode/plugin/**, opencode.json, or
+// sysop-config.yaml (the sanctioned self-improve surfaces — plan §4.1; shell
+// mutation of opencode.json / sysop-config.yaml is the floor instead, see
+// floorDetail). sysop-config.yaml holds the autonomy dial, so editing it is
+// self-improve — otherwise the agent could raise its own level.
 function isSelfImprovePath(path: string): boolean {
   if (!path) return false
   const n = path.replace(/\\/g, "/")
-  return n.includes(".opencode/plugin/") || n === ".opencode/plugin" || n === "opencode.json" || n.endsWith("/opencode.json")
+  return (
+    n.includes(".opencode/plugin/") ||
+    n === ".opencode/plugin" ||
+    n === "opencode.json" ||
+    n.endsWith("/opencode.json") ||
+    n === ".opencode/sysop-config.yaml" ||
+    n.endsWith("/.opencode/sysop-config.yaml") ||
+    n === "sysop-config.yaml" ||
+    n.endsWith("/sysop-config.yaml")
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +713,124 @@ export function consumeApproved(store: AskStore, session: string, fingerprint: s
   if (!isApproved(store, session, fingerprint, now)) return false
   store.delete(session)
   return true
+}
+
+// ---------------------------------------------------------------------------
+// Class-override matching — `kind:name:class` triples from
+// `autonomy.class_overrides`. A `tool:` name ending in `*` is a prefix glob.
+// Invalid/unknown class values never match (fail-closed).
+
+const VALID_CLASSES = new Set<CallClass>([
+  "pure-read", "readonly-bash", "vault-write", "project-write",
+  "subagent-read", "subagent-web", "subagent-web-deep", "subagent-write",
+  "destructive", "root", "self-improve", "borderline",
+])
+
+export function parseClassOverride(entry: string): { kind: "tool" | "subagent"; name: string; cls: CallClass } | null {
+  const parts = entry.split(":")
+  if (parts.length < 3) return null
+  const kind = parts[0]
+  if (kind !== "tool" && kind !== "subagent") return null
+  const cls = parts[parts.length - 1]
+  if (!VALID_CLASSES.has(cls as CallClass)) return null
+  return { kind, name: parts.slice(1, -1).join(":"), cls: cls as CallClass }
+}
+
+export function matchOverride(
+  overrides: readonly string[],
+  kind: "tool" | "subagent",
+  name: string,
+): CallClass | null {
+  for (const entry of overrides) {
+    const o = parseClassOverride(entry)
+    if (!o || o.kind !== kind) continue
+    if (o.name === name) return o.cls
+    if (o.name.endsWith("*") && name.startsWith(o.name.slice(0, -1))) return o.cls
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Batch approval (per-turn manifest). The model proposes a fenced
+// ```autonomy-batch block listing `class target` entries; the user's confirm
+// mints a grant binding EXACTLY those entries (class + target substring) with
+// a call budget. Matching ask-class calls then pass without prompting;
+// anything not declared still asks. Grants die on the next non-confirm user
+// message (turn boundary) or TTL. Floor/deny never consults a grant.
+
+export type BatchEntry = { cls: CallClass; target: string }
+export type BatchGrant = { entries: BatchEntry[]; budget: number; ts: number }
+export type GrantStore = Map<string, BatchGrant>
+
+export const BATCH_FENCE = "autonomy-batch"
+export const BATCH_MAX_ENTRIES = 20
+export const BATCH_TARGET_MAX = 500
+
+const BATCH_ALLOWED = new Set<CallClass>([
+  "pure-read", "readonly-bash", "vault-write", "project-write",
+  "subagent-read", "subagent-web", "subagent-web-deep", "subagent-write",
+  "destructive", "root", "self-improve", "borderline",
+])
+
+/** Extract the last ```autonomy-batch block from assistant text. Returns null
+ *  when absent, empty, or all-degenerate. Never throws. */
+export function parseBatchManifest(text: string): BatchEntry[] | null {
+  const fence = new RegExp("```" + BATCH_FENCE + "[\\t ]*\\n([\\s\\S]*?)```")
+  const m = text.match(fence)
+  if (!m) return null
+  const entries: BatchEntry[] = []
+  for (const line of m[1].split("\n")) {
+    const t = line.trim()
+    if (!t || t.startsWith("#")) continue
+    const idx = t.search(/\s+/)
+    const cls = (idx === -1 ? t : t.slice(0, idx)).trim()
+    const target = (idx === -1 ? "" : t.slice(idx + 1).trim()).slice(0, BATCH_TARGET_MAX)
+    if (!BATCH_ALLOWED.has(cls as CallClass)) continue
+    entries.push({ cls: cls as CallClass, target })
+    if (entries.length >= BATCH_MAX_ENTRIES) break
+  }
+  return entries.length ? entries : null
+}
+
+/** The target string of a call, used to match a manifest entry. */
+export function callTarget(tool: string, args: unknown): string {
+  const a = args != null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {}
+  if (tool === "bash") return typeof a.command === "string" ? a.command : ""
+  if (tool === "task") return typeof a.subagent_type === "string" ? a.subagent_type : ""
+  const p = a.filePath ?? a.path ?? a.file ?? a.filename
+  return typeof p === "string" ? p : ""
+}
+
+function entryMatches(entry: BatchEntry, cls: CallClass, target: string): boolean {
+  if (entry.cls !== cls) return false
+  if (!entry.target) return true
+  return target.includes(entry.target)
+}
+
+/** Mint a per-session grant. Budget is capped at the declared entry count. */
+export function mintGrant(store: GrantStore, session: string, entries: BatchEntry[], budget: number, now: number): void {
+  if (entries.length === 0 || budget <= 0) return
+  store.set(session, { entries, budget: Math.min(budget, entries.length), ts: now })
+}
+
+/** Consume the grant for one matching call. Decrements the budget and drops
+ *  the grant when exhausted or expired. Non-matching calls return false. */
+export function consumeGrant(store: GrantStore, session: string, cls: CallClass, target: string, now: number): boolean {
+  const g = store.get(session)
+  if (!g) return false
+  if (now - g.ts > ASK_TTL_MS) {
+    store.delete(session)
+    return false
+  }
+  if (!g.entries.some((e) => entryMatches(e, cls, target))) return false
+  g.budget -= 1
+  if (g.budget <= 0) store.delete(session)
+  return true
+}
+
+/** Drop any grant for the session (turn boundary). */
+export function clearGrant(store: GrantStore, session: string): void {
+  store.delete(session)
 }
 
 // ---------------------------------------------------------------------------
@@ -753,8 +938,22 @@ export function classifyCall(
     if (isSelfImprovePath(path)) return result("self-improve", L)
     return result("project-write", L)
   }
-  if (tool === "task") return result("subagent", L)
-  return result("borderline", L)
+  if (tool === "task") {
+    const st = typeof a.subagent_type === "string" ? a.subagent_type : ""
+    const cls = matchOverride(opts.class_overrides ?? [], "subagent", st) ?? SUBAGENT_TIERS[st] ?? "subagent-write"
+    return result(cls, L)
+  }
+  // External / unclassified tool: out of the autonomy schema — pass, log only.
+  const cls = matchOverride(opts.class_overrides ?? [], "tool", tool)
+  if (cls) return result(cls, L)
+  return {
+    verdict: "allow",
+    cls: "external",
+    reason: REASONS.external,
+    borderline: false,
+    jev: false,
+    outOfSchema: true,
+  }
 }
 
 // ---------------------------------------------------------------------------

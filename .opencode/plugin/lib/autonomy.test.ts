@@ -46,6 +46,9 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     "    in_progress_lock: false",
     "  mission_token_budget: unlimited",
     "  root_classes: [systemctl restart, pacman -Syu]",
+    "  class_overrides: [tool:my-mcp_*:vault-write, subagent:my-agent:subagent-write]",
+    "  batch:",
+    "    max_actions: 4",
     "  chatter:",
     "    enabled: true",
     "    max_pokes: 5",
@@ -67,6 +70,8 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
   assert.deepEqual(cfg.heartbeat, { frequency: "6h", in_progress_lock: false })
   assert.equal(cfg.mission_token_budget, "unlimited")
   assert.deepEqual(cfg.root_classes, ["systemctl restart", "pacman -Syu"])
+  assert.deepEqual(cfg.class_overrides, ["tool:my-mcp_*:vault-write", "subagent:my-agent:subagent-write"])
+  assert.deepEqual(cfg.batch, { max_actions: 4 })
   assert.deepEqual(cfg.chatter, {
     enabled: true,
     max_pokes: 5,
@@ -84,6 +89,20 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     backoff: false,
     dream_missions: ["dream"],
   })
+})
+
+test("readAutonomyConfig defaults batch and class_overrides; rejects invalid batch.max_actions", async () => {
+  const dir = await configDir([
+    "autonomy:",
+    "  batch:",
+    "    max_actions: -3",
+    "  class_overrides: [tool:my_*:vault-write]",
+  ])
+  const rejects: string[] = []
+  const cfg = await readAutonomyConfig(dir, { onReject: (e) => rejects.push(e.path) })
+  assert.equal(cfg.batch.max_actions, 8) // invalid -> default
+  assert.ok(rejects.includes("batch.max_actions"))
+  assert.deepEqual(cfg.class_overrides, ["tool:my_*:vault-write"])
 })
 
 test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks", async () => {

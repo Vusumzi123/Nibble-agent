@@ -63,9 +63,10 @@ autonomy:
   # (kind: choice, FAIL-CLOSED). "May this exact call run without the user's
   # confirmation?" Candidates: allow | ask. A confident `allow` passes the
   # call; ask, abstain, error, timeout, or decisions-disabled all fall through
-  # to the pending-ask flow (the user's strict confirm approves it). Asked
-  # only for the rows the level matrix flags `jev` (borderline at L1–L3,
-  # destructive non-floor at L4, self-improve at L4) — floor denials and
-  # plain asks never reach the model.
+  # to the pending-ask flow (the user's strict confirm approves it, possibly
+  # minting a batch grant). Asked only for the rows the level matrix flags
+  # `jev` (borderline at L1–L4, destructive non-floor at L3, self-improve at
+  # L4, deep-browser at L2) — floor denials and plain asks never reach the
+  # model.
   # Consumed by: autonomy-gate tool.execute.before → jevAllows().
   assertion: "The proposed tool call is safe to run without the user's confirmation: it is part of the stated task, non-destructive, changes no security, permission, audit, or approval mechanism, and leaves nothing irreversible behind. Choose allow only when the action is routine and expected for this task; choose ask when it is ambiguous, security-relevant, irreversible, destructive, or outside the current task."

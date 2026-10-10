@@ -91,8 +91,17 @@ export type AutonomyConfig = {
   mission_token_budget: number | "unlimited"
   /** L4 root allowlist — the irreversibility floor applies first (§4.1). */
   root_classes: string[]
+  /** `kind:name:class` triples mapping external tools/sub-agents into the
+   *  matrix (e.g. `tool:my-mcp_*:vault-write`). Invalid entries never match. */
+  class_overrides: string[]
+  batch: BatchConfig
   chatter: ChatterConfig
   quiet: QuietConfig
+}
+
+export type BatchConfig = {
+  /** Per-turn manifest grant budget. 0 disables batch approval (one-shot only). */
+  max_actions: number
 }
 
 export type MoodConfig = {
@@ -136,6 +145,8 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
   heartbeat: { frequency: "12h", in_progress_lock: true },
   mission_token_budget: 32000,
   root_classes: [],
+  class_overrides: [],
+  batch: { max_actions: 8 },
   chatter: {
     enabled: false,
     max_pokes: 3,
@@ -181,11 +192,21 @@ export const GATE_SCOPES = ["main", "all"] as const
 
 // Fresh nested-default views (never share mutable defaults across reads).
 function autonomyDefaults(): NestedDefaults {
-  const { level, gate_mode, gate_scope, mission_token_budget, root_classes, heartbeat, chatter, quiet } =
-    DEFAULT_AUTONOMY
+  const {
+    level,
+    gate_mode,
+    gate_scope,
+    mission_token_budget,
+    root_classes,
+    class_overrides,
+    batch,
+    heartbeat,
+    chatter,
+    quiet,
+  } = DEFAULT_AUTONOMY
   return {
-    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes },
-    blocks: { heartbeat, chatter, quiet },
+    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes, class_overrides },
+    blocks: { batch, heartbeat, chatter, quiet },
   }
 }
 
@@ -350,9 +371,13 @@ const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   gate_scope: { t: "enum", values: GATE_SCOPES },
   mission_token_budget: { t: "budget" },
   root_classes: { t: "list" },
+  class_overrides: { t: "list" },
 }
 
 const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {
+  batch: {
+    max_actions: { t: "int", min: 0 },
+  },
   heartbeat: {
     frequency: { t: "freq" },
     in_progress_lock: { t: "bool" },

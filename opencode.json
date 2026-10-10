@@ -3,12 +3,9 @@
   "instructions": ["AGENTS.md", "SETUP.md"],
   "subagent_depth": 2,
   "permission": {
-    "edit": { "*": "ask" },
+    "edit": "allow",
     "bash": {
-      "*": "allow",
-      "pkexec *": "ask",
-      "sudo *": "ask",
-      "systemctl *": "ask"
+      "*": "allow"
     },
     "external_directory": {
       "~/.ssh/**": "deny",
@@ -100,6 +97,20 @@
     "safe-browser": {
       "mode": "subagent",
       "color": "#44CCFF",
+      "permission": {
+        "read": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "websearch": "allow",
+        "webfetch": "allow"
+      }
+    },
+    "deep-browser": {
+      "mode": "subagent",
+      "color": "#26C6DA",
       "permission": {
         "read": "deny",
         "edit": "deny",

@@ -8,6 +8,44 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Autonomy re-ladder + batch approval + deep-browser** — the capability
+  dial is re-anchored: **L0 = Plan mode** (reads free, every mutation denied —
+  propose, don't implement), **L1 = Build mode** (code/commands free, only
+  destructive/root/self-improve ask), **L2 = Knowledge** (vault + web
+  delegation free), **L3 = Working** (destructive/root JEV-cleared),
+  **L4 = Autonomous** (only the irreversibility floor + `root_classes`).
+  - **Per-turn manifest approval**: the model proposes a fenced
+    ` ```autonomy-batch ` block listing `class target` actions; one confirm
+    mints a scoped grant (budget = `autonomy.batch.max_actions`, default 8)
+    so declared calls run without prompting until the next user message.
+    One-shot approval remains the fallback; the floor/deny never consult a
+    grant.
+  - **Sub-agent tiers**: the `task` spawn is the permission event — `subagent-read`
+    (rag-search, explore) is free everywhere, `subagent-web` (safe-browser),
+    `subagent-web-deep` (deep-browser), and `subagent-write` (rag-brain,
+    package-manager, …) gate at the level matrix. Children stay floor-only
+    under `gate_scope: main`.
+  - **External tools out of schema**: unknown tools pass (logged
+    `outOfSchema: true`) unless mapped via `autonomy.class_overrides`
+    (`tool:name:class` / `subagent:name:class` triples).
+  - **Self-escalation guard**: `sysop-config.yaml` writes are `self-improve`
+    (edit tool) / floor (shell mutation) so the agent cannot raise its own
+    dial.
+  - **deep-browser** sub-agent (multi-source research, same isolation as
+    safe-browser) + `AGENTS.md` delegation row.
+  - **`docs/autonomy-integration.md`** — the contract for hooking external
+    tools / MCP servers / sub-agents / plugins into the security grid
+    (class vocabulary, level matrix, `class_overrides`, author rules).
+
+### Changed
+
+- **Flattened native `opencode.json` permissions** (`edit: allow`, bash
+  `"*": "allow"`) — the autonomy gate is now the single ask/allow/deny point;
+  `deny` rules (webfetch/websearch, secret paths) are kept.
+- **Level names** `Off`/`Conservative` → `Plan`/`Build` in the directive line,
+  ask/deny messages, and `security-locks` dial-awareness.
+
+
 - **Profile refresh (`profile.refresh_every_turns`, default 5)** —
   persona-fade mitigation: after the first turn, `profile-hook` re-injects
   the FULL `[profile]` block (persona + user context, not just a

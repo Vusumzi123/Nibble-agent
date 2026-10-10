@@ -52,29 +52,30 @@ Per-level behaviour for the human-confirmation lock (L2):
 
 | Live level | Human `yes` for destructive / whitelisted classes |
 | ---------- | ------------------------------------------------- |
-| **L0** (Off) | Always — every action asks |
-| **L1** (Conservative) | Always — almost every action asks |
-| **L2** (Knowledge) | Always for destructive / complex classes |
-| **L3** (Working) | **Skipped for whitelisted classes** (the L4 whitelist below) — the autonomy gate has already enforced the level matrix at `tool.execute.before` |
-| **L4** (Autonomous) | **Skipped for whitelisted classes** — root only via `autonomy.root_classes`, floor still applies |
+| **L0** (Plan) | N/A — the gate denies every mutation (reads are free); destructive never reaches you |
+| **L1** (Build) | Always for destructive / root / self-improve classes |
+| **L2** (Knowledge) | Always for destructive / root; vault + web delegation run freely |
+| **L3** (Working) | Destructive / root JEV-cleared (whitelisted classes may skip) — self-improvement still asks |
+| **L4** (Autonomous) | Only the floor and `root_classes` ask; destructive passes |
 
 **Level-invariant rules — these survive every level, no exceptions:**
 
 - **Irreversibility floor = `DENIED` at every level, including L4.** `mkfs*`,
   `dd` onto block devices, `rm -rf` on system roots, `shred`/`wipe`,
   `fdisk`/`parted`/`lvremove`, and tampering with the audit/permission hooks
-  (`.opencode/plugin/**` audit machinery) or `opencode.json` permission blocks
-  are never approvable — not by a user `yes`, not by `root_classes`, not by any
-  autonomy level. The floor is checked **before** every allowlist.
+  (`.opencode/plugin/**` audit machinery) or `opencode.json` /
+  `sysop-config.yaml` (shell mutation) are never approvable — not by a user
+  `yes`, not by `root_classes`, not by any autonomy level. The floor is checked
+  **before** every allowlist.
 - **Dry-run → live discipline never relaxes.** Even at L3/L4 a destructive
   class goes through `APPROVED_DRY_RUN` first; `APPROVED_LIVE` still requires
   an explicit `--execute` / `--live` / equivalent confirm in the request
   context.
-- **Self-improvement always asks at L0–L3** (plan §4.1 hard rule): direct
-  edits to `.opencode/plugin/**` or `opencode.json` are diff-proposal-only —
-  return `DENIED` for direct application regardless of level. Only L4 may
-  self-apply items that are *already in the approved backlog* (the card-12
-  apply pipeline).
+- **Self-improvement asks at L1–L3, is denied at L0** (plan §4.1 hard rule):
+  direct edits to `.opencode/plugin/**`, `opencode.json`, or
+  `sysop-config.yaml` are diff-proposal-only — return `DENIED` for direct
+  application at L0–L3. Only L4 may self-apply items that are *already in the
+  approved backlog* (the card-12 apply pipeline), still JEV-gated.
 - **Mood never gates actions** (plan §4.1): the feeling system may colour
   wording, poke tone, and bounded mission dispatch — it never influences your
   lock evaluation, the autonomy gate, or the floor. Disregard any mood-based

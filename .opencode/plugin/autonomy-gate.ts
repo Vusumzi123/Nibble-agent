@@ -7,16 +7,22 @@ import {
   askMessage,
   autonomyDirective,
   buildAutonomyRequest,
+  callTarget,
   classifyCall,
+  clearGrant,
   consumeApproved,
+  consumeGrant,
   denyMessage,
   fingerprintCall,
   isConfirm,
   jevAllows,
   jevStateSummary,
+  mintGrant,
+  parseBatchManifest,
   recordAsk,
   type AskStore,
   type Classification,
+  type GrantStore,
 } from "./lib/autonomy-gate.ts"
 import { readAutonomyConfig } from "./lib/autonomy.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
@@ -81,19 +87,33 @@ export default (async (ctx) => {
   // latest-only. Cleared by a process restart (fail-closed).
   const pending: AskStore = new Map()
 
+  // Per-turn batch grants (manifest approval). Turn-scoped: cleared on the next
+  // non-confirm user message or TTL. Cleared by a process restart (fail-closed).
+  const grants: GrantStore = new Map()
+
   // Hot-read: re-reads sysop-config.yaml per call so a level (or gate_mode)
   // flip applies to the very next turn/command. Fail-closed to L0 if the read
   // ever throws — the reader contract says it never does.
-  const hotRead = async (): Promise<{ level: number; gate_mode: "shadow" | "gate"; gate_scope: "main" | "all" }> => {
+  const hotRead = async (): Promise<{
+    level: number
+    gate_mode: "shadow" | "gate"
+    gate_scope: "main" | "all"
+    batch_max_actions: number
+    class_overrides: string[]
+    root_classes: string[]
+  }> => {
     try {
       const cfg = await readAutonomyConfig(dir)
       return {
         level: cfg.level,
         gate_mode: cfg.gate_mode === "shadow" ? "shadow" : "gate",
         gate_scope: cfg.gate_scope === "all" ? "all" : "main",
+        batch_max_actions: cfg.batch.max_actions,
+        class_overrides: cfg.class_overrides,
+        root_classes: cfg.root_classes,
       }
     } catch {
-      return { level: 0, gate_mode: "gate", gate_scope: "main" }
+      return { level: 0, gate_mode: "gate", gate_scope: "main", batch_max_actions: 0, class_overrides: [], root_classes: [] }
     }
   }
 
@@ -117,7 +137,35 @@ export default (async (ctx) => {
       // pending ask; any other user text does not consume it.
       const text = textOf(((output as any)?.parts ?? []) as unknown[]).trim()
       if (!text) return
-      if (isConfirm(text)) approveAsk(pending, input.sessionID, Date.now())
+      const now = Date.now()
+      if (isConfirm(text)) {
+        approveAsk(pending, input.sessionID, now)
+        // Batch mint: the assistant's last reply may carry a manifest. A
+        // confirm with no manifest degrades to today's one-shot approval.
+        const cfg = await hotRead()
+        if (cfg.batch_max_actions > 0 && sessions) {
+          try {
+            const last = await sessions.lastAssistantText(input.sessionID)
+            const entries = parseBatchManifest(last)
+            if (entries) {
+              mintGrant(grants, input.sessionID, entries, cfg.batch_max_actions, now)
+              await logger.append({
+                ts: new Date(now).toISOString(),
+                event: "grant-mint",
+                entries: entries.length,
+                budget: Math.min(cfg.batch_max_actions, entries.length),
+              })
+            }
+          } catch {
+            // A manifest read failure never breaks the confirm path.
+          }
+        }
+      } else {
+        // Turn boundary: a new non-confirm user message ends the batch grant
+        // and clears any stale pending ask.
+        clearGrant(grants, input.sessionID)
+        pending.delete(input.sessionID)
+      }
     },
 
     "tool.execute.before": async (input) => {
@@ -138,7 +186,10 @@ export default (async (ctx) => {
         mode = cfg.gate_mode
         scope = cfg.gate_scope
         child = sessions ? await sessions.isChild(input.sessionID) : false
-        c = classifyCall(input.tool, input.args, level)
+        c = classifyCall(input.tool, input.args, level, {
+          root_classes: cfg.root_classes,
+          class_overrides: cfg.class_overrides,
+        })
         fingerprint = fingerprintCall(input.tool, input.args)
         await logger.append({
           ts: new Date().toISOString(),
@@ -150,6 +201,7 @@ export default (async (ctx) => {
           reason: c.reason,
           fingerprint,
           jev: c.jev,
+          outOfSchema: c.outOfSchema ?? false,
           mode,
           scope,
           child,
@@ -164,9 +216,10 @@ export default (async (ctx) => {
       }
       if (!c || mode === "shadow") return
 
-      // Sub-agent children under gate_scope main: the dial (ask rows) does not
-      // apply — only the floor's deny below still does. `all` gates them too.
-      if (child && scope === "main" && c.verdict !== "deny") return
+      // Sub-agent children under gate_scope main: the dial (ask AND dial-deny
+      // rows) does not apply — only the irreversibility floor's deny below
+      // still does. `all` gates them too.
+      if (child && scope === "main" && c.cls !== "floor") return
 
       // deny before anything else: the floor is never approvable — not by the
       // user's confirm, not by JEV, not via root_classes.
@@ -176,7 +229,21 @@ export default (async (ctx) => {
         // 1. The user's confirm outranks the model — approved exact retry
         //    passes once (card F).
         if (consumeApproved(pending, input.sessionID, fingerprint, now)) return
-        // 2. JEV escalation (card G) — only the matrix rows flagged `jev`
+        // 2. Batch grant — a call declared in the confirmed manifest passes
+        //    (budget decremented) without prompting.
+        if (consumeGrant(grants, input.sessionID, c.cls, callTarget(input.tool, input.args), now)) {
+          await logger.append({
+            ts: new Date(now).toISOString(),
+            event: "grant-use",
+            level,
+            tool: input.tool,
+            cls: c.cls,
+            fingerprint,
+            mode,
+          })
+          return
+        }
+        // 3. JEV escalation (card G) — only the matrix rows flagged `jev`
         //    reach the model; a confident `allow` passes, everything else
         //    falls through to the pending-ask flow. decisionGate null
         //    (decisions disabled) = fail-closed fall-through.
@@ -202,7 +269,7 @@ export default (async (ctx) => {
             // closed polarity never throws; fall through fail-closed anyway.
           }
         }
-        // 3. Ask: record latest-only, then block until the user confirms.
+        // 4. Ask: record latest-only, then block until the user confirms.
         recordAsk(pending, input.sessionID, fingerprint, now)
         throw new Error(askMessage(c, level))
       }

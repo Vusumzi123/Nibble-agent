@@ -31,6 +31,7 @@ parallel when the tasks are independent.
 | `package-manager` | Install/remove/upgrade/purge/search packages on any platform. |
 | `sandbox-runner` | Execute arbitrary commands in an isolated sandbox (Docker, firejail, bwrap). |
 | `safe-browser` | ALL web access — URL fetches and searches. The main agent NEVER calls `webfetch`/`websearch` directly, no exceptions (config-denied too). Read-only, injection-scanned; load the `web-delegation` skill for briefing rules. |
+| `deep-browser` | Deep web research ONLY — multi-step, multi-source synthesis with cross-checking. Invoke only when the user explicitly requests deep research; never proactive. Same isolation as `safe-browser`, longer leash (≤ 8 searches, ≤ 12 fetches, ≤ 800-word report). |
 
 Each sub-agent returns a structured result. Always check the return before
 proceeding.
