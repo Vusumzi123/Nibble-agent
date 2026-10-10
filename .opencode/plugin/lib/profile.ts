@@ -21,6 +21,7 @@ export type ProfileConfig = {
   user_file: string
   inject: boolean
   inject_max_bytes: number
+  refresh_every_turns: number
   decide: boolean
   cooldown_turns: number
   decision_turns: number
@@ -50,6 +51,7 @@ export const DEFAULT_PROFILE: ProfileConfig = {
   user_file: "User.md",
   inject: true,
   inject_max_bytes: 4000,
+  refresh_every_turns: 5,
   decide: true,
   cooldown_turns: 3,
   decision_turns: 3,
@@ -85,6 +87,7 @@ const BOOL_KEYS = new Set([
 const FLOAT_KEYS = new Set(["review_threshold"])
 const INT_KEYS = new Set([
   "inject_max_bytes",
+  "refresh_every_turns",
   "cooldown_turns",
   "decision_turns",
   "decision_max_bytes",

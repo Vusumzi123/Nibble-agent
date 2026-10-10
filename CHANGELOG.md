@@ -6,8 +6,26 @@ Notable changes to Nibble, newest first. Sections follow
 
 ## 2026-10-09
 
+### Added
+
+- **Profile refresh (`profile.refresh_every_turns`, default 5)** —
+  persona-fade mitigation: after the first turn, `profile-hook` re-injects
+  the FULL `[profile]` block (persona + user context, not just a
+  "stay in character" nudge) into the system prompt every N top-level turns.
+  Rebuilt from disk each refresh, so idle-time profile-writer updates apply
+  mid-session; 0 disables; skipped for sessions whose profile block was
+  empty. New tests: cadence, off switch, disk-rebuild (387 → 390).
+
 ### Changed
 
+- **Autonomy enforcement messages forbid misreporting** — `askMessage` /
+  `denyMessage` now state explicitly that the thrown gate message is NOT a
+  command result: the model must never report a held/blocked call as "no
+  output" or "nothing found", must relay the hold to the user (action, reason,
+  confirm words), and must not silently rewrite the command or switch to an
+  equivalent tool to complete the same blocked intent (observed incident:
+  bash `grep` held at L2 borderline, agent reported "nothing found", then
+  silently swapped to the Grep tool).
 - **AGENTS.md compressed + skills split** — always-loaded instructions cut
   from 302 lines (15.4 KB) to 114 lines (6.0 KB) by moving task-scoped
   procedures into on-demand Agent Skills (`.opencode/skills/<name>/SKILL.md`,

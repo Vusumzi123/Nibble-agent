@@ -5,9 +5,11 @@ import {
   DEFAULT_AUTONOMY_ASSERTION,
   autonomyDirective,
   approveAsk,
+  askMessage,
   buildAutonomyRequest,
   classifyCall,
   consumeApproved,
+  denyMessage,
   fingerprintCall,
   isApproved,
   isConfirm,
@@ -364,4 +366,14 @@ test("jevStateSummary prefers command/path and caps the length", () => {
   const long = jevStateSummary("bash", { command: "x".repeat(5000) })
   assert.ok(long.length <= 1501)
   assert.ok(long.endsWith("…"))
+})
+
+test("ask and deny messages forbid misreporting and silent substitution", () => {
+  const ask = askMessage({ reason: "unclassifiable", cls: "borderline" }, 2)
+  assert.match(ask, /NEVER report it as/)
+  assert.match(ask, /Relay the hold to the user/)
+  assert.match(ask, /do not silently rewrite the command or switch to an equivalent tool/)
+  const deny = denyMessage({ reason: "irreversibility floor" }, 2)
+  assert.match(deny, /never report it as/)
+  assert.match(deny, /Tell the user the action is permanently blocked/)
 })

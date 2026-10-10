@@ -116,7 +116,11 @@ export function askMessage(c: { reason: string; cls: CallClass }, level: unknown
     `This call needs the user's approval: they send an explicit confirm in chat ` +
     `(yes / y / proceed / go ahead / approve / --execute / --live), then this exact ` +
     `call is retried once. Alternatives: raise autonomy.level or set ` +
-    `autonomy.gate_mode: shadow in .opencode/sysop-config.yaml.`
+    `autonomy.gate_mode: shadow in .opencode/sysop-config.yaml. ` +
+    `This is NOT a command result: the call did not run, so NEVER report it as ` +
+    `"no output", "nothing found", or a tool failure. Relay the hold to the user ` +
+    `(action + reason + the confirm words above) and wait; do not silently rewrite ` +
+    `the command or switch to an equivalent tool to complete the same blocked intent.`
   )
 }
 
@@ -126,7 +130,9 @@ export function denyMessage(c: { reason: string }, level: unknown): string {
   return (
     `[autonomy] DENIED at level ${L} (${LEVEL_NAMES[L]}): ${c.reason}. ` +
     `The irreversibility floor is never approvable — not at any level, not via ` +
-    `root_classes. Do not retry.`
+    `root_classes. Do not retry. ` +
+    `This is NOT a command result: the call did not run — never report it as ` +
+    `"nothing found". Tell the user the action is permanently blocked.`
   )
 }
 

@@ -247,6 +247,7 @@ profile:
   user_file: User.md           # under <vault>
   inject: true                 # first-turn system-prompt injection
   inject_max_bytes: 4000       # per-note cap on injected content (frontmatter/Related already stripped)
+  refresh_every_turns: 5       # re-inject the full profile block every N turns (persona fade); rebuilt from disk; 0 disables
   decide: true                 # idle JEV decision + conditional update
   cooldown_turns: 3            # min top-level idle turns between profile decisions
   decision_turns: 3            # last N session turns handed to the decision + writer

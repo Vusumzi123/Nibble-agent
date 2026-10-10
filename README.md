@@ -76,7 +76,9 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
   project-local buffer (`.opencode/state/memory.json`) and periodically
   consolidates them into vault notes via a `rag-brain` child session.
 - **Persona:** `profile-hook` injects `Brain/Agent.md` + `Brain/User.md` into
-  the system prompt on the first turn of each session, and at idle decides
+  the system prompt on the first turn of each session, re-injects the full
+  block every `refresh_every_turns` turns (persona-fade mitigation; rebuilt
+  from disk so mid-session note updates apply), and at idle decides
   (JEV `choice`) whether the turn carried durable new information worth writing
   back through a short-lived `profile-writer` child.
 - **Browse:** `webfetch`/`websearch` are denied to the main agent and allowed

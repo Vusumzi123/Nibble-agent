@@ -135,9 +135,15 @@ export default (async ({ client, directory }) => {
   const sessions = createSessionTools(client, directory ?? process.cwd())
 
   // Injection bookkeeping: `firstTurn` = the session is mid-first-turn (block
-  // injected on every request), `injected` = first turn completed (never again).
+  // injected on every request), `injected` = first turn completed (never again),
+  // `hadBlock` = the session received a non-empty block (refresh gate),
+  // `turnCount` = top-level messages this session (refresh cadence).
+  // `blockCache` serves only the first turn; refreshes rebuild from disk so
+  // idle-time profile-writer updates are picked up mid-session.
   const firstTurn = new Set<string>()
   const injected = new Set<string>()
+  const hadBlock = new Set<string>()
+  const turnCount = new Map<string, number>()
   const blockCache = new Map<string, string>()
 
   const buildInjection = async (): Promise<string> => {
@@ -530,6 +536,7 @@ export default (async ({ client, directory }) => {
       const sid = input.sessionID
       if (!sid || automationChildSessions.has(sid)) return
       if (await sessions.isChild(sid)) return
+      turnCount.set(sid, (turnCount.get(sid) ?? 0) + 1)
       if (injected.has(sid) || firstTurn.has(sid)) return
       firstTurn.add(sid)
     },
@@ -537,13 +544,32 @@ export default (async ({ client, directory }) => {
     "experimental.chat.system.transform": async (input, output) => {
       if (!profile.inject) return
       const sid = input.sessionID
-      if (!sid || !firstTurn.has(sid)) return
+      if (!sid) return
+      if (!firstTurn.has(sid)) {
+        // Post-first-turn: re-inject the FULL [profile] block every
+        // `refresh_every_turns` messages (persona-fade mitigation — the model
+        // must re-read all profile instructions, not just "stay in character").
+        // Rebuilt from disk so idle-time note updates apply immediately. Only
+        // for sessions that got a non-empty first-turn block; child/automation
+        // sessions never join `hadBlock`.
+        if (!injected.has(sid) || !hadBlock.has(sid)) return
+        const n = turnCount.get(sid) ?? 0
+        const every = profile.refresh_every_turns
+        if (every > 0 && n > 1 && n % every === 0) {
+          const fresh = await buildInjection()
+          if (fresh) output.system.push(fresh)
+        }
+        return
+      }
       let block = blockCache.get(sid)
       if (block === undefined) {
         block = await buildInjection()
         blockCache.set(sid, block)
       }
-      if (block) output.system.push(block)
+      if (block) {
+        hadBlock.add(sid)
+        output.system.push(block)
+      }
     },
 
     event: async ({ event }) => {
