@@ -41,9 +41,11 @@ proceeding.
 - The vault root is `Brain/` (configurable via `paths:` in
   `sysop-config.yaml`). Notes are Obsidian-style markdown with YAML
   frontmatter and `[[wikilinks]]`.
-- `Brain/meta/` is owned by **rag-brain** (contract, overview, hygiene logs).
-  When a structural change makes it stale, brief `rag-brain` to update it in
-  the same pass.
+- `Brain/meta/` is owned by **rag-brain** (contract, overview, changelog log,
+  hygiene logs). When a structural change makes it stale, brief `rag-brain` to
+  update it in the same pass. `Brain/meta/log.md` is the append-only changelog
+  (format `## [YYYY-MM-DD] op | title`); the knowledge-hook's deterministic log
+  guard enforces that every consolidation drain appends to it.
 - Keep notes tight: a fact and where to find it, not a conversation transcript.
 
 ---

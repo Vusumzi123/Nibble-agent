@@ -13,7 +13,7 @@ import {
   vaultLabel,
 } from "./lib/write-guard.ts"
 import { isReadonlyVaultPath, parseReadonlyDirs, readVaultPolicy } from "./lib/vault-policy.ts"
-import { recordIssue } from "./lib/verification.ts"
+import { recordIssue, recordWrite } from "./lib/verification.ts"
 
 // Deterministic post-write guard (Plan A). Replaces the former rag-brain
 // post-write re-read mandate with provable checks for the three markdown-vault
@@ -212,6 +212,9 @@ export default (async ({ directory }) => {
       const allowBulletRepair = input.tool.startsWith("markdown-vault")
       for (const p of paths) {
         if (!inVault(p) || inReadonly(p)) continue
+        // Record the write per session so the knowledge-hook's changelog guard
+        // can prove whether the drain child appended to meta/log.md.
+        recordWrite(input.sessionID, p)
         const snap = snapshots.get(input.callID)
         snapshots.delete(input.callID)
         await verifyWrite(input.sessionID, p, snap && snap.path === p ? snap.content : null, allowBulletRepair)

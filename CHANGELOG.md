@@ -4,6 +4,38 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-11
+
+### Added
+
+- **Deterministic changelog guard + drain digest (ported from sysop-brain,
+  docs/log-split-plan.md)** — the knowledge write pipeline gains three
+  deterministic stages:
+  - **Log guard** — the wikilink-guard now records per-session write receipts
+    (`recordWrite`/`takeWrites` in `lib/verification.ts`); after a drain that
+    consolidated ≥ 1 turn, `knowledge-hook` proves whether the child appended
+    to `meta/log.md`, re-asks once on a miss, then appends a mechanical
+    fallback entry (`## [date] consolidation | batch #… (auto)`) so the
+    changelog is never incomplete. `log.md` is the only vault file the hook may
+    write (append-only). Ledger gains a `log-guard` event + `logGuard` /
+    deterministic `notes:` fields (ends the per-entry note-count prose chore).
+  - **Deterministic drain digest** — all but the last `digest_verbatim_tail`
+    (2) turns compress to extracted atoms (questions, decisions, wikilinks,
+    URLs, paths, flags; `digest_max_chars` 1200); recent turns stay verbatim.
+    Labeled `## User (digest)` in the prompt. `digest: false` reverts.
+  - **Prefetch title-phrase boost** — `extractTitlePhrases` +
+    `normalizeTitle` score Capitalized title phrases (+20) in
+    `findCandidateNotes`; candidate lines now carry `[score N]` so the child
+    skips search round-trips on exact-title matches.
+  - **Config**: `knowledge.log_file` / `log_guard` / `digest` /
+    `digest_verbatim_tail` / `digest_max_chars`.
+  - **Vault**: `Brain/meta/log.md` created (`## [YYYY-MM-DD] op | title`,
+    newest last); `overview.md` repointed; `rag-brain.md` changelog-format
+    contract + mandatory consolidation step 7; `AGENTS.md` meta-ownership line.
+  - Tests: `lib/verification.test.ts` (new), digest/phrase/config cases in
+    `lib/knowledge.test.ts`, both log-guard paths in
+    `lib/knowledge-hook.test.ts` — 443/443 pass.
+
 ## 2026-10-10
 
 ### Added

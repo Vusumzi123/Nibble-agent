@@ -12,7 +12,7 @@ const TEST_HOME = tempHome("khook-home-")
 
 const { default: createHook } = await import("../knowledge-hook.ts")
 const { automationChildSessions } = await import("../lib/automation.ts")
-const { recordIssue, resetVerification } = await import("../lib/verification.ts")
+const { recordIssue, recordWrite, resetVerification } = await import("../lib/verification.ts")
 
 // Project-local roots: logs under <project>/.opencode/logs, hook state under
 // <project>/.opencode/state. Every test uses a fresh project dir, so no state
@@ -205,14 +205,84 @@ test("re-asks once when the child omits its outcome blocks, then prunes", async 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
   assert.deepEqual(await readMem(dir), [])
-  // The spawn prompt + the single re-ask prompt.
-  assert.equal(client.calls.prompts.length, 2)
+  // The spawn prompt + the outcome re-ask + the log-guard re-ask (the mocked
+  // child never produces a meta/log.md write receipt).
+  assert.equal(client.calls.prompts.length, 3)
   const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "ingest-reask"))
+  const logGuard = events.find((e) => e.event === "log-guard")
+  assert.ok(logGuard, "expected a log-guard ledger event")
+  assert.equal(logGuard.reasked, true)
+  assert.equal(logGuard.fallback, true)
   const ingest = events.find((e) => e.event === "ingest")
   assert.ok(ingest, "expected an ingest ledger event")
   assert.equal(ingest.outcome.failed, 0)
   assert.equal(ingest.reasked, true)
+  assert.deepEqual(ingest.logGuard, { reasked: true, fallback: true })
+  assert.ok(typeof ingest.notes === "number")
+})
+
+test("log guard: child forgets the changelog -> re-ask, then a mechanical fallback entry", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  const client = makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [
+    memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
+  ])
+
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+
+  // Spawn + one log-guard re-ask (outcome fences came back on the first reply).
+  assert.equal(client.calls.prompts.length, 2)
+  const reask = client.calls.prompts[1]
+  assert.match(String(reask?.body?.parts?.[0]?.text ?? ""), /meta\/log\.md/)
+
+  const logPath = join(dir, "Brain", "meta", "log.md")
+  const logText = await readFile(logPath, "utf8")
+  const today = new Date().toISOString().slice(0, 10)
+  assert.match(logText, new RegExp(`^## \\[${today}\\] consolidation \\| batch #1, #2, #3 \\(auto\\)$`, "m"))
+
+  const events = await readLog(dir)
+  const guard = events.find((e) => e.event === "log-guard")
+  assert.ok(guard)
+  assert.equal(guard.reasked, true)
+  assert.equal(guard.fallback, true)
+})
+
+test("log guard: child with a meta/log.md write receipt is not re-asked", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  const client = makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [
+    memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
+  ])
+  // Simulate the child having appended to the changelog during the drain.
+  recordWrite("ses_drain_child", join(dir, "Brain", "meta", "log.md"))
+
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+
+  // Spawn prompt only — no log re-ask, no fallback file.
+  assert.equal(client.calls.prompts.length, 1)
+  assert.equal(existsSync(join(dir, "Brain", "meta", "log.md")), false)
+
+  const events = await readLog(dir)
+  const guard = events.find((e) => e.event === "log-guard")
+  assert.ok(guard)
+  assert.equal(guard.reasked, false)
+  assert.equal(guard.fallback, false)
+  assert.ok(typeof guard.notes === "number")
+  const ingest = events.find((e) => e.event === "ingest")
+  assert.deepEqual(ingest?.logGuard, { reasked: false, fallback: false })
 })
 
 test("ingests a batch, prunes consumed turns, and logs the cycle", async () => {

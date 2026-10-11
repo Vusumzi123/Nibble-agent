@@ -96,6 +96,21 @@ knowledge:
   # Capture-time decision tagging (tag choice + salience score).
   tag_gate: true
   tag_candidates: 8
+  # Deterministic changelog guard (docs/log-split-plan.md): a consolidation
+  # child that consolidates anything MUST append to this vault-relative
+  # changelog (`## [YYYY-MM-DD] op | title`, newest last). The hook proves it
+  # via write receipts, re-asks once on a miss, then appends a mechanical
+  # fallback entry so the log is never incomplete. log.md is the ONLY vault
+  # file the hook may write (append-only).
+  log_file: meta/log.md
+  log_guard: true
+  # Deterministic drain-prompt digest: compress turns older than the last
+  # `digest_verbatim_tail` ones to extracted atoms (questions, decision
+  # sentences, wikilinks, URLs, paths, flags), capped at `digest_max_chars`
+  # per side. Set digest: false to revert to fully verbatim prompts.
+  digest: true
+  digest_verbatim_tail: 2
+  digest_max_chars: 1200
   # Per-cycle NDJSON ledger (tokens/cost/steps/outcome). `log` is a LEAF under
   # <log> -> .opencode/logs/. Written through the shared logging engine (see
   # the header).

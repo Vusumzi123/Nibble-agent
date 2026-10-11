@@ -13,8 +13,11 @@ import {
   classifyTurn,
   classifyTranscript,
   extractKeywords,
+  extractTitlePhrases,
+  extractTurnDigest,
   findCandidateNotes,
   hasDurableSignal,
+  normalizeTitle,
   parseConsolidated,
   parseBacklogDrafts,
   parseFrontmatterTags,
@@ -292,6 +295,103 @@ test("findCandidateNotes scans every vault dir (no Raw/ exclusion)", async () =>
   const candidates = await findCandidateNotes(vault, "/state/memory.json", ["needle"], 5)
   assert.equal(candidates.length, 1)
   assert.equal(candidates[0].path, "Raw/raw-note.md")
+})
+
+// ---------------------------------------------------------------------------
+// Digest + log config
+
+test("parseKnowledgeConfig reads log guard and digest keys", () => {
+  const cfg = parseKnowledgeConfig(
+    [
+      "knowledge:",
+      "  log_file: meta/log.md",
+      "  log_guard: false",
+      "  digest: true",
+      "  digest_verbatim_tail: 3",
+      "  digest_max_chars: 800",
+    ].join("\n"),
+  )
+  assert.equal(cfg.log_file, "meta/log.md")
+  assert.equal(cfg.log_guard, false)
+  assert.equal(cfg.digest, true)
+  assert.equal(cfg.digest_verbatim_tail, 3)
+  assert.equal(cfg.digest_max_chars, 800)
+})
+
+test("extractTurnDigest keeps durable signals, caps length, passes short text through", () => {
+  const short = "remember: use pkexec"
+  assert.equal(extractTurnDigest(short, 1200), short)
+
+  const filler = Array.from({ length: 60 }, (_, i) => `casual chatter line ${i} about nothing`).join("\n")
+  const question = "Which systemd unit owns the timer?"
+  const decision = "we decided the router firmware should stay pinned"
+  const wikilink = "See [[Temporal Memory Buffer]] for details"
+  const text = [filler, question, decision, wikilink, "https://example.com/x"].join("\n")
+
+  const digest = extractTurnDigest(text, 600)
+  assert.ok(digest.length < text.length)
+  assert.ok(digest.length <= 600 + 300) // cap + one bounded line overshoot
+  assert.ok(digest.includes(question))
+  assert.ok(digest.includes(decision))
+  assert.ok(digest.includes("[[Temporal Memory Buffer]]"))
+  assert.ok(digest.includes("https://example.com/x"))
+})
+
+test("buildDrainPrompt digests all but the last verbatimTail turns", () => {
+  const longA = "a".repeat(300) + "\nWhat should the cap be?\n" + "x".repeat(500)
+  const longB = "b".repeat(300) + "\nShould we pin the version?\n" + "y".repeat(500)
+  const turns = [entry(1, longA, "answer " + "A".repeat(400)), entry(2, longB, "answer " + "B".repeat(400))]
+
+  const digested = buildDrainPrompt(turns, [], { digest: true, verbatimTail: 1, maxChars: 400 })
+  assert.match(digested, /## User \(digest\)/)
+  assert.ok(digested.includes("What should the cap be?"))
+  // Last turn stays verbatim: full user text present, no digest label after it.
+  assert.ok(digested.includes(longB.trim()))
+  assert.match(digested, /deterministic digests/)
+
+  const verbatim = buildDrainPrompt(turns)
+  assert.ok(verbatim.includes(longA.trim()))
+  assert.equal(verbatim.includes("## User (digest)"), false)
+})
+
+// ---------------------------------------------------------------------------
+// Title phrases (prefetch boost)
+
+test("normalizeTitle lowercases and strips punctuation", () => {
+  assert.equal(normalizeTitle("Temporal Memory Buffer — NDJSON Store!"), "temporal memory buffer ndjson store")
+})
+
+test("extractTitlePhrases picks Capitalized multi-word phrases, not sentence heads", () => {
+  const text =
+    "The Knowledge-Hook Plugin was updated. See Temporal Memory Buffer and [[RAG Retrieval Upgrade Plan]]. " +
+    "Thanks for the help — done!"
+  const phrases = extractTitlePhrases(text)
+  assert.ok(phrases.includes("knowledge hook plugin"))
+  assert.ok(phrases.includes("temporal memory buffer"))
+  assert.ok(phrases.includes("rag retrieval upgrade plan"))
+  assert.equal(phrases.some((p) => p.startsWith("thanks")), false)
+  assert.equal(phrases.some((p) => p.startsWith("the ")), false)
+})
+
+test("findCandidateNotes boosts title-phrase matches", async () => {
+  const vault = await tmpDir()
+  await writeFile(
+    join(vault, "A.md"),
+    "---\ntitle: Temporal Memory Buffer\n---\nsome body without the keyword",
+    "utf8",
+  )
+  await writeFile(join(vault, "B.md"), "---\ntitle: Unrelated Note\n---\nsome body without the keyword", "utf8")
+
+  const without = await findCandidateNotes(vault, "/state/memory.json", ["zqxjnonsense"], 5)
+  assert.equal(without.length, 0)
+
+  const withPhrases = await findCandidateNotes(vault, "/state/memory.json", ["zqxjnonsense"], 5, [
+    "temporal memory buffer",
+  ])
+  const boosted = withPhrases.find((c) => c.path === "A.md")
+  assert.ok(boosted)
+  assert.ok((boosted?.score ?? 0) >= 20)
+  assert.equal(withPhrases.find((c) => c.path === "B.md"), undefined)
 })
 
 // ---------------------------------------------------------------------------

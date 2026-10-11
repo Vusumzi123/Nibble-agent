@@ -14,6 +14,30 @@ export type VerificationIssue = {
 
 const issues = new Map<string, VerificationIssue[]>()
 
+// Vault write paths recorded per session (fed by the wikilink-guard's
+// tool.execute.after). The knowledge-hook consults `takeWrites(childID)` after
+// a drain to enforce the changelog contract (meta/log.md must be appended
+// whenever the child consolidated anything). Process-local, same lifetime as
+// the issues map.
+const writes = new Map<string, Set<string>>()
+
+export function recordWrite(sessionID: string, path: string): void {
+  if (!sessionID || !path) return
+  const set = writes.get(sessionID) ?? new Set<string>()
+  set.add(path)
+  writes.set(sessionID, set)
+}
+
+export function peekWrites(sessionID: string): string[] {
+  return [...(writes.get(sessionID) ?? [])]
+}
+
+export function takeWrites(sessionID: string): string[] {
+  const list = peekWrites(sessionID)
+  writes.delete(sessionID)
+  return list
+}
+
 export function recordIssue(sessionID: string, issue: VerificationIssue): void {
   if (!sessionID) return
   const list = issues.get(sessionID) ?? []
@@ -33,10 +57,12 @@ export function takeIssues(sessionID: string): VerificationIssue[] {
 
 export function clearSession(sessionID: string): void {
   issues.delete(sessionID)
+  writes.delete(sessionID)
 }
 
 export function resetVerification(): void {
   issues.clear()
+  writes.clear()
 }
 
 // An issue is "blocking" when the guard could not cleanly resolve it (an

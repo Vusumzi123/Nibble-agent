@@ -1,16 +1,16 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { automationChildSessions } from "./lib/automation.ts"
-import { readFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { atomicWrite } from "./lib/fsx.ts"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso } from "./lib/util.ts"
-import { blockingIssues, takeIssues } from "./lib/verification.ts"
+import { blockingIssues, takeIssues, takeWrites } from "./lib/verification.ts"
 import {
   buildDecisionsLogEntry,
   buildIngestRequest,
@@ -27,6 +27,7 @@ import {
   classifyTurn,
   drainAccounting,
   extractKeywords,
+  extractTitlePhrases,
   findCandidateNotes,
   hasDurableSignal,
   parseBacklogDrafts,
@@ -38,6 +39,7 @@ import {
   resolveTagIndexFile,
   selectDrainBatch,
   spawnDrainChild,
+  walkMarkdown,
   TURN_AGENT,
   type CandidateNote,
   type TagIndexEntry,
@@ -90,6 +92,20 @@ const DRAIN_REASK =
   "backlog = it was a deferred action, one JSON object per line):\n" +
   "```consolidated\n#<seq>\n```\n```skipped\n#<seq>\n```\n" +
   '```backlog\n{"seq": 3, "title": "…"}\n```'
+
+// One-shot re-ask when a consolidation child wrote notes but never appended
+// the mandatory changelog entry (meta/log.md). The deterministic log guard
+// proves the miss via per-session write receipts; this re-ask is the only LLM
+// cost of the guard, and a second miss falls through to a mechanical fallback
+// entry so the log is never incomplete.
+const logReaskPrompt = (logFile: string): string =>
+  `You consolidated notes for the batch but did not append the mandatory changelog entry. ` +
+  `Append exactly ONE entry to \`${logFile}\` (the vault changelog, append-only, newest entries last) ` +
+  `in EXACTLY this format:\n\n` +
+  `## [YYYY-MM-DD] consolidation | Short Title\n` +
+  `One or two sentences: which notes you created or updated and why.\n\n` +
+  `Use today's real date. op must be \`consolidation\`. Do NOT modify any other file. ` +
+  `When done, reply with only: done`
 
 const z = tool.schema
 
@@ -257,15 +273,15 @@ export default (async ({ client, directory }) => {
     return { reply: "", timedOut: !idled }
   }
 
-  // Ask a finished consolidation child to emit its outcome blocks. Registers the
+  // Ask a finished child to reply to a short follow-up prompt. Registers the
   // idle waiter BEFORE prompting so the child's next `session.idle` is caught.
-  // Best-effort: any transport failure yields "" and the caller retains the turns.
-  const reaskForOutcome = async (childID: string): Promise<string> => {
+  // Best-effort: any transport failure yields "" and the caller decides.
+  const promptChildReply = async (childID: string, prompt: string): Promise<string> => {
     const reIdle = waitForChildIdle(childID)
     try {
       const res = await (client as any).session.promptAsync({
         path: { id: childID },
-        body: { agent: TURN_AGENT, parts: [{ type: "text", text: DRAIN_REASK }] },
+        body: { agent: TURN_AGENT, parts: [{ type: "text", text: prompt }] },
         query: { directory },
       })
       if (res?.error || (res?.response && !res.response.ok)) {
@@ -286,6 +302,10 @@ export default (async ({ client, directory }) => {
     }
     return ""
   }
+
+  // Ask a finished consolidation child to emit its outcome blocks.
+  const reaskForOutcome = async (childID: string): Promise<string> =>
+    promptChildReply(childID, DRAIN_REASK)
 
   // --- Failure surfacing ----------------------------------------------------
   // Both helpers report back into the session as a noReply system-ish prompt
@@ -454,6 +474,36 @@ export default (async ({ client, directory }) => {
   //   0 readiness → 1 deterministic prefilter → 2 JEV ingest gate
   //   → 3 batch+spawn → 4 await child → 5 write-guard verification
   //   → 6 parse outcomes (one re-ask) → 7 prune + ledger
+  // Mechanical fallback changelog entry (log guard last resort): deterministic
+  // header + one-line body, appended directly. log.md is the single vault file
+  // the hook may write, append-only, and only when the child failed to log.
+  const appendFallbackLogEntry = async (logPath: string, seqs: number[]): Promise<void> => {
+    const date = new Date().toISOString().slice(0, 10)
+    const header = `## [${date}] consolidation | batch #${seqs.join(", #")} (auto)`
+    const body = `Deterministic fallback entry — the consolidation child did not log this batch.\n`
+    let cur = ""
+    try {
+      cur = await readFile(logPath, "utf8")
+    } catch {
+      cur = ""
+    }
+    const sep = cur.length === 0 ? "" : cur.endsWith("\n") ? "\n" : "\n\n"
+    await mkdir(dirname(logPath), { recursive: true })
+    await appendFile(logPath, `${sep}${header}\n${body}`, "utf8")
+  }
+
+  // Deterministic vault note count for the drain ledger (replaces the former
+  // per-entry "Note count N → N" prose chore the child used to write).
+  const countVaultNotes = async (): Promise<number | null> => {
+    try {
+      let n = 0
+      for await (const _ of walkMarkdown(vaultDir)) n++
+      return n
+    } catch {
+      return null
+    }
+  }
+
   const ingestIfNeeded = async (sid: string, opts: { force?: boolean } = {}): Promise<void> => {
     if (draining) return
     draining = true
@@ -549,16 +599,30 @@ export default (async ({ client, directory }) => {
       state.lastDrainAt = now
       await stateStore.write(state)
 
-      // Deterministic dedupe prefetch over the batch.
+      // Deterministic dedupe prefetch over the batch (keywords + title-like
+      // phrases; the phrase boost surfaces exact-title matches the child would
+      // otherwise spend a search round-trip finding).
       let candidatesNotes: CandidateNote[] = []
       try {
-        const keywords = extractKeywords(selection.batch.map((e) => e.user + " " + e.assistant).join("\n"))
-        candidatesNotes = await findCandidateNotes(vaultDir, memoryFile, keywords, config.prefetch_candidates)
+        const batchText = selection.batch.map((e) => e.user + " " + e.assistant).join("\n")
+        const keywords = extractKeywords(batchText)
+        const phrases = extractTitlePhrases(batchText)
+        candidatesNotes = await findCandidateNotes(
+          vaultDir,
+          memoryFile,
+          keywords,
+          config.prefetch_candidates,
+          phrases,
+        )
       } catch (err) {
         void diag.error("[knowledge-hook] prefetch failed:", err)
       }
 
-      const prompt = buildDrainPrompt(selection.batch, candidatesNotes)
+      const prompt = buildDrainPrompt(selection.batch, candidatesNotes, {
+        digest: config.digest,
+        verbatimTail: config.digest_verbatim_tail,
+        maxChars: config.digest_max_chars,
+      })
       const spawned = await spawnDrainChild(client as any, { parentID: sid, directory, prompt })
       if (!spawned.ok) {
         await recordFailure(sid, new Error(spawned.error ?? "ingest spawn failed"))
@@ -636,6 +700,41 @@ export default (async ({ client, directory }) => {
           event: "ingest-reask",
           batch: [...batchSeqs],
           reported: [...ok, ...skipped, ...backlogSeqs].filter((s) => batchSeqs.has(s)),
+        })
+      }
+
+      // Changelog guard (deterministic): whenever the child consolidated at
+      // least one turn it must have appended to meta/log.md. Proven via the
+      // per-session write receipts recorded by the wikilink-guard. One re-ask
+      // on a miss; a second miss gets a mechanical fallback entry so the log
+      // is never incomplete. (log.md is the only vault file the hook may
+      // write, append-only.) Backlog-only drains append no notes → no entry.
+      let logReasked = false
+      let logFallback = false
+      let noteCount: number | null = null
+      const logPath = join(vaultDir, config.log_file)
+      if (config.log_guard && ok.size > 0) {
+        const wroteLog = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
+        if (!wroteLog) {
+          logReasked = true
+          await promptChildReply(spawned.sessionID, logReaskPrompt(config.log_file))
+          const nowWrote = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
+          if (!nowWrote) {
+            logFallback = true
+            try {
+              await appendFallbackLogEntry(logPath, [...ok].sort((a, b) => a - b))
+            } catch (err) {
+              void diag.error("[knowledge-hook] fallback log append failed:", err)
+            }
+          }
+        }
+        noteCount = await countVaultNotes()
+        await logger.append({
+          ts: nowIso(),
+          event: "log-guard",
+          reasked: logReasked,
+          fallback: logFallback,
+          notes: noteCount,
         })
       }
 
@@ -720,6 +819,8 @@ export default (async ({ client, directory }) => {
         backlog: [...backlogSeqs].filter((s) => batchSeqs.has(s)),
         recovered: [...recovered],
         reasked,
+        logGuard: config.log_guard && ok.size > 0 ? { reasked: logReasked, fallback: logFallback } : null,
+        notes: noteCount,
         pruned,
         child: acct,
         durationMs: Date.now() - startedAt,
