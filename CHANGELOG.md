@@ -21,6 +21,16 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Session-scoped autonomy approval ("allow session")** — the gate gains a
+  grant lifetime between the one-shot exact-retry and the per-turn batch grant.
+  A pending ask's class + target now ride on the pending record; replying
+  `allow session` / `always allow` mints a **session-scoped** grant (survives
+  turn boundaries; in-memory, so a restart clears it — fail-closed) covering the
+  exact `(class, target)` (`target` mode) or the whole class (`class` mode).
+  Config: `autonomy.session_grant: off|target|class` (default `off`) and
+  `autonomy.session_grant_ttl` minutes (`0` = session lifetime); `revoke session`
+  drops it. The irreversibility floor, root escalation, and self-improve paths
+  are **never** session-grantable.
 - **Deterministic changelog guard + drain digest (ported from sysop-brain,
   docs/log-split-plan.md)** — the knowledge write pipeline gains three
   deterministic stages:

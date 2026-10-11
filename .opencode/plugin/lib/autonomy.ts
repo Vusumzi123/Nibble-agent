@@ -33,6 +33,7 @@ import {
   type NestedReject,
   type NestedSectionOptions,
 } from "./config.ts"
+import { SESSION_GRANT_MODES, type SessionGrantMode } from "./autonomy-gate.ts"
 import { LOG_DEFAULTS, getLogger } from "./logging.ts"
 import { readResolvedPaths } from "./paths.ts"
 
@@ -95,6 +96,10 @@ export type AutonomyConfig = {
    *  matrix (e.g. `tool:my-mcp_*:vault-write`). Invalid entries never match. */
   class_overrides: string[]
   batch: BatchConfig
+  /** Session-wide approval on "allow session" ("off" disables it). */
+  session_grant: SessionGrantMode
+  /** Minutes until a session grant expires; 0 = session lifetime (restart clears). */
+  session_grant_ttl: number
   chatter: ChatterConfig
   quiet: QuietConfig
 }
@@ -147,6 +152,8 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
   root_classes: [],
   class_overrides: [],
   batch: { max_actions: 8 },
+  session_grant: "off",
+  session_grant_ttl: 0,
   chatter: {
     enabled: false,
     max_pokes: 3,
@@ -200,12 +207,14 @@ function autonomyDefaults(): NestedDefaults {
     root_classes,
     class_overrides,
     batch,
+    session_grant,
+    session_grant_ttl,
     heartbeat,
     chatter,
     quiet,
   } = DEFAULT_AUTONOMY
   return {
-    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes, class_overrides },
+    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes, class_overrides, session_grant, session_grant_ttl },
     blocks: { batch, heartbeat, chatter, quiet },
   }
 }
@@ -372,6 +381,9 @@ const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   mission_token_budget: { t: "budget" },
   root_classes: { t: "list" },
   class_overrides: { t: "list" },
+  // Invalid value -> reject -> default `off` stands (session grants are opt-in).
+  session_grant: { t: "enum", values: SESSION_GRANT_MODES },
+  session_grant_ttl: { t: "int", min: 0 },
 }
 
 const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {

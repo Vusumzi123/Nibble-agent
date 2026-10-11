@@ -348,3 +348,34 @@ test("gate_scope defaults to main, parses all, and fails closed on invalid", asy
   assert.equal(cfgInvalid.gate_scope, "main")
   assert.deepEqual(events, ["gate_scope"])
 })
+
+// ---------------------------------------------------------------------------
+// session_grant — the session-wide approval dial
+
+test("session_grant defaults to off, parses target/class, and fails closed on invalid", async () => {
+  // Missing keys -> opt-in defaults (session grants stay off).
+  const missing = await configDir(["autonomy:", "  level: 2"])
+  const cfgMissing = await readAutonomyConfig(missing, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgMissing.session_grant, "off")
+  assert.equal(cfgMissing.session_grant_ttl, 0)
+  assert.equal(DEFAULT_AUTONOMY.session_grant, "off")
+  assert.equal(DEFAULT_AUTONOMY.session_grant_ttl, 0)
+
+  // Explicit target/class + a TTL parse.
+  const target = await configDir(["autonomy:", "  session_grant: target", "  session_grant_ttl: 15"])
+  const cfgTarget = await readAutonomyConfig(target, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgTarget.session_grant, "target")
+  assert.equal(cfgTarget.session_grant_ttl, 15)
+
+  const klass = await configDir(["autonomy:", "  session_grant: class"])
+  const cfgClass = await readAutonomyConfig(klass, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgClass.session_grant, "class")
+
+  // Invalid enum + negative TTL -> reject + defaults (fail-closed to off).
+  const invalid = await configDir(["autonomy:", "  session_grant: always", "  session_grant_ttl: -1"])
+  const events: string[] = []
+  const cfgInvalid = await readAutonomyConfig(invalid, { onReject: (e) => events.push(e.path) })
+  assert.equal(cfgInvalid.session_grant, "off")
+  assert.equal(cfgInvalid.session_grant_ttl, 0)
+  assert.deepEqual(events.sort(), ["session_grant", "session_grant_ttl"])
+})

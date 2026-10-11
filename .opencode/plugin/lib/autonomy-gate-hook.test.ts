@@ -598,3 +598,82 @@ test("batch approval is disabled when max_actions is 0 (one-shot only)", async (
   assert.equal((await readGateLog(dir)).some((l) => l.event === "grant-mint"), false)
   await rm(dir, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// Session-scoped approval ("allow session").
+
+test("session_grant off (default): 'allow session' degrades to a one-shot confirm", async () => {
+  const dir = await project(1) // Build mode: destructive asks; no session_grant key -> off
+  const hooks = await createHook({ directory: dir } as any)
+  const attempt = () => before(hooks, "bash", { command: "rm -rf /tmp/scratch" })
+
+  await assert.rejects(attempt, /ASK/)
+  await confirm(hooks, "allow session")
+  await attempt() // one-shot retry passes
+  await assert.rejects(attempt, /ASK/) // no session grant was minted
+  assert.equal((await readGateLog(dir)).some((l) => l.event === "session-grant-mint"), false)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("session grant (target): the exact call passes for the session, a sibling still asks", async () => {
+  const dir = await project(1, ["session_grant: target"])
+  const hooks = await createHook({ directory: dir } as any)
+
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/scratch" }), /ASK/)
+  await confirm(hooks, "allow session")
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" }) // one-shot retry
+  // The grant survives a non-confirm turn boundary.
+  await confirm(hooks, "let's keep going")
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" }) // via the session grant
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/scratch/sub" }), /ASK/)
+
+  const lines = await readGateLog(dir)
+  assert.ok(lines.some((l) => l.event === "session-grant-mint" && l.grant_mode === "target"))
+  assert.ok(lines.some((l) => l.event === "session-grant-use"))
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("session grant (class): any target of the class passes", async () => {
+  const dir = await project(1, ["session_grant: class"])
+  const hooks = await createHook({ directory: dir } as any)
+
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/scratch" }), /ASK/)
+  await confirm(hooks, "always allow")
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" }) // one-shot
+  await before(hooks, "bash", { command: "rm -rf /tmp/completely-other" }) // class grant
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("session grant never covers self-improve: .opencode edits still ask", async () => {
+  const dir = await project(3, ["session_grant: class"]) // Working: self-improve asks
+  const hooks = await createHook({ directory: dir } as any)
+  const attempt = (p: string) => before(hooks, "edit", { filePath: p })
+
+  await assert.rejects(() => attempt(".opencode/plugin/lib/scratch-a.ts"), /ASK/)
+  await confirm(hooks, "allow session") // mint refused for self-improve
+  await attempt(".opencode/plugin/lib/scratch-a.ts") // one-shot retry passes
+  await assert.rejects(() => attempt(".opencode/plugin/lib/scratch-b.ts"), /ASK/) // never session-granted
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("the floor still denies under an active session grant", async () => {
+  const dir = await project(1, ["session_grant: class"])
+  const hooks = await createHook({ directory: dir } as any)
+
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/scratch" }), /ASK/)
+  await confirm(hooks, "allow session")
+  await assert.rejects(() => before(hooks, "bash", { command: "mkfs.ext4 /dev/sdb1" }), /DENIED/)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("'revoke session' drops an active session grant", async () => {
+  const dir = await project(1, ["session_grant: class"])
+  const hooks = await createHook({ directory: dir } as any)
+
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/scratch" }), /ASK/)
+  await confirm(hooks, "allow session")
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" }) // one-shot
+  await confirm(hooks, "revoke session")
+  await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/other" }), /ASK/)
+  await rm(dir, { recursive: true, force: true })
+})

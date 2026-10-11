@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import {
   ASK_TTL_MS,
   DEFAULT_AUTONOMY_ASSERTION,
+  SESSION_GRANT_MODES,
   autonomyDirective,
   approveAsk,
   askMessage,
@@ -10,22 +11,28 @@ import {
   callTarget,
   classifyCall,
   clearGrant,
+  clearSessionGrant,
   consumeApproved,
   consumeGrant,
+  consumeSessionGrant,
   denyMessage,
   fingerprintCall,
   isApproved,
   isConfirm,
+  isSessionConfirm,
+  isSessionRevoke,
   jevAllows,
   jevStateSummary,
   matchOverride,
   mintGrant,
+  mintSessionGrant,
   parseBatchManifest,
   parseClassOverride,
   recordAsk,
   type AskStore,
   type Classification,
   type GrantStore,
+  type SessionGrantStore,
 } from "./autonomy-gate.ts"
 
 const LEVELS = [0, 1, 2, 3, 4] as const
@@ -508,4 +515,90 @@ test("ask and deny messages forbid misreporting and silent substitution", () => 
   const l0 = denyMessage({ reason: "project write", cls: "project-write" }, 0)
   assert.match(l0, /Plan mode/)
   assert.match(l0, /Raise autonomy.level/)
+})
+
+// ---------------------------------------------------------------------------
+// Session-confirm vocabulary + session grant store.
+
+test("isSessionConfirm matches the session vocabulary only", () => {
+  for (const yes of [
+    "allow session",
+    "allow this session",
+    "allow for this session",
+    "session allow",
+    "always allow",
+    "allow always",
+    "Allow Session",
+  ]) {
+    assert.equal(isSessionConfirm(yes), true, `session confirm: ${yes}`)
+  }
+  for (const no of ["yes", "approve", "allow", "session", "allow me", ""]) {
+    assert.equal(isSessionConfirm(no), false, `not session confirm: ${no}`)
+  }
+})
+
+test("isSessionRevoke matches revoke phrases only", () => {
+  for (const yes of ["revoke session", "clear session", "end session", "drop the session"]) {
+    assert.equal(isSessionRevoke(yes), true, `revoke: ${yes}`)
+  }
+  for (const no of ["revoke", "session", "yes", ""]) {
+    assert.equal(isSessionRevoke(no), false, `not revoke: ${no}`)
+  }
+})
+
+test("askMessage appends the session line only when enabled", () => {
+  const off = askMessage({ reason: "unclassifiable", cls: "borderline" }, 3)
+  assert.doesNotMatch(off, /allow session/)
+  const on = askMessage({ reason: "unclassifiable", cls: "borderline" }, 3, { sessionGrant: true })
+  assert.match(on, /allow session/)
+  assert.match(on, /revoke session/)
+  // The original flow text survives either way.
+  assert.match(on, /autonomy-batch/)
+  assert.match(on, /Confirm words: yes \/ y \/ proceed/)
+})
+
+test("session grant: target mode passes the exact call repeatedly, not siblings", () => {
+  const store: SessionGrantStore = new Map()
+  assert.equal(mintSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/scratch", "target", 1_000), true)
+  // Session-lifetime: a match is not consumed (unlike the batch budget).
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/scratch", 1_001), true)
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/scratch", 999_999), true)
+  // Exact target only: a sibling/different target or class does not match.
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/scratch/sub", 1_002), false)
+  assert.equal(consumeSessionGrant(store, "ses_1", "project-write", "rm -rf /tmp/scratch", 1_002), false)
+  // Another session is unaffected.
+  assert.equal(consumeSessionGrant(store, "ses_2", "destructive", "rm -rf /tmp/scratch", 1_002), false)
+})
+
+test("session grant: class mode covers every target of the class", () => {
+  const store: SessionGrantStore = new Map()
+  mintSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/scratch", "class", 1_000)
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "rm -rf /tmp/other", 1_001), true)
+  assert.equal(consumeSessionGrant(store, "ses_1", "project-write", "anything", 1_001), false)
+})
+
+test("session grant: floor/root/self-improve/external are never mintable; off never mints", () => {
+  for (const cls of ["floor", "root", "self-improve", "external"] as const) {
+    const store: SessionGrantStore = new Map()
+    assert.equal(mintSessionGrant(store, "ses_1", cls, "x", "class", 1_000), false, `mint ${cls}`)
+    assert.equal(store.size, 0)
+  }
+  const store: SessionGrantStore = new Map()
+  assert.equal(mintSessionGrant(store, "ses_1", "destructive", "x", "off", 1_000), false)
+  assert.equal(store.size, 0)
+})
+
+test("session grant: TTL expiry and explicit clear", () => {
+  const store: SessionGrantStore = new Map()
+  mintSessionGrant(store, "ses_1", "destructive", "x", "target", 1_000)
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "x", 1_000 + 60_000, 60_000), true)
+  assert.equal(consumeSessionGrant(store, "ses_1", "destructive", "x", 1_000 + 60_001, 60_000), false)
+  assert.equal(store.size, 0) // expiry cleans up
+  mintSessionGrant(store, "ses_1", "destructive", "x", "target", 1_000)
+  clearSessionGrant(store, "ses_1")
+  assert.equal(store.size, 0)
+})
+
+test("SESSION_GRANT_MODES is the canonical off/target/class set", () => {
+  assert.deepEqual([...SESSION_GRANT_MODES], ["off", "target", "class"])
 })

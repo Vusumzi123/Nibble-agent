@@ -348,6 +348,8 @@ autonomy:
   class_overrides: []          # e.g. [tool:my-mcp_*:vault-write, subagent:my-agent:subagent-write]
   batch:                       # per-turn manifest approval
     max_actions: 8             # grant budget per confirmed ```autonomy-batch; 0 = one-shot approvals only
+  session_grant: off           # off | target | class — session-wide approval on "allow session" (floor/root/self-improve never covered)
+  session_grant_ttl: 0         # minutes until a session grant expires; 0 = session lifetime (cleared on restart)
   chatter:                     # idle chatter mission (§16) — off until card 7b
     enabled: false
     max_pokes: 3

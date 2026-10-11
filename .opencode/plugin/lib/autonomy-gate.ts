@@ -129,14 +129,22 @@ export function autonomyDirective(level: unknown): string {
 // Enforcement messages (card E) — thrown from tool.execute.before.
 
 /** Instructive ask: names the level, the reason, and the batch-approval flow. */
-export function askMessage(c: { reason: string; cls: CallClass }, level: unknown): string {
+export function askMessage(
+  c: { reason: string; cls: CallClass },
+  level: unknown,
+  opts: { sessionGrant?: boolean } = {},
+): string {
   const L = normalizeLevel(level)
+  const sessionLine = opts.sessionGrant
+    ? ` For a session-wide approval of this exact action, reply "allow session" ` +
+      `(or "always allow"); revoke later with "revoke session".`
+    : ""
   return (
     `[autonomy] ASK at level ${L} (${LEVEL_NAMES[L]}): ${c.reason} (class: ${c.cls}). ` +
     `This call needs the user's approval. To avoid one prompt per action, list ALL ` +
     `planned actions for this task in a fenced \`\`\`autonomy-batch block (one ` +
     `\`class target\` per line) and wait for a single confirmation; otherwise the ` +
-    `user's confirm approves just this one call. Confirm words: yes / y / proceed / ` +
+    `user's confirm approves just this one call.${sessionLine} Confirm words: yes / y / proceed / ` +
     `go ahead / approve / --execute / --live. Alternatives: raise autonomy.level or ` +
     `set autonomy.gate_mode: shadow in .opencode/sysop-config.yaml. This is NOT a ` +
     `command result: the call did not run, so NEVER report it as "no output", ` +
@@ -662,6 +670,9 @@ export type PendingAskRecord = {
   fingerprint: string
   ts: number
   approved: boolean
+  /** Class + target of the pending call — a session grant is minted from these. */
+  cls: CallClass
+  target: string
 }
 
 export type AskStore = Map<string, PendingAskRecord>
@@ -675,13 +686,47 @@ export function isConfirm(text: string): boolean {
   return CONFIRM_RE.test(text.trim())
 }
 
+/** Session-wide confirm vocabulary ("allow session" / "always allow").
+ *  Deliberately wider/looser than CONFIRM_RE so it is easy to type, and
+ *  checked BEFORE isConfirm (none of these phrases match CONFIRM_RE). */
+export const SESSION_CONFIRM_RE = /^(?:allow (?:for )?(?:this )?session|(?:session|always) allow|allow always)\b/i
+
+export function isSessionConfirm(text: string): boolean {
+  return SESSION_CONFIRM_RE.test(text.trim())
+}
+
+/** Session-grant revocation vocabulary ("revoke session"). */
+export const SESSION_REVOKE_RE = /^(?:revoke|clear|end|drop) (?:the )?session\b/i
+
+export function isSessionRevoke(text: string): boolean {
+  return SESSION_REVOKE_RE.test(text.trim())
+}
+
 function expired(record: PendingAskRecord | undefined, now: number): boolean {
   return !record || now - record.ts > ASK_TTL_MS
 }
 
-/** Latest-only: a new ask for the session replaces any previous pending. */
-export function recordAsk(store: AskStore, session: string, fingerprint: string, now: number): void {
-  store.set(session, { fingerprint, ts: now, approved: false })
+/** Latest-only: a new ask for the session replaces any previous pending. The
+ *  class + target ride along so a session confirm can mint a scoped grant. */
+export function recordAsk(
+  store: AskStore,
+  session: string,
+  fingerprint: string,
+  now: number,
+  cls: CallClass = "borderline",
+  target = "",
+): void {
+  store.set(session, { fingerprint, ts: now, approved: false, cls, target })
+}
+
+/** The live (non-expired) pending for a session, if any. Expiry cleans up. */
+export function pendingFor(store: AskStore, session: string, now: number): PendingAskRecord | undefined {
+  const record = store.get(session)
+  if (expired(record, now)) {
+    store.delete(session)
+    return undefined
+  }
+  return record
 }
 
 /** User confirm: approve whatever is pending for the session. No pending
@@ -830,6 +875,74 @@ export function consumeGrant(store: GrantStore, session: string, cls: CallClass,
 
 /** Drop any grant for the session (turn boundary). */
 export function clearGrant(store: GrantStore, session: string): void {
+  store.delete(session)
+}
+
+// ---------------------------------------------------------------------------
+// Session-scoped approval. Distinct from the per-turn batch grant: a session
+// grant survives turn boundaries for the life of the session (in-memory, so a
+// restart clears it — fail-closed). The irreversibility floor, root escalation,
+// and self-improve paths are NEVER session-grantable (invariant).
+
+export type SessionGrantMode = "off" | "target" | "class"
+export const SESSION_GRANT_MODES = ["off", "target", "class"] as const
+
+export type SessionGrant = {
+  cls: CallClass
+  /** Exact target for `target` mode; "" (wildcard) for `class` mode. */
+  target: string
+  mode: SessionGrantMode
+  ts: number
+}
+export type SessionGrantStore = Map<string, SessionGrant>
+
+/** Classes a session grant may never cover (checked at mint time). */
+const SESSION_GRANT_EXCLUDED = new Set<CallClass>(["floor", "root", "self-improve", "external"])
+
+/** Mint a session grant for the pending call. `target` mode binds the exact
+ *  (cls, target); `class` mode binds every call of that class. Returns false
+ *  when the class is not grantable or the mode is off. */
+export function mintSessionGrant(
+  store: SessionGrantStore,
+  session: string,
+  cls: CallClass,
+  target: string,
+  mode: SessionGrantMode,
+  now: number,
+): boolean {
+  if (mode === "off") return false
+  if (SESSION_GRANT_EXCLUDED.has(cls)) return false
+  store.set(session, {
+    cls,
+    target: mode === "class" ? "" : (target ?? "").slice(0, BATCH_TARGET_MAX),
+    mode,
+    ts: now,
+  })
+  return true
+}
+
+/** Does an active session grant cover this call? Session-lifetime: a match is
+ *  NOT consumed (unlike the batch budget). `ttlMs <= 0` means no expiry. */
+export function consumeSessionGrant(
+  store: SessionGrantStore,
+  session: string,
+  cls: CallClass,
+  target: string,
+  now: number,
+  ttlMs = 0,
+): boolean {
+  const g = store.get(session)
+  if (!g) return false
+  if (ttlMs > 0 && now - g.ts > ttlMs) {
+    store.delete(session)
+    return false
+  }
+  if (g.cls !== cls) return false
+  return g.mode === "class" || g.target === target
+}
+
+/** Revoke any session grant for the session. */
+export function clearSessionGrant(store: SessionGrantStore, session: string): void {
   store.delete(session)
 }
 
