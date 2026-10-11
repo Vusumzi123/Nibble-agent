@@ -35,6 +35,9 @@ Notable changes to Nibble, newest first. Sections follow
   - Tests: `lib/verification.test.ts` (new), digest/phrase/config cases in
     `lib/knowledge.test.ts`, both log-guard paths in
     `lib/knowledge-hook.test.ts` — 443/443 pass.
+  - **Setup**: `scripts/setup.sh` step 5b seeds `Brain/meta/log.md` (the
+    append-only changelog the log guard targets) on a fresh vault — contract
+    and overview come from the MCP auto-init, log.md had no generator.
 
 ## 2026-10-10
 
