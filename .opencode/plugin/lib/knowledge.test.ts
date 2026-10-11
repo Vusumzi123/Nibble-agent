@@ -16,6 +16,7 @@ import {
   findCandidateNotes,
   hasDurableSignal,
   parseConsolidated,
+  parseBacklogDrafts,
   parseFrontmatterTags,
   parseKnowledgeConfig,
   parseSkipped,
@@ -194,6 +195,7 @@ test("buildDrainPrompt emits turn-id blocks and candidate notes", () => {
   assert.match(prompt, /Network\/Router\.md/)
   assert.match(prompt, /```consolidated/)
   assert.match(prompt, /```skipped/)
+  assert.match(prompt, /```backlog/)
 })
 
 test("parseConsolidated and parseSkipped read #<seq> ids", () => {
@@ -201,6 +203,31 @@ test("parseConsolidated and parseSkipped read #<seq> ids", () => {
   assert.deepEqual([...parseConsolidated(reply)].sort((a, b) => a - b), [1042, 1043])
   assert.deepEqual([...parseSkipped(reply)], [1044])
   assert.deepEqual([...parseSkipped("no fences here")], [])
+})
+
+test("parseBacklogDrafts reads JSON lines and tolerates malformed ones", () => {
+  const reply =
+    'done\n\n```backlog\n' +
+    '{"seq": 1042, "title": "Wire the VPN", "kind": "task", "level_required": 2, "links": ["[[Roadmap]]"]}\n' +
+    '{"seq": 1043, "title": "Review attachments", "detail": "email"}\n' +
+    "{ not json }\n" +
+    '{"title": "no seq here"}\n' +
+    '{"seq": "not-a-number", "title": "x"}\n' +
+    "```"
+  const drafts = parseBacklogDrafts(reply)
+  assert.equal(drafts.length, 2)
+  assert.deepEqual(drafts[0], {
+    seq: 1042,
+    title: "Wire the VPN",
+    detail: "",
+    kind: "task",
+    level_required: 2,
+    priority: undefined,
+    links: ["[[Roadmap]]"],
+  })
+  assert.equal(drafts[1].kind, "task") // default when absent
+  assert.equal(drafts[1].detail, "email")
+  assert.deepEqual(parseBacklogDrafts("no fence"), [])
 })
 
 test("recoverMislabeledConsolidated recovers prose-named ids only on a mislabeled block", () => {

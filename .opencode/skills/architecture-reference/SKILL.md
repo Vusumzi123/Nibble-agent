@@ -9,6 +9,7 @@ description: Reference map of which plugin, hook, agent, or MCP tool implements 
 | ----- | -------------- | ------------ |
 | Per-turn retrieval gate | `retrieval-hook.ts` | `retrieval:` + `decisions:` + `paths:` |
 | Turn capture + consolidation | `knowledge-hook.ts` | `knowledge:` + `decisions:` + `paths:` |
+| Backlog action queue + derived view | `knowledge-hook.ts` (drain fallback) + `lib/backlog.ts` | `backlog:` + `paths:` |
 | Profile injection + idle updates | `profile-hook.ts` (spawns `profile-writer`) | `profile:` + `decisions:` + `paths:` |
 | Web fetch/search (injection-scanned) | `web-scan-hook.ts` + `safe-browser` agent | `browser:` + `paths:` |
 | Vault read (hybrid BM25 + embeddings + rerank) | `markdown-vault` MCP (pinned fork cloned by `setup.sh` at `MCP_SHA` into `.opencode/mcp/markdown-vault/`, spawned via `node .opencode/mcp/markdown-vault/dist/index.js` from the project root; Ollama embeddings + cross-encoder rerank) | `VAULT_PATH` in `opencode.json` |
@@ -28,6 +29,6 @@ manual step. Rotation, compression, and retention come from the `audit:` block.
 
 **Project-local roots.** Nothing is written outside the project: channel logs
 (audit, telemetry, retrieval, decisions, web-scan, profile, diagnostics) live
-under `.opencode/logs/`, and transient state (memory buffer, tag index, per-hook
-state JSON) under `.opencode/state/`. Both are gitignored, so two projects on
-one machine never share an audit trail or a state file.
+under `.opencode/logs/`, and transient state (memory buffer, tag index, backlog
+queue, per-hook state JSON) under `.opencode/state/`. Both are gitignored, so two
+projects on one machine never share an audit trail or a state file.

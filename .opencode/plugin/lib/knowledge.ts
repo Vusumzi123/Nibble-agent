@@ -322,7 +322,7 @@ export function buildDrainPrompt(turns: MemoryEntry[], candidates: CandidateNote
   )
   sections.push("")
   sections.push(
-    "After processing each turn, report the outcome using EXACTLY these two blocks (one `#<seq>` per line):",
+    "After processing each turn, report the outcome using EXACTLY these blocks (one `#<seq>` per line):",
   )
   sections.push("")
   sections.push("```consolidated")
@@ -333,7 +333,19 @@ export function buildDrainPrompt(turns: MemoryEntry[], candidates: CandidateNote
   sections.push("```")
   sections.push("")
   sections.push(
-    "List a turn in `consolidated` only if you wrote AND verified a durable note for it. List it in `skipped` if it held nothing worth saving. If you FAILED to process a turn, list it in NEITHER block and briefly explain the failure above. The plugin prunes every turn listed in either block.",
+    "If a turn is a deferred ACTION, TODO, or follow-up to do later (not durable knowledge worth a note), do NOT write a note for it — report it as a backlog item instead, using EXACTLY this block (one JSON object per line, `seq` = the `#<seq>` handle):",
+  )
+  sections.push("")
+  sections.push("```backlog")
+  sections.push('{"seq": 3, "title": "…", "detail": "…", "kind": "task", "level_required": 2, "priority": 0, "links": ["[[Note]]"]}')
+  sections.push("```")
+  sections.push("")
+  sections.push(
+    "`kind` is one of `task | idea | approval | notify | self-improve | mail-reply` (default `task`); `level_required` is the minimum autonomy level to run it solo (0–4, default 1); `links` are optional vault wikilinks. A turn belongs in EITHER `consolidated` OR `backlog`, never both.",
+  )
+  sections.push("")
+  sections.push(
+    "List a turn in `consolidated` only if you wrote AND verified a durable note for it. List it in `backlog` only if it is a deferred action. List it in `skipped` if it held nothing worth saving. If you FAILED to process a turn, list it in NONE of the blocks and briefly explain the failure above. The plugin prunes every turn listed in any block and routes backlog items to the queue.",
   )
   return sections.join("\n")
 }
@@ -364,6 +376,50 @@ export function parseConsolidated(reply: string): Set<number> {
 // Turn seqs the child intentionally skipped (no durable knowledge).
 export function parseSkipped(reply: string): Set<number> {
   return parseSeqFence(reply, "skipped")
+}
+
+// A deferred action the drain child reported for the backlog queue (kanban
+// card 3 — the "conversation drains fall back into backlog entries" producer).
+export type BacklogDraftFromDrain = {
+  seq: number
+  title: string
+  detail: string
+  kind: string
+  level_required?: number
+  priority?: number
+  links: string[]
+}
+
+// Parse the `backlog` outcome fence: one JSON object per line. Tolerant — a
+// malformed line, a missing `seq`, or a missing `title` drops that line only.
+export function parseBacklogDrafts(reply: string): BacklogDraftFromDrain[] {
+  const body = reply.match(/```backlog\s*\n([\s\S]*?)```/)?.[1] ?? ""
+  const out: BacklogDraftFromDrain[] = []
+  for (const line of body.split("\n")) {
+    const t = line.trim()
+    if (!t) continue
+    let obj: any
+    try {
+      obj = JSON.parse(t)
+    } catch {
+      continue
+    }
+    const seq = Number(obj?.seq)
+    if (!Number.isFinite(seq)) continue
+    if (typeof obj?.title !== "string" || !obj.title.trim()) continue
+    out.push({
+      seq,
+      title: obj.title.trim(),
+      detail: typeof obj.detail === "string" ? obj.detail.trim() : "",
+      kind: typeof obj.kind === "string" ? obj.kind : "task",
+      level_required: Number.isFinite(obj?.level_required) ? obj.level_required : undefined,
+      priority: Number.isFinite(obj?.priority) ? obj.priority : undefined,
+      links: Array.isArray(obj?.links)
+        ? obj.links.filter((x: unknown) => typeof x === "string")
+        : [],
+    })
+  }
+  return out
 }
 
 // Deterministic recovery for a child that named the turn in prose but

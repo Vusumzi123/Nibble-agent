@@ -108,6 +108,17 @@ knowledge:
   log_compress_level: 6
   log_rotate_by: size
 
+backlog:
+  # Machine-readable action queue (card 3, plan §5). Canonical store at
+  # <state>/backlog.ndjson (one JSON object per line); the derived human view
+  # at <vault>/Backlog.md is regenerated one-way from it — never hand-edited.
+  # Owned by lib/backlog.ts; the only Phase-2 producer is the knowledge drain.
+  enabled: true
+  file: backlog.ndjson        # LEAF under <state> -> .opencode/state/
+  view_file: Backlog.md       # LEAF under <vault> -> Brain/Backlog.md
+  dedupe: true                # skip appending a duplicate OPEN entry (source + title)
+  max_view: 200               # max entries rendered per status section in the view
+
 decisions:
   # Typed-decision "System 1" provider. Backend is
   # .opencode/scripts/openjevserver.py + decisions_bridge.py (a stateless

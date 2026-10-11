@@ -29,6 +29,7 @@ import {
   extractKeywords,
   findCandidateNotes,
   hasDurableSignal,
+  parseBacklogDrafts,
   parseConsolidated,
   parseSkipped,
   readKnowledgeConfig,
@@ -51,6 +52,14 @@ import {
   type MemoryEntry,
   type TemporalHit,
 } from "./lib/temporal.ts"
+import {
+  append,
+  normalizeKind,
+  readBacklogConfig,
+  refreshView,
+  resolveBacklogFile,
+  resolveViewFile,
+} from "./lib/backlog.ts"
 
 // Deterministic capture + async consolidation over the single project-local
 // temporal-memory buffer (.opencode/state/memory.json), plus the deterministic
@@ -76,9 +85,11 @@ const DRAIN_TIMEOUT_MS = 180000
 const DRAIN_REASK =
   "You finished but did not include the outcome blocks. Do NOT call any tools and " +
   "do NOT read or write anything — the work is already done. Reply with ONLY these " +
-  "two blocks, listing each turn id exactly once (consolidated = you wrote or " +
-  "updated a durable note for it; skipped = it held no durable knowledge):\n" +
-  "```consolidated\n#<seq>\n```\n```skipped\n#<seq>\n```"
+  "blocks, listing each turn id exactly once (consolidated = you wrote or " +
+  "updated a durable note for it; skipped = it held no durable knowledge; " +
+  "backlog = it was a deferred action, one JSON object per line):\n" +
+  "```consolidated\n#<seq>\n```\n```skipped\n#<seq>\n```\n" +
+  '```backlog\n{"seq": 3, "title": "…"}\n```'
 
 const z = tool.schema
 
@@ -118,6 +129,9 @@ export default (async ({ client, directory }) => {
   const config = await readKnowledgeConfig(directory)
   const memoryFile = resolveMemoryFile(stateDir, config)
   const tagIndexFile = resolveTagIndexFile(stateDir, config)
+  const backlogConfig = await readBacklogConfig(directory)
+  const backlogFile = resolveBacklogFile(stateDir, backlogConfig)
+  const backlogViewFile = resolveViewFile(vaultDir, backlogConfig)
   const STATE_FILE = join(stateDir, "knowledge-hook.json")
   const logger = getLogger(logSettingsFrom(config, "log", "log_"), {
     logDir,
@@ -597,19 +611,23 @@ export default (async ({ client, directory }) => {
       const batchSeqs = new Set(selection.batch.map((e) => e.seq))
       let ok = parseConsolidated(reply)
       let skipped = parseSkipped(reply)
+      let backlogDrafts = parseBacklogDrafts(reply)
+      let backlogSeqs = new Set(backlogDrafts.map((d) => d.seq))
       let recovered = recoverMislabeledConsolidated(reply, selection.batch.map((e) => e.seq))
       for (const s of recovered) ok.add(s)
 
-      // No batch turn was reported in either block: the child likely wrote its
+      // No batch turn was reported in any block: the child likely wrote its
       // notes but ended without its summary. Re-ask once for the report before
       // treating the cycle as failed (and retaining the turns).
       let reasked = false
-      if (![...ok, ...skipped].some((s) => batchSeqs.has(s))) {
+      if (![...ok, ...skipped, ...backlogSeqs].some((s) => batchSeqs.has(s))) {
         reasked = true
         const reReply = await reaskForOutcome(spawned.sessionID)
         if (reReply) {
           ok = parseConsolidated(reReply)
           skipped = parseSkipped(reReply)
+          backlogDrafts = parseBacklogDrafts(reReply)
+          backlogSeqs = new Set(backlogDrafts.map((d) => d.seq))
           recovered = recoverMislabeledConsolidated(reReply, selection.batch.map((e) => e.seq))
           for (const s of recovered) ok.add(s)
         }
@@ -617,16 +635,44 @@ export default (async ({ client, directory }) => {
           ts: nowIso(),
           event: "ingest-reask",
           batch: [...batchSeqs],
-          reported: [...ok, ...skipped].filter((s) => batchSeqs.has(s)),
+          reported: [...ok, ...skipped, ...backlogSeqs].filter((s) => batchSeqs.has(s)),
         })
       }
 
       // Phase 7: prune consumed turns only, invalidate the tag index cache
       // (a new tag may have been minted), surface any retained failures, and
       // append the full cycle ledger entry.
-      const consumed = new Set([...ok, ...skipped].filter((s) => batchSeqs.has(s)))
+      const consumed = new Set(
+        [...ok, ...skipped, ...backlogSeqs].filter((s) => batchSeqs.has(s)),
+      )
       const failed = selection.batch.filter((e) => !consumed.has(e.seq))
       const pruned = await pruneConsumed(memoryFile, consumed)
+
+      // Route reported deferred actions into the backlog queue (card 3). A
+      // failed append is best-effort: it must not fail the consolidation cycle,
+      // and the turn is already consumed/pruned so a retry would re-duplicate.
+      let backlogAdded = 0
+      if (backlogConfig.enabled) {
+        for (const d of backlogDrafts) {
+          if (!batchSeqs.has(d.seq)) continue
+          try {
+            await append(backlogFile, {
+              source: "conversation",
+              kind: normalizeKind(d.kind),
+              payload: { title: d.title, detail: d.detail || undefined },
+              level_required: d.level_required,
+              priority: d.priority,
+              links: d.links,
+            })
+            backlogAdded++
+          } catch (err) {
+            void diag.error("[knowledge-hook] backlog append failed:", err)
+          }
+        }
+        if (backlogAdded > 0) {
+          await refreshView(backlogFile, backlogViewFile, { maxView: backlogConfig.max_view })
+        }
+      }
 
       // A cycle may have minted a new tag; drop the cache so the next capture
       // rebuilds it.
@@ -666,10 +712,12 @@ export default (async ({ client, directory }) => {
         outcome: {
           consolidated: [...ok].length,
           skipped: [...skipped].length,
+          backlog: backlogAdded,
           failed: failed.length,
         },
         consolidated: [...ok],
         skipped: [...skipped],
+        backlog: [...backlogSeqs].filter((s) => batchSeqs.has(s)),
         recovered: [...recovered],
         reasked,
         pruned,

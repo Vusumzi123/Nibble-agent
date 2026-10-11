@@ -4,6 +4,40 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-10
+
+### Added
+
+- **Backlog queue module (kanban card 3, plan §5)** — `lib/backlog.ts` is the
+  canonical machine queue plus a one-way derived human view:
+  - **NDJSON source of truth** at `<state>/backlog.ndjson` (one JSON object per
+    line) with a **derived view** at `<vault>/Backlog.md` regenerated one-way
+    (status sections, wikilinks, per-status `max_view` cap) — never hand-edited,
+    the same projection pattern as `memory.json` → notes.
+  - **Schema finalised (B4)** — core fields `id / created / updated / source /
+    kind / payload / level_required / priority / status / links` are stable from
+    day one; `channel_notified / awaiting_reply / jev_decision / result /
+    view_ref` are reserved (null/false) until the comms/JEV/dashboard phases, so
+    the shape never re-migrates.
+  - **Deterministic reader/writer** — `readAll` / `list` (priority desc, then
+    `created` asc; status/statuses/maxLevel filters) / `pendingCount` (the
+    heartbeat pre-gate signal — parse, no LLM, no grep-on-JSON) / `append`
+    (id-gen + open-entry dedupe by source+title, inside `fsx.atomicUpdate`) /
+    `setStatus` (atomic per-entry transition + reserved-field patch). Malformed
+    NDJSON lines are skipped, never thrown.
+  - **Drain fallback producer** — the consolidation child now reports deferred
+    actions in a `backlog` outcome fence (JSON per line); `knowledge-hook`
+    parses it, appends entries (`source: conversation`), prunes those turns as
+    consumed, and refreshes `Brain/Backlog.md`. A turn is `consolidated` OR
+    `backlog`, never both; the re-ask path and ingest ledger account for the new
+    fence. (The idea-hook producer is still deferred — M7 not ported.)
+  - **`backlog:` config block** — `enabled / file / view_file / dedupe /
+    max_view`, hot-read like the other sections; `lib/backlog.ts`
+    `readBacklogConfig` + leaf resolution.
+  - Tests: `lib/backlog.test.ts` (26 — config, id, append/dedupe, read/list/
+    count, atomic setStatus, render/cap, view refresh) + drain-backlog parser
+    and prompt cases in `lib/knowledge.test.ts`.
+
 ## 2026-10-09
 
 ### Added
