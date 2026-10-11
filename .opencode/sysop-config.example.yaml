@@ -202,6 +202,7 @@ retrieval:
   noul_threshold: 0.80         # skip only when model p("no retrieval needed") >= this
   timeout_ms: 30000            # per-turn decision subprocess timeout
   max_bytes: 4000              # only the head of the user message is judged
+  summary_words: 400           # target length of the rag-search CONTENT synthesis (answer-first)
   force_intent: true           # deterministic explicit-intent override -> retrieve
   inject: true                 # push the [brain-first] directive into the system prompt
   prompts_file: .opencode/decision-prompts.yaml  # JEV question texts (retrieval.assertion); ~/absolute honored
@@ -331,7 +332,7 @@ telemetry:
 # invalid value falls back to its code default and warns once per process in
 # <log>/autonomy-config.log (NDJSON).
 autonomy:
-  level: 2                     # 0..4 capability dial (§4.1); code default 1
+  level: 3                     # 0..4 capability dial (§4.1); code default 1
   gate_mode: gate              # shadow | gate — kill switch: shadow logs without blocking, gate enforces
   gate_scope: main             # main | all — main: Task sub-agents face only the floor; all: gate everyone
   heartbeat:

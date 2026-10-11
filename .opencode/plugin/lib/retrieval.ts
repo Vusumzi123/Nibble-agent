@@ -41,6 +41,7 @@ export type RetrievalConfig = {
   noul_threshold: number
   timeout_ms: number
   max_bytes: number
+  summary_words: number
   force_intent: boolean
   inject: boolean
   prompts_file: string
@@ -60,6 +61,7 @@ export const DEFAULT_RETRIEVAL: RetrievalConfig = {
   noul_threshold: 0.8,
   timeout_ms: 30000,
   max_bytes: 4000,
+  summary_words: 400,
   force_intent: true,
   inject: true,
   prompts_file: ".opencode/decision-prompts.yaml",
@@ -78,6 +80,7 @@ const BOOL_KEYS = new Set(["enabled", "gate", "force_intent", "inject", "log_com
 const INT_KEYS = new Set([
   "timeout_ms",
   "max_bytes",
+  "summary_words",
   "log_rotate_bytes",
   "log_keep_generations",
   "log_retention_days",
@@ -117,6 +120,11 @@ export async function readRetrievalConfig(directory: string): Promise<RetrievalC
   }
   if (!Number.isFinite(cfg.max_bytes) || cfg.max_bytes <= 0) {
     cfg.max_bytes = DEFAULT_RETRIEVAL.max_bytes
+  }
+  if (!Number.isFinite(cfg.summary_words) || cfg.summary_words <= 0) {
+    cfg.summary_words = DEFAULT_RETRIEVAL.summary_words
+  } else {
+    cfg.summary_words = Math.min(2000, Math.max(50, Math.round(cfg.summary_words)))
   }
   if (typeof cfg.prompts_file !== "string" || !cfg.prompts_file.trim()) {
     cfg.prompts_file = DEFAULT_RETRIEVAL.prompts_file
@@ -245,6 +253,7 @@ export function buildRetrievalDirective(input: {
   skip: boolean
   reason: string
   pTrue: number | null
+  summaryWords?: number
 }): string {
   const stats = `reason=${input.reason}, p=${input.pTrue === null ? "n/a" : input.pTrue.toFixed(3)}`
   if (input.skip) {
@@ -253,10 +262,11 @@ export function buildRetrievalDirective(input: {
       `(${stats})`,
     ].join("\n")
   }
+  const words = input.summaryWords ?? DEFAULT_RETRIEVAL.summary_words
   return [
     "[brain-first: RETRIEVE] Retrieval gate (authoritative for this turn): perform the Brain-First rag-search (rag-search sub-agent) before answering.",
-    'Delegate with exactly: "rag-search: <user message verbatim>" / "Task type: relevance search" / "Budget: search once (semantic + keyword, topK <= 5), read <= 3 notes, reply <= 10 lines with [[wikilinks]] + one-line key point each. No re-runs."',
-    'Surface the hits first ([[wikilink]] + one-line key point each), then answer; on "No relevant vault knowledge found" proceed normally.',
+    `Delegate with exactly: "rag-search: <user message verbatim>" / "Task type: relevance search" / "Budget: search once (semantic + keyword, topK <= 5), read <= 3 notes. Reply with the relevant CONTENT — the facts, values, commands, paths, and steps that answer the question — as an answer-first synthesis of about ${words} words, citing each source note inline with [[wikilink]]. Never reply with a bare link list. No re-runs."`,
+    'Integrate the returned facts directly into your answer — the summary already contains the content, so do not merely re-list the links; on "No relevant vault knowledge found" proceed normally.',
     `(${stats})`,
   ].join("\n")
 }

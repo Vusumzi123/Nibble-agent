@@ -49,6 +49,7 @@ test("parseRetrievalConfig reads a full block with typed scalars", () => {
       "  noul_threshold: 0.9",
       "  timeout_ms: 8000",
       "  max_bytes: 2000",
+      "  summary_words: 350",
       "  force_intent: false",
       "  inject: true",
       "  prompts_file: .opencode/custom.json",
@@ -64,6 +65,7 @@ test("parseRetrievalConfig reads a full block with typed scalars", () => {
   assert.equal(cfg.noul_threshold, 0.9)
   assert.equal(cfg.timeout_ms, 8000)
   assert.equal(cfg.max_bytes, 2000)
+  assert.equal(cfg.summary_words, 350)
   assert.equal(cfg.force_intent, false)
   assert.equal(cfg.inject, true)
   assert.equal(cfg.prompts_file, ".opencode/custom.json")
@@ -97,6 +99,18 @@ test("readRetrievalConfig overlays the block and clamps a bad threshold", async 
   const cfg = await readRetrievalConfig(dir)
   assert.equal(cfg.noul_threshold, DEFAULT_RETRIEVAL.noul_threshold)
   assert.equal(cfg.max_bytes, 1234)
+})
+
+test("readRetrievalConfig clamps summary_words to a sane range, defaults on garbage", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "retrieval-cfg-sw-"))
+  await writeSection(dir, "retrieval", ["summary_words: 3"])
+  assert.equal((await readRetrievalConfig(dir)).summary_words, 50)
+
+  await writeSection(dir, "retrieval", ["summary_words: 99999"])
+  assert.equal((await readRetrievalConfig(dir)).summary_words, 2000)
+
+  await writeSection(dir, "retrieval", ["summary_words: -5"])
+  assert.equal((await readRetrievalConfig(dir)).summary_words, DEFAULT_RETRIEVAL.summary_words)
 })
 
 test("readRetrievalConfig returns defaults for a missing config", async () => {
@@ -201,8 +215,16 @@ test("buildRetrievalDirective emits an authoritative SKIP or RETRIEVE block", ()
   // AGENTS.md does not have to (hook-enforced, paid only on RETRIEVE turns).
   assert.match(retrieve, /Delegate with exactly: "rag-search: <user message verbatim>"/)
   assert.match(retrieve, /read <= 3 notes/)
-  assert.match(retrieve, /Surface the hits first/)
+  assert.match(retrieve, /answer-first synthesis of about 400 words/)
+  assert.match(retrieve, /Never reply with a bare link list/)
+  assert.match(retrieve, /Integrate the returned facts directly/)
   assert.match(retrieve, /No relevant vault knowledge found/)
+})
+
+test("buildRetrievalDirective sizes the synthesis to summaryWords", () => {
+  const retrieve = buildRetrievalDirective({ skip: false, reason: "retrieve", pTrue: null, summaryWords: 750 })
+  assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
+  assert.match(retrieve, /about 750 words/)
 })
 
 test("buildRetrievalLogEntry records the verdict, mode, and usage", () => {

@@ -114,7 +114,7 @@ export default (async ({ client, directory }) => {
       const reason = config.gate ? gate.reason : "shadow"
 
       if (config.inject) {
-        pending.set(sid, buildRetrievalDirective({ skip, reason, pTrue }))
+        pending.set(sid, buildRetrievalDirective({ skip, reason, pTrue, summaryWords: config.summary_words }))
       } else {
         pending.delete(sid)
       }

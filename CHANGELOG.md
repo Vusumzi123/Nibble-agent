@@ -6,6 +6,19 @@ Notable changes to Nibble, newest first. Sections follow
 
 ## 2026-10-11
 
+### Changed
+
+- **rag-search returns content, not links (answer-first synthesis)** — the
+  Brain-First retrieval digest was a link list ("one `[[wikilink]]` + one-line
+  key point, ≤ 10 lines"), so the main agent received pointers instead of stored
+  knowledge. The output contract in `.opencode/agents/rag-search.md` and the
+  `[brain-first: RETRIEVE]` directive in `lib/retrieval.ts` now ask for an
+  answer-first synthesis of the actual facts/values/commands/paths/steps, each
+  source cited inline with `[[wikilink]]`; never a bare link list. Reply length
+  is tunable via the new `retrieval.summary_words` (default 400, clamped 50–2000;
+  the directive carries the number). Search budget unchanged (topK ≤ 5, ≤ 3
+  reads).
+
 ### Added
 
 - **Deterministic changelog guard + drain digest (ported from sysop-brain,
