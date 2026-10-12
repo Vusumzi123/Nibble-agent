@@ -7,8 +7,10 @@ import {
   askMessage,
   autonomyDirective,
   buildAutonomyRequest,
+  buildTaskRequest,
   callTarget,
   classifyCall,
+  classifyTaskDeterministic,
   clearGrant,
   clearSessionGrant,
   consumeApproved,
@@ -26,11 +28,15 @@ import {
   parseBatchManifest,
   pendingFor,
   recordAsk,
+  taskDecision,
+  taskDirective,
+  taskKindFromVerdict,
   type AskStore,
   type Classification,
   type GrantStore,
   type SessionGrantMode,
   type SessionGrantStore,
+  type TaskDecision,
 } from "./lib/autonomy-gate.ts"
 import { readAutonomyConfig } from "./lib/autonomy.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
@@ -89,7 +95,9 @@ export default (async (ctx) => {
   // fails closed to `ask` (settled decision #5). Assertion text is read once
   // at boot (decision-prompts.yaml changes are live on the next plugin boot).
   const decisionGate = await openDecisionGate(dir, { timeoutMs: AUTONOMY_JEV_TIMEOUT_MS, spawner })
-  const autonomyAssertion = (await readDecisionPrompts(dir)).autonomy.assertion
+  const prompts = await readDecisionPrompts(dir)
+  const autonomyAssertion = prompts.autonomy.assertion
+  const taskAssertion = prompts.task.assertion
 
   // Pending asks awaiting (or holding) the user's confirm — one per session,
   // latest-only. Cleared by a process restart (fail-closed).
@@ -104,6 +112,11 @@ export default (async (ctx) => {
   // (fail-closed). Floor / root / self-improve are never mintable.
   const sessionGrants: SessionGrantStore = new Map()
 
+  // Per-task classification (`enforcement: per-task`): the last objective's
+  // kind + matrix verdict, keyed by session. Set on each non-confirm user
+  // message; read by the per-turn system-prompt transform. In-memory only.
+  const taskBySession = new Map<string, TaskDecision>()
+
   // Hot-read: re-reads sysop-config.yaml per call so a level (or gate_mode)
   // flip applies to the very next turn/command. Fail-closed to L0 if the read
   // ever throws — the reader contract says it never does.
@@ -114,6 +127,7 @@ export default (async (ctx) => {
     batch_max_actions: number
     session_grant: SessionGrantMode
     session_grant_ttl: number
+    enforcement: "per-command" | "per-task"
     class_overrides: string[]
     root_classes: string[]
   }> => {
@@ -126,11 +140,12 @@ export default (async (ctx) => {
         batch_max_actions: cfg.batch.max_actions,
         session_grant: cfg.session_grant,
         session_grant_ttl: cfg.session_grant_ttl,
+        enforcement: cfg.enforcement === "per-task" ? "per-task" : "per-command",
         class_overrides: cfg.class_overrides,
         root_classes: cfg.root_classes,
       }
     } catch {
-      return { level: 0, gate_mode: "gate", gate_scope: "main", batch_max_actions: 0, session_grant: "off", session_grant_ttl: 0, class_overrides: [], root_classes: [] }
+      return { level: 0, gate_mode: "gate", gate_scope: "main", batch_max_actions: 0, session_grant: "off", session_grant_ttl: 0, enforcement: "per-command", class_overrides: [], root_classes: [] }
     }
   }
 
@@ -144,6 +159,12 @@ export default (async (ctx) => {
           return
         }
         output.system.push(autonomyDirective(cfg.level))
+        // Per-task mode: surface the classified task kind + the "ask to proceed"
+        // instruction for the objective the user just gave this turn.
+        if (cfg.enforcement === "per-task") {
+          const t = taskBySession.get((input as { sessionID?: string })?.sessionID ?? "")
+          if (t) output.system.push(taskDirective(t, cfg.level))
+        }
       } catch {
         // A missing/broken transform output must never break the session.
       }
@@ -219,6 +240,39 @@ export default (async (ctx) => {
         // the turn boundary (they are revoked explicitly or on restart).
         clearGrant(grants, input.sessionID)
         pending.delete(input.sessionID)
+
+        // Per-task mode: classify the objective ONCE — a deterministic fast
+        // path for read-only, otherwise a single JEV `choice`. The verdict is
+        // surfaced next turn; the commands themselves are left to opencode.
+        if (cfg.enforcement === "per-task") {
+          try {
+            const kind = classifyTaskDeterministic(text)
+            const decided = kind
+              ? taskDecision(kind, cfg.level)
+              : taskDecision(
+                  taskKindFromVerdict(
+                    decisionGate
+                      ? (await decisionGate.decide(buildTaskRequest(text, taskAssertion), { fallback: "closed" }))
+                          .result?.value
+                      : undefined,
+                  ),
+                  cfg.level,
+                )
+            taskBySession.set(input.sessionID, decided)
+            await logger.append({
+              ts: new Date(now).toISOString(),
+              event: "task-classify",
+              level: cfg.level,
+              kind: decided.kind,
+              cls: decided.cls,
+              verdict: decided.verdict,
+              deterministic: kind !== null,
+            })
+          } catch {
+            // Classification must never break the turn — fail closed to unclear.
+            taskBySession.set(input.sessionID, taskDecision("unclear", cfg.level))
+          }
+        }
       }
     },
 
@@ -231,6 +285,7 @@ export default (async (ctx) => {
       let fingerprint = ""
       let sessionGrantMode: SessionGrantMode = "off"
       let sessionGrantTtl = 0
+      let enforcement: "per-command" | "per-task" = "per-command"
 
       // Automation children bypass the gate entirely — knowledge drain etc.
       // already run behind their own JEV gates (settled decision #3).
@@ -243,6 +298,7 @@ export default (async (ctx) => {
         scope = cfg.gate_scope
         sessionGrantMode = cfg.session_grant
         sessionGrantTtl = cfg.session_grant_ttl
+        enforcement = cfg.enforcement
         child = sessions ? await sessions.isChild(input.sessionID) : false
         c = classifyCall(input.tool, input.args, level, {
           root_classes: cfg.root_classes,
@@ -273,6 +329,14 @@ export default (async (ctx) => {
         )
       }
       if (!c || mode === "shadow") return
+
+      // Per-task mode: NO per-command matrix gate. Only the irreversibility
+      // floor still denies here; every other command is left to opencode's
+      // native permission layer (the task was classified + surfaced once/turn).
+      if (enforcement === "per-task") {
+        if (c.cls === "floor") throw new Error(denyMessage(c, level))
+        return
+      }
 
       // Sub-agent children under gate_scope main: the dial (ask AND dial-deny
       // rows) does not apply — only the irreversibility floor's deny below

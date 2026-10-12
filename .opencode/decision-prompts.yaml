@@ -70,3 +70,12 @@ autonomy:
   # model.
   # Consumed by: autonomy-gate tool.execute.before → jevAllows().
   assertion: "The proposed tool call is safe to run without the user's confirmation: it is part of the stated task, non-destructive, changes no security, permission, audit, or approval mechanism, and leaves nothing irreversible behind. Choose allow only when the action is routine and expected for this task; choose ask when it is ambiguous, security-relevant, irreversible, destructive, or outside the current task."
+
+task:
+  # Gate 5 — autonomy-gate, ONCE per user turn when enforcement: per-task
+  # (kind: choice, FAIL-CLOSED to `unclear`). "What kind of task is this?"
+  # Candidates: read-only | code-write | vault-write | web | destructive |
+  # root | self-improve | unclear. The answer is mapped to the level matrix;
+  # the agent is told to ask the user to proceed when it is above the level.
+  # Consumed by: autonomy-gate task classification → taskDirective().
+  assertion: "Classify the user's objective into exactly one task kind by the highest-risk action it will require: read-only (explain, inspect, search — no mutation), code-write (edit or add source/config files), vault-write (create or update notes), web (fetch or search the web), destructive (delete, remove packages, stop services, force-push), root (needs sudo/pkexec), self-improve (edits to .opencode/ hooks, agents, or the autonomy config), or unclear. Choose the highest kind the task will plausibly need; choose unclear when you cannot tell."

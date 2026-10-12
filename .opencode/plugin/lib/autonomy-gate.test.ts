@@ -3,13 +3,19 @@ import assert from "node:assert/strict"
 import {
   ASK_TTL_MS,
   DEFAULT_AUTONOMY_ASSERTION,
+  DEFAULT_TASK_ASSERTION,
   SESSION_GRANT_MODES,
+  TASK_KINDS,
+  TASK_KIND_CLASS,
   autonomyDirective,
   approveAsk,
   askMessage,
   buildAutonomyRequest,
+  buildTaskRequest,
   callTarget,
+  classVerdict,
   classifyCall,
+  classifyTaskDeterministic,
   clearGrant,
   clearSessionGrant,
   consumeApproved,
@@ -29,6 +35,9 @@ import {
   parseBatchManifest,
   parseClassOverride,
   recordAsk,
+  taskDecision,
+  taskDirective,
+  taskKindFromVerdict,
   type AskStore,
   type Classification,
   type GrantStore,
@@ -601,4 +610,71 @@ test("session grant: TTL expiry and explicit clear", () => {
 
 test("SESSION_GRANT_MODES is the canonical off/target/class set", () => {
   assert.deepEqual([...SESSION_GRANT_MODES], ["off", "target", "class"])
+})
+
+// ---------------------------------------------------------------------------
+// Task-level classification (per-task enforcement).
+
+test("TASK_KINDS map onto the matrix; unclear fails closed to borderline", () => {
+  assert.deepEqual(
+    [...TASK_KINDS],
+    ["read-only", "code-write", "vault-write", "web", "destructive", "root", "self-improve", "unclear"],
+  )
+  assert.equal(TASK_KIND_CLASS["read-only"], "pure-read")
+  assert.equal(TASK_KIND_CLASS["code-write"], "project-write")
+  assert.equal(TASK_KIND_CLASS.destructive, "destructive")
+  assert.equal(TASK_KIND_CLASS["self-improve"], "self-improve")
+  assert.equal(TASK_KIND_CLASS.unclear, "borderline")
+})
+
+test("classVerdict mirrors the level matrix for bare classes", () => {
+  assert.equal(classVerdict("project-write", 0), "deny")
+  assert.equal(classVerdict("project-write", 1), "allow")
+  assert.equal(classVerdict("destructive", 0), "deny")
+  assert.equal(classVerdict("destructive", 1), "ask")
+  assert.equal(classVerdict("destructive", 4), "allow")
+  assert.equal(classVerdict("self-improve", 4), "ask") // askJev -> ask
+  assert.equal(classVerdict("floor", 4), "deny") // floor never approvable
+})
+
+test("taskDecision + taskDirective tell the agent when to ask", () => {
+  const read = taskDecision("read-only", 1)
+  assert.equal(read.verdict, "allow")
+  assert.match(taskDirective(read, 1), /within the current level — proceed/)
+
+  const dest = taskDecision("destructive", 1)
+  assert.equal(dest.verdict, "ask")
+  assert.match(taskDirective(dest, 1), /classified as destructive \(destructive\)/)
+  assert.match(taskDirective(dest, 1), /ASK the user to proceed/)
+
+  const denied = taskDecision("destructive", 0)
+  assert.equal(denied.verdict, "deny")
+  assert.match(taskDirective(denied, 0), /forbids this task/)
+})
+
+test("taskKindFromVerdict is fail-closed to unclear", () => {
+  assert.equal(taskKindFromVerdict("destructive"), "destructive")
+  assert.equal(taskKindFromVerdict(" Destructive "), "destructive")
+  assert.equal(taskKindFromVerdict("nonsense"), "unclear")
+  assert.equal(taskKindFromVerdict(null), "unclear")
+  assert.equal(taskKindFromVerdict(42), "unclear")
+})
+
+test("classifyTaskDeterministic fast-paths obvious read-only objectives", () => {
+  assert.equal(classifyTaskDeterministic(""), "read-only")
+  assert.equal(classifyTaskDeterministic("explain the retrieval gate"), "read-only")
+  assert.equal(classifyTaskDeterministic("What does autonomy mean?"), "read-only")
+  assert.equal(classifyTaskDeterministic("search my notes for JEV"), "read-only")
+  assert.equal(classifyTaskDeterministic("commit the changes and push"), null)
+  assert.equal(classifyTaskDeterministic("implement session grants"), null)
+})
+
+test("buildTaskRequest is a choice over the task kinds, with a capped state", () => {
+  const r = buildTaskRequest("do the thing", "criteria text")
+  assert.equal(r.kind, "choice")
+  assert.deepEqual(r.candidates, [...TASK_KINDS])
+  assert.equal(r.criteria, "criteria text")
+  assert.equal(r.state, "do the thing")
+  assert.ok(buildTaskRequest("x".repeat(5000), "c").state.endsWith("…"))
+  assert.ok(DEFAULT_TASK_ASSERTION.includes("unclear"))
 })

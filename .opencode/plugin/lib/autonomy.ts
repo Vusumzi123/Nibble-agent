@@ -100,6 +100,10 @@ export type AutonomyConfig = {
   session_grant: SessionGrantMode
   /** Minutes until a session grant expires; 0 = session lifetime (restart clears). */
   session_grant_ttl: number
+  /** `per-command` (default): classify+gate every call. `per-task`: one JEV
+   *  classification of the objective per turn; the agent asks to proceed and
+   *  opencode natively governs the commands (the floor still applies). */
+  enforcement: "per-command" | "per-task"
   chatter: ChatterConfig
   quiet: QuietConfig
 }
@@ -154,6 +158,7 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
   batch: { max_actions: 8 },
   session_grant: "off",
   session_grant_ttl: 0,
+  enforcement: "per-command",
   chatter: {
     enabled: false,
     max_pokes: 3,
@@ -196,6 +201,7 @@ export const AUTH_MODES = ["off", "login", "login+2fa"] as const
 export const COMMS_CHANNELS = ["telegram", "email"] as const
 export const GATE_MODES = ["shadow", "gate"] as const
 export const GATE_SCOPES = ["main", "all"] as const
+export const ENFORCEMENT_MODES = ["per-command", "per-task"] as const
 
 // Fresh nested-default views (never share mutable defaults across reads).
 function autonomyDefaults(): NestedDefaults {
@@ -209,12 +215,13 @@ function autonomyDefaults(): NestedDefaults {
     batch,
     session_grant,
     session_grant_ttl,
+    enforcement,
     heartbeat,
     chatter,
     quiet,
   } = DEFAULT_AUTONOMY
   return {
-    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes, class_overrides, session_grant, session_grant_ttl },
+    scalars: { level, gate_mode, gate_scope, mission_token_budget, root_classes, class_overrides, session_grant, session_grant_ttl, enforcement },
     blocks: { batch, heartbeat, chatter, quiet },
   }
 }
@@ -384,6 +391,8 @@ const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   // Invalid value -> reject -> default `off` stands (session grants are opt-in).
   session_grant: { t: "enum", values: SESSION_GRANT_MODES },
   session_grant_ttl: { t: "int", min: 0 },
+  // Invalid value -> reject -> default `per-command` stands (no silent pivot).
+  enforcement: { t: "enum", values: ENFORCEMENT_MODES },
 }
 
 const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {

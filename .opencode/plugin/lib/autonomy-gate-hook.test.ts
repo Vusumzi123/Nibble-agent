@@ -677,3 +677,54 @@ test("'revoke session' drops an active session grant", async () => {
   await assert.rejects(() => before(hooks, "bash", { command: "rm -rf /tmp/other" }), /ASK/)
   await rm(dir, { recursive: true, force: true })
 })
+
+// ---------------------------------------------------------------------------
+// Per-task enforcement (autonomy.enforcement: per-task).
+
+test("per-task mode: commands are not gated per-call; the floor still denies", async () => {
+  const dir = await project(3, ["enforcement: per-task"]) // Working: destructive asks per-command
+  const hooks = await createHook({ directory: dir } as any)
+
+  // No per-command ask — the command runs (opencode governs it natively).
+  await before(hooks, "bash", { command: "rm -rf /tmp/scratch" })
+  // The irreversibility floor still denies deterministically.
+  await assert.rejects(() => before(hooks, "bash", { command: "mkfs.ext4 /dev/sdb1" }), /\[autonomy\] DENIED/)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("per-task mode: classifies the objective once and injects a [task] directive", async () => {
+  const dir = await project(1, ["enforcement: per-task"], JEV_DECISIONS)
+  const hooks = await createHook({ directory: dir, spawner: choiceSpawner("destructive") } as any)
+
+  // A non-read-only objective -> one JEV `choice` -> destructive.
+  await confirm(hooks, "please delete the old build artifacts")
+  const system: string[] = []
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_1" } as any, { system } as any)
+  assert.ok(system.some((l) => l.includes("[task] classified as destructive")))
+  assert.ok(system.some((l) => l.includes("ASK the user to proceed")))
+
+  const line = (await readGateLog(dir)).find((l) => l.event === "task-classify")
+  assert.ok(line)
+  assert.equal(line.kind, "destructive")
+  assert.equal(line.deterministic, false)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("per-task mode: a read-only objective fast-paths without the JEV", async () => {
+  const dir = await project(1, ["enforcement: per-task"], JEV_DECISIONS)
+  let calls = 0
+  const spawner: Spawner = async (args) => {
+    calls++
+    return choiceSpawner("destructive")(args)
+  }
+  const hooks = await createHook({ directory: dir, spawner } as any)
+
+  await confirm(hooks, "explain the retrieval gate")
+  const system: string[] = []
+  await hooks["experimental.chat.system.transform"]({ sessionID: "ses_1" } as any, { system } as any)
+  assert.ok(system.some((l) => l.includes("[task] classified as read-only")))
+  assert.equal(calls, 0)
+  const line = (await readGateLog(dir)).find((l) => l.event === "task-classify")
+  assert.equal(line.deterministic, true)
+  await rm(dir, { recursive: true, force: true })
+})

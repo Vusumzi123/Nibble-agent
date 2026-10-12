@@ -947,6 +947,97 @@ export function clearSessionGrant(store: SessionGrantStore, session: string): vo
 }
 
 // ---------------------------------------------------------------------------
+// Task-level classification (per-task enforcement). Instead of gating every
+// call, ONE JEV `choice` classifies the user's objective into a TASK KIND from
+// the same vocabulary the level matrix uses; the agent then asks the user to
+// proceed when the kind is above the current level. The commands themselves are
+// left to the caller (opencode's native permission layer) — no per-command
+// deterministic gate.
+
+export const TASK_KINDS = [
+  "read-only",
+  "code-write",
+  "vault-write",
+  "web",
+  "destructive",
+  "root",
+  "self-improve",
+  "unclear",
+] as const
+export type TaskKind = (typeof TASK_KINDS)[number]
+
+/** Task kind -> matrix class. `unclear` fails closed to `borderline`. */
+export const TASK_KIND_CLASS: Record<TaskKind, CallClass> = {
+  "read-only": "pure-read",
+  "code-write": "project-write",
+  "vault-write": "vault-write",
+  web: "subagent-web",
+  destructive: "destructive",
+  root: "root",
+  "self-improve": "self-improve",
+  unclear: "borderline",
+}
+
+/** The matrix verdict for a bare class at a level (no args) — task gate. */
+export function classVerdict(cls: CallClass, level: unknown): GateVerdict {
+  return result(cls, normalizeLevel(level)).verdict
+}
+
+export type TaskDecision = { kind: TaskKind; cls: CallClass; verdict: GateVerdict }
+
+/** Resolve a task kind into its matrix class + verdict at the live level. */
+export function taskDecision(kind: TaskKind, level: unknown): TaskDecision {
+  const cls = TASK_KIND_CLASS[kind]
+  return { kind, cls, verdict: classVerdict(cls, level) }
+}
+
+/** Built-in criteria for the task `choice` (mirrored in decision-prompts.yaml). */
+export const DEFAULT_TASK_ASSERTION =
+  "Classify the user's objective into exactly one task kind by the highest-risk action it will require: " +
+  "read-only (explain, inspect, search — no mutation), code-write (edit or add source/config files), " +
+  "vault-write (create or update notes), web (fetch or search the web), destructive (delete, remove packages, " +
+  "stop services, force-push), root (needs sudo/pkexec), self-improve (edits to .opencode/ hooks, agents, or the " +
+  "autonomy config), or unclear. Choose the highest kind the task will plausibly need; choose unclear when you cannot tell."
+
+/** The `choice` request for one objective: candidates are the task kinds. */
+export function buildTaskRequest(objective: string, assertion: string): DecisionRequest {
+  const state = objective.length > 1500 ? objective.slice(0, 1500) + "…" : objective
+  return { kind: "choice", state, candidates: [...TASK_KINDS], criteria: assertion }
+}
+
+/** Map a JEV verdict value to a task kind; anything unrecognised fails closed. */
+export function taskKindFromVerdict(value: unknown): TaskKind {
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase()
+    if ((TASK_KINDS as readonly string[]).includes(v)) return v as TaskKind
+  }
+  return "unclear"
+}
+
+/** Deterministic fast path: an obviously read-only objective skips the JEV. */
+const TASK_READ_ONLY_RE =
+  /^\s*(explain|what|why|how|when|where|who|which|show|list|read|find|search|look up|summari[sz]e|describe|review|inspect|check the|status|is there|are there|tell me)\b/i
+export function classifyTaskDeterministic(objective: string): TaskKind | null {
+  const t = objective.trim()
+  if (!t) return "read-only"
+  if (TASK_READ_ONLY_RE.test(t)) return "read-only"
+  return null
+}
+
+/** The injected per-turn directive: the task kind + whether the agent must ask
+ *  the user to proceed before executing. */
+export function taskDirective(d: TaskDecision, level: unknown): string {
+  const L = normalizeLevel(level)
+  const need =
+    d.verdict === "allow"
+      ? "within the current level — proceed."
+      : d.verdict === "deny"
+        ? "the current level forbids this task — do not start it; propose it instead."
+        : "above the current level — ASK the user to proceed before starting, then run the task."
+  return `[task] classified as ${d.kind} (${d.cls}); at level ${L} (${LEVEL_NAMES[L]}) ${need}`
+}
+
+// ---------------------------------------------------------------------------
 // JEV borderline escalation (card G) — deterministic first, LLM only on the
 // edge. Every row with `jev: true` escalates through the shared decision gate
 // (openDecisionGate, fallback CLOSED): error / abstain / timeout /

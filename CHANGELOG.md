@@ -21,6 +21,17 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Per-task enforcement mode (`autonomy.enforcement: per-command | per-task`)** —
+  an alternative to gating every call. In `per-task` mode the gate does **one**
+  JEV `choice` per user turn (a deterministic fast path skips obviously
+  read-only objectives) classifying the objective into a task kind from the
+  matrix vocabulary (`read-only`, `code-write`, `vault-write`, `web`,
+  `destructive`, `root`, `self-improve`, `unclear`), maps it through the level
+  matrix, and injects a `[task]` directive telling the agent to ask the user to
+  proceed when the kind is above the current level. Commands are then left to
+  **opencode's native permission layer** — no per-command matrix gate. The
+  irreversibility floor still denies deterministically. Default stays
+  `per-command` (reversible); add `task.assertion` to `decision-prompts.yaml`.
 - **Session-scoped autonomy approval ("allow session")** — the gate gains a
   grant lifetime between the one-shot exact-retry and the per-turn batch grant.
   A pending ask's class + target now ride on the pending record; replying
