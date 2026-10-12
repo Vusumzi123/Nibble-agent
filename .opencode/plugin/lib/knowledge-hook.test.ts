@@ -97,7 +97,7 @@ function makeClient(opts: {
   createIds?: string[]
 } = {}) {
   const childId = opts.childId ?? "ses_drain_child"
-  const calls = { create: 0, prompts: [] as any[] }
+  const calls = { create: 0, prompts: [] as any[], toasts: [] as any[] }
   let idx = 0
   let turn = 0
   const replyFor = (): string | undefined =>
@@ -131,6 +131,12 @@ function makeClient(opts: {
       promptAsync: async (args: any) => {
         calls.prompts.push(args)
         if (args?.path?.id === childId) turn++
+        return { response: { ok: true, status: 200 } }
+      },
+    },
+    tui: {
+      showToast: async (args: any) => {
+        calls.toasts.push(args)
         return { response: { ok: true, status: 200 } }
       },
     },
@@ -358,10 +364,8 @@ test("retains turns when the write guard reports an unresolved issue", async () 
   automationChildSessions.clear()
   resetVerification()
   const dir = await freshProject()
-  const hooks = await createHook({
-    client: makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" }),
-    directory: dir,
-  } as any)
+  const client = makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" })
+  const hooks = await createHook({ client, directory: dir } as any)
   await delay(20)
   await seedMemory(dir, [
     memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
@@ -380,6 +384,10 @@ test("retains turns when the write guard reports an unresolved issue", async () 
   assert.equal((await readMem(dir)).length, 3)
   const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "ingest-verification-blocked"))
+  // The failure is surfaced as a deduped TUI toast (not a transcript injection).
+  assert.equal(client.calls.toasts.length, 1)
+  assert.equal(client.calls.toasts[0].body.variant, "warning")
+  assert.match(client.calls.toasts[0].body.message, /write verification incomplete/)
   resetVerification()
 })
 

@@ -308,48 +308,39 @@ export default (async ({ client, directory }) => {
     promptChildReply(childID, DRAIN_REASK)
 
   // --- Failure surfacing ----------------------------------------------------
-  // Both helpers report back into the session as a noReply system-ish prompt
-  // (so the user sees the problem in-app) with dedupe via state.notifiedError.
+  // Both helpers raise an in-app TUI toast, deduped via state.notifiedError, so
+  // the user sees the problem out-of-band: a toast never lands in the
+  // transcript the way a promptAsync noReply part did. A headless/non-TUI
+  // client has no `tui`, so this is a silent no-op there.
   // recordFailure additionally persists the error into the state file.
-  const recordFailure = async (sid: string, err: unknown): Promise<void> => {
+  const toast = async (message: string, variant: "warning" | "error"): Promise<void> => {
+    if (!client.tui) return
+    try {
+      await client.tui.showToast({
+        body: { title: "knowledge-hook", message, variant, duration: 8000 },
+        query: { directory },
+      })
+    } catch (err) {
+      void diag.error("[knowledge-hook] toast failed:", err)
+    }
+  }
+
+  const recordFailure = async (err: unknown): Promise<void> => {
     const errorText = err instanceof Error ? err.message : String(err)
     state.lastError = errorText
     state.lastFailureTime = nowIso()
     if (state.notifiedError !== errorText) {
-      try {
-        const res = await client.session.promptAsync({
-          path: { id: sid },
-          body: {
-            parts: [{ type: "text", text: `[knowledge-hook] consolidation failed: ${errorText}` }],
-            noReply: true,
-          },
-        })
-        if (res?.error || !res?.response?.ok) {
-          throw new Error(`surface prompt rejected: ${res?.response?.status}`)
-        }
-        state.notifiedError = errorText
-      } catch (notifyErr) {
-        void diag.error("[knowledge-hook] failed to surface error:", notifyErr)
-      }
+      await toast(`consolidation failed: ${errorText}`, "error")
+      state.notifiedError = errorText
     }
     await stateStore.write(state)
   }
 
-  const surfaceFailure = async (sid: string, message: string): Promise<void> => {
+  const surfaceFailure = async (message: string): Promise<void> => {
     if (state.notifiedError === message) return
-    try {
-      const res = await client.session.promptAsync({
-        path: { id: sid },
-        body: { parts: [{ type: "text", text: `[knowledge-hook] ${message}` }], noReply: true },
-      })
-      if (res?.error || !res?.response?.ok) {
-        throw new Error(`surface prompt rejected: ${res?.response?.status}`)
-      }
-      state.notifiedError = message
-      await stateStore.write(state)
-    } catch (err) {
-      void diag.error("[knowledge-hook] failed to surface:", err)
-    }
+    await toast(message, "warning")
+    state.notifiedError = message
+    await stateStore.write(state)
   }
 
   // --- Capture-time JEV TAG GATE (Phase 3, plan §11) ------------------------
@@ -625,7 +616,7 @@ export default (async ({ client, directory }) => {
       })
       const spawned = await spawnDrainChild(client as any, { parentID: sid, directory, prompt })
       if (!spawned.ok) {
-        await recordFailure(sid, new Error(spawned.error ?? "ingest spawn failed"))
+        await recordFailure(new Error(spawned.error ?? "ingest spawn failed"))
         await logger.append({ ts: nowIso(), event: "ingest-spawn-failed", error: spawned.error })
         return
       }
@@ -636,7 +627,7 @@ export default (async ({ client, directory }) => {
       const acct = drainAccounting(childMessages)
 
       if (!reply) {
-        await recordFailure(sid, new Error(timedOut ? "ingest child timed out" : "ingest child produced no reply"))
+        await recordFailure(new Error(timedOut ? "ingest child timed out" : "ingest child produced no reply"))
         await logger.append({
           ts: nowIso(),
           event: timedOut ? "ingest-timeout" : "ingest-no-reply",
@@ -654,7 +645,6 @@ export default (async ({ client, directory }) => {
       const guardIssues = blockingIssues(takeIssues(spawned.sessionID))
       if (guardIssues.length > 0) {
         await surfaceFailure(
-          sid,
           `write verification incomplete for ${guardIssues.length} note(s) ` +
             `(turns retained for retry): ${guardIssues.map((i) => i.path).join(", ")}`,
         )
@@ -779,7 +769,6 @@ export default (async ({ client, directory }) => {
 
       if (failed.length > 0) {
         await surfaceFailure(
-          sid,
           `consolidation did not complete for turn(s): ${failed.map((e) => `#${e.seq}`).join(", ")} (kept for retry)`,
         )
       } else {
@@ -789,7 +778,6 @@ export default (async ({ client, directory }) => {
 
       if (selection.overshoot) {
         await surfaceFailure(
-          sid,
           `ingest batch exceeds knowledge.drain_max_tokens (~${selection.tokens} tokens > ` +
             `${config.drain_max_tokens}); ingested ${selection.batch.length} turn(s) alone — ` +
             `raise the cap to batch more per cycle.`,
