@@ -45,11 +45,13 @@ test("resetVerification clears both issues and writes", () => {
   assert.deepEqual(takeIssues("ses_a"), [])
 })
 
-test("blockingIssues still filters repaired entries", () => {
+test("blockingIssues filters repaired entries and demotes ambiguous", () => {
   resetVerification()
   recordIssue("ses_a", { path: "x", kind: "date", detail: "d", repaired: true })
   recordIssue("ses_a", { path: "y", kind: "ambiguous", detail: "d", repaired: false })
+  recordIssue("ses_a", { path: "z", kind: "escaped-wikilink", detail: "repair write failed", repaired: false })
   const blocking = blockingIssues(takeIssues("ses_a"))
+  // Only the genuinely-unrepaired, non-ambiguous issue blocks the drain.
   assert.equal(blocking.length, 1)
-  assert.equal(blocking[0].path, "y")
+  assert.equal(blocking[0].path, "z")
 })

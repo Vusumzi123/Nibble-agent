@@ -30,6 +30,11 @@ export type MemoryEntry = {
   salience: number | null
   newTag: string | null
   hash: string
+  // Failed drain cycles this turn has been retained for (poison-pill budget).
+  // Absent/0 for freshly captured turns; incremented by knowledge-hook on each
+  // retain, and the turn is quarantined (pruned + ledgered) once it reaches
+  // knowledge.max_attempts so one bad head can never wedge the FIFO forever.
+  attempts?: number
 }
 
 // A not-yet-sequenced entry as produced by capture. `seq` is derived from the
@@ -86,6 +91,9 @@ function coerceEntry(o: unknown): MemoryEntry | null {
     salience: typeof r.salience === "number" ? r.salience : null,
     newTag: typeof r.newTag === "string" ? r.newTag : null,
     hash: typeof r.hash === "string" ? r.hash : "",
+    ...(typeof r.attempts === "number" && Number.isFinite(r.attempts) && r.attempts > 0
+      ? { attempts: Math.floor(r.attempts) }
+      : {}),
   }
 }
 
@@ -197,6 +205,40 @@ export async function pruneConsumed(memoryFile: string, consumed: Set<number>): 
   })
   if (next.trim() === "") await unlink(memoryFile).catch(() => {})
   return removed
+}
+
+// Retry-budget bookkeeping for retained (failed) turns: bump `attempts` on
+// every seq in `failed`, then quarantine (prune) the entries whose attempts
+// reached `maxAttempts`. maxAttempts <= 0 disables quarantine (bump only).
+// Returns the quarantined entries so the caller can ledger them. Atomic: one
+// update handles both the bump and the removal, so concurrent captures are
+// never lost.
+export async function retainFailed(
+  memoryFile: string,
+  failed: Set<number>,
+  maxAttempts: number,
+): Promise<MemoryEntry[]> {
+  if (failed.size === 0) return []
+  const quarantined: MemoryEntry[] = []
+  const next = await atomicUpdate(memoryFile, (cur) => {
+    const entries = parseMemory(cur)
+    const kept: MemoryEntry[] = []
+    for (const e of entries) {
+      if (!failed.has(e.seq)) {
+        kept.push(e)
+        continue
+      }
+      const attempts = (e.attempts ?? 0) + 1
+      if (maxAttempts > 0 && attempts >= maxAttempts) {
+        quarantined.push({ ...e, attempts })
+        continue
+      }
+      kept.push({ ...e, attempts })
+    }
+    return serializeMemory(kept)
+  })
+  if (next.trim() === "") await unlink(memoryFile).catch(() => {})
+  return quarantined
 }
 
 // ---------------------------------------------------------------------------

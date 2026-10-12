@@ -391,6 +391,141 @@ test("retains turns when the write guard reports an unresolved issue", async () 
   resetVerification()
 })
 
+test("an ambiguous write-guard issue does not block the drain", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  const client = makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [
+    memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
+  ])
+  // The exact false positive that wedged the live FIFO head: the guard could
+  // not prove the bullet rewrite was serializer-only. The write already
+  // landed, so the batch must still be pruned.
+  recordIssue("ses_drain_child", {
+    path: "Dev/Retrieval Gate Failure Diagnosis.md",
+    kind: "ambiguous",
+    detail: "write changed bullet markers or content in a way the guard could not safely repair",
+    repaired: false,
+  })
+
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+
+  assert.deepEqual(await readMem(dir), [])
+  const events = await readLog(dir)
+  assert.equal(events.some((e) => e.event === "ingest-verification-blocked"), false)
+  const ingest = events.find((e) => e.event === "ingest")
+  assert.equal(ingest?.outcome.consolidated, 3)
+  resetVerification()
+})
+
+test("write-receipt fallback prunes the batch when neither reply nor re-ask reported", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  // Both the initial reply and the outcome re-ask come back without fences…
+  const client = makeClient({
+    childReplies: [
+      "I examined the notes.", // no outcome fences
+      "…still no fences.", // re-ask reply, also nothing
+    ],
+  })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [
+    memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
+  ])
+  // …but the per-session write receipts prove the child wrote notes.
+  recordWrite("ses_drain_child", join(dir, "Brain", "AI", "Some Note.md"))
+
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+
+  assert.deepEqual(await readMem(dir), [])
+  const events = await readLog(dir)
+  const fallback = events.find((e) => e.event === "ingest-receipt-fallback")
+  assert.ok(fallback, "expected an ingest-receipt-fallback ledger event")
+  assert.deepEqual(fallback.batch, [1, 2, 3])
+  const ingest = events.find((e) => e.event === "ingest")
+  assert.equal(ingest?.outcome.failed, 0)
+  assert.equal(ingest?.outcome.consolidated, 3)
+  resetVerification()
+})
+
+test("a finished child with an empty reply still flows to the re-ask and prunes", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  // First message: empty final assistant text (the known "child ended on an
+  // empty message" failure). Re-ask reply carries the outcome fences.
+  const client = makeClient({ childReplies: ["", "done\n\n```consolidated\n#1\n#2\n#3\n```"] })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [
+    memEntry(1, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
+    memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
+  ])
+
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+
+  assert.deepEqual(await readMem(dir), [])
+  const events = await readLog(dir)
+  assert.ok(events.some((e) => e.event === "ingest-no-reply"), "expected an ingest-no-reply event")
+  assert.ok(events.some((e) => e.event === "ingest-reask"))
+  const ingest = events.find((e) => e.event === "ingest")
+  assert.equal(ingest?.outcome.failed, 0)
+})
+
+test("quarantines a turn after max_attempts failed drains", async () => {
+  automationChildSessions.clear()
+  resetVerification()
+  const dir = await freshProject()
+  await writeSection(dir, "knowledge", [
+    "enabled: true",
+    "min_ready_turns: 1",
+    "max_attempts: 2",
+    "drain_cooldown_ms: 0",
+    "max_turn_age: 0",
+    "skip_triage: false",
+    "log_guard: false",
+    "tag_gate: false",
+  ])
+  // The child never reports anything and leaves no write receipts, so the
+  // cycle fails and retains — the retry budget must eventually quarantine.
+  const client = makeClient({ childReply: "hmm." })
+  const hooks = await createHook({ client, directory: dir } as any)
+  await delay(20)
+  await seedMemory(dir, [memEntry(1, DURABLE_USER, DURABLE_ASSISTANT)])
+
+  // Drain cycle 1: fails, attempts -> 1 (retained).
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+  assert.equal((await readMem(dir)).length, 1)
+  assert.equal((await readMem(dir))[0].attempts, 1)
+
+  // Drain cycle 2: fails, attempts -> 2 == max_attempts -> quarantined.
+  await runIngest(hooks, "ses_parent", "ses_drain_child")
+  assert.deepEqual(await readMem(dir), [])
+
+  const events = await readLog(dir)
+  const quarantine = events.find((e) => e.event === "ingest-quarantine")
+  assert.ok(quarantine, "expected an ingest-quarantine ledger event")
+  assert.equal(quarantine.reason, "outcome-missing")
+  assert.deepEqual(quarantine.turns, [1])
+  assert.equal(quarantine.maxAttempts, 2)
+  // The quarantine is surfaced as a TUI toast.
+  assert.ok(
+    client.calls.toasts.some((t: any) => /quarantined 1 turn/.test(t.body.message)),
+    "expected a quarantine toast",
+  )
+  resetVerification()
+})
+
 test("temporal_search returns rendered hits from the buffer", async () => {
   automationChildSessions.clear()
   const dir = await freshProject()

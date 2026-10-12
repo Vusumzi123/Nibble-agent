@@ -10,7 +10,7 @@ import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso } from "./lib/util.ts"
-import { blockingIssues, takeIssues, takeWrites } from "./lib/verification.ts"
+import { blockingIssues, peekWrites, takeIssues, takeWrites } from "./lib/verification.ts"
 import {
   buildDecisionsLogEntry,
   buildIngestRequest,
@@ -49,6 +49,7 @@ import {
   normalizeMemoryFile,
   pruneConsumed,
   readMemory,
+  retainFailed,
   searchTemporal,
   type MemoryDraft,
   type MemoryEntry,
@@ -495,6 +496,40 @@ export default (async ({ client, directory }) => {
     }
   }
 
+  // --- Retry budget (poison-pill quarantine) --------------------------------
+  // Every retention path calls this: it bumps `attempts` on the retained
+  // turns and prunes (quarantines) any that reached knowledge.max_attempts,
+  // with an ingest-quarantine ledger entry + a deduped toast. This is what
+  // keeps a persistently failing head (write-guard false positive, provider
+  // outage, spawn failure) from wedging the FIFO selection forever.
+  // Returns the quarantined seqs so callers can drop them from "kept for
+  // retry" messages.
+  const retainWithBudget = async (seqs: number[], reason: string): Promise<number[]> => {
+    if (seqs.length === 0) return []
+    try {
+      const quarantined = await retainFailed(memoryFile, new Set(seqs), config.max_attempts)
+      if (quarantined.length > 0) {
+        await logger.append({
+          ts: nowIso(),
+          event: "ingest-quarantine",
+          reason,
+          turns: quarantined.map((e) => e.seq),
+          attempts: quarantined.map((e) => e.attempts ?? null),
+          count: quarantined.length,
+          maxAttempts: config.max_attempts,
+        })
+        await surfaceFailure(
+          `quarantined ${quarantined.length} turn(s) after ${config.max_attempts} failed drains: ` +
+            quarantined.map((e) => `#${e.seq}`).join(", "),
+        )
+        return quarantined.map((e) => e.seq)
+      }
+    } catch (err) {
+      void diag.error("[knowledge-hook] retain/quarantine failed:", err)
+    }
+    return []
+  }
+
   const ingestIfNeeded = async (sid: string, opts: { force?: boolean } = {}): Promise<void> => {
     if (draining) return
     draining = true
@@ -587,6 +622,7 @@ export default (async ({ client, directory }) => {
       // Phase 3: batch selection → deterministic candidate-note prefetch →
       // spawn one rag-brain child with the drain prompt.
       const selection = selectDrainBatch(kept, config.batch_turns, config.drain_max_tokens)
+      const batchSeqs = new Set(selection.batch.map((e) => e.seq))
       state.lastDrainAt = now
       await stateStore.write(state)
 
@@ -618,6 +654,7 @@ export default (async ({ client, directory }) => {
       if (!spawned.ok) {
         await recordFailure(new Error(spawned.error ?? "ingest spawn failed"))
         await logger.append({ ts: nowIso(), event: "ingest-spawn-failed", error: spawned.error })
+        await retainWithBudget([...batchSeqs], "spawn-failed")
         return
       }
 
@@ -626,16 +663,34 @@ export default (async ({ client, directory }) => {
       const childMessages = await readChildMessages(spawned.sessionID)
       const acct = drainAccounting(childMessages)
 
-      if (!reply) {
-        await recordFailure(new Error(timedOut ? "ingest child timed out" : "ingest child produced no reply"))
+      if (!reply && timedOut) {
+        // A timeout means we cannot even ask for the report — the child never
+        // finished. Retain under the retry budget (receipts may still exist
+        // from partial writes, but a timed-out child is not a trustworthy
+        // "done" signal).
+        await recordFailure(new Error("ingest child timed out"))
         await logger.append({
           ts: nowIso(),
-          event: timedOut ? "ingest-timeout" : "ingest-no-reply",
+          event: "ingest-timeout",
           batch: selection.batch.map((e) => e.seq),
           child: acct,
           durationMs: Date.now() - startedAt,
         })
+        await retainWithBudget([...batchSeqs], "ingest-timeout")
         return
+      }
+
+      // A finished child with an empty final assistant message is the known
+      // DRAIN_REASK scenario — fall through: Phase 6 reasks once, then the
+      // write-receipt fallback decides. Ledger it for observability.
+      if (!reply) {
+        await logger.append({
+          ts: nowIso(),
+          event: "ingest-no-reply",
+          batch: selection.batch.map((e) => e.seq),
+          child: acct,
+          durationMs: Date.now() - startedAt,
+        })
       }
 
       // Phase 5: write-guard verification — wikilink-guard recorded
@@ -656,13 +711,14 @@ export default (async ({ client, directory }) => {
           child: acct,
           durationMs: Date.now() - startedAt,
         })
+        await retainWithBudget([...batchSeqs], "verification-blocked")
         return
       }
 
       // Phase 6: parse the outcome blocks (consolidated/skipped), recover
       // mislabeled ones, and re-ask ONCE if the child reported nothing for
       // this batch.
-      const batchSeqs = new Set(selection.batch.map((e) => e.seq))
+      const logPath = join(vaultDir, config.log_file)
       let ok = parseConsolidated(reply)
       let skipped = parseSkipped(reply)
       let backlogDrafts = parseBacklogDrafts(reply)
@@ -685,6 +741,24 @@ export default (async ({ client, directory }) => {
           recovered = recoverMislabeledConsolidated(reReply, selection.batch.map((e) => e.seq))
           for (const s of recovered) ok.add(s)
         }
+
+        // Write-receipt fallback: even after the re-ask the child reported
+        // nothing, but per-session write receipts prove notes landed. Trust
+        // the receipts over the missing report — the work is done, so prune
+        // instead of retaining (retention here is what wedged the FIFO head
+        // for hours; a wrong prune is bounded, a stuck head re-bills forever).
+        // peek (not take): the changelog guard below still consumes them.
+        const receiptWrites = peekWrites(spawned.sessionID).filter((p) => p !== logPath)
+        if (receiptWrites.length > 0 && ![...ok, ...skipped, ...backlogSeqs].some((s) => batchSeqs.has(s))) {
+          for (const s of batchSeqs) ok.add(s)
+          await logger.append({
+            ts: nowIso(),
+            event: "ingest-receipt-fallback",
+            batch: [...batchSeqs],
+            writes: receiptWrites,
+          })
+        }
+
         await logger.append({
           ts: nowIso(),
           event: "ingest-reask",
@@ -702,7 +776,6 @@ export default (async ({ client, directory }) => {
       let logReasked = false
       let logFallback = false
       let noteCount: number | null = null
-      const logPath = join(vaultDir, config.log_file)
       if (config.log_guard && ok.size > 0) {
         const wroteLog = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
         if (!wroteLog) {
@@ -736,6 +809,12 @@ export default (async ({ client, directory }) => {
       )
       const failed = selection.batch.filter((e) => !consumed.has(e.seq))
       const pruned = await pruneConsumed(memoryFile, consumed)
+      // Retry budget for whatever the cycle failed to consume: bump attempts
+      // and quarantine turns that exhausted knowledge.max_attempts.
+      const quarantinedSeqs = await retainWithBudget(
+        failed.map((e) => e.seq),
+        "outcome-missing",
+      )
 
       // Route reported deferred actions into the backlog queue (card 3). A
       // failed append is best-effort: it must not fail the consolidation cycle,
@@ -768,9 +847,12 @@ export default (async ({ client, directory }) => {
       tagIndex = null
 
       if (failed.length > 0) {
-        await surfaceFailure(
-          `consolidation did not complete for turn(s): ${failed.map((e) => `#${e.seq}`).join(", ")} (kept for retry)`,
-        )
+        const stillKept = failed.filter((e) => !quarantinedSeqs.includes(e.seq))
+        if (stillKept.length > 0) {
+          await surfaceFailure(
+            `consolidation did not complete for turn(s): ${stillKept.map((e) => `#${e.seq}`).join(", ")} (kept for retry)`,
+          )
+        }
       } else {
         state.notifiedError = null
       }

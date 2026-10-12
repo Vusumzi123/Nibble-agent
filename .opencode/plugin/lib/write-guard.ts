@@ -142,10 +142,18 @@ export function diffBulletRewrites(before: string, after: string): BulletDiff {
     if (b[i] === a[i]) continue
     const bm = DASH_BULLET.exec(b[i])
     if (!bm) continue
+    // The after-line is still a bullet (dash or star) but with different
+    // text: a legitimate content edit by the child, possibly with the
+    // serializer's marker flip on top. Restore nothing (the edit must stand),
+    // flag nothing — only a line that ceased to be a bullet at all can be
+    // ambiguous (and even that is non-blocking; see blockingIssues in
+    // verification.ts).
     const am = STAR_AT_SAME_TEXT.exec(a[i])
     if (am && bm[1] === am[1] && stripOverEscapes(bm[2] ?? "") === stripOverEscapes(am[2] ?? "")) {
       markerOnly++
       restored[i] = b[i]
+    } else if (DASH_BULLET.exec(a[i]) || am) {
+      continue
     } else {
       return { kind: "ambiguous", repaired: null, count: markerOnly }
     }

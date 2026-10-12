@@ -78,14 +78,21 @@ test("diffBulletRewrites returns none for identical content", () => {
   assert.equal(diffBulletRewrites(same, same).kind, "none")
 })
 
-test("diffBulletRewrites refuses to guess on ambiguous bullet changes", () => {
-  // A dash-bullet line that did not become an identical-text `*` bullet cannot
-  // be proven a serializer artifact.
-  const contentChange = diffBulletRewrites("- one\n", "- one changed\n")
-  assert.equal(contentChange.kind, "ambiguous")
+test("diffBulletRewrites treats an intentional content edit to a bullet as none", () => {
+  // A dash-bullet whose text changed is a legitimate child edit (the line is
+  // still a bullet), not serializer mangling — the guard must not restore it
+  // and must not flag it ambiguous (that would block the drain forever).
+  assert.equal(diffBulletRewrites("- one\n", "- one changed\n").kind, "none")
 
-  const starWithEdit = diffBulletRewrites("- one\n", "* one changed\n")
-  assert.equal(starWithEdit.kind, "ambiguous")
+  // Star bullet with edited text: also a content edit, not marker-only.
+  assert.equal(diffBulletRewrites("- one\n", "* one changed\n").kind, "none")
+})
+
+test("diffBulletRewrites flags a dash bullet that ceased to be a bullet", () => {
+  // The after-line is no longer any bullet marker: cannot be proven a
+  // serializer artifact, so it stays ambiguous (non-blocking in verification).
+  const diff = diffBulletRewrites("- one\n", "1. one\n")
+  assert.equal(diff.kind, "ambiguous")
 })
 
 test("diffBulletRewrites ignores non-bullet content edits", () => {

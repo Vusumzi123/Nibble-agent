@@ -65,9 +65,13 @@ export function resetVerification(): void {
   writes.clear()
 }
 
-// An issue is "blocking" when the guard could not cleanly resolve it (an
-// ambiguous bullet diff, or a date it refused to touch). Repaired issues are
-// informational only.
+// An issue is "blocking" when the guard could not cleanly resolve it AND an
+// unresolved state risks stale content: a date it refused to touch, or an
+// escaped-wikilink whose repair write failed. An `ambiguous` bullet diff is
+// deliberately NOT blocking: the child's write already landed in the vault, so
+// retaining the batch would only re-run the whole drain (duplicate writes,
+// re-billed context) while re-triggering the same false positive forever —
+// knowledge-hook logs it and prunes anyway.
 export function blockingIssues(list: VerificationIssue[]): VerificationIssue[] {
-  return list.filter((i) => !i.repaired)
+  return list.filter((i) => !i.repaired && i.kind !== "ambiguous")
 }

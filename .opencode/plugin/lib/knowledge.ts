@@ -43,6 +43,10 @@ export type KnowledgeConfig = {
   // Force-ingest turns older than this (ms); 0 disables. Backstop for a
   // stranded backlog (docs/temporal-memory-plan.md §8.3).
   max_turn_age: number
+  // Poison-pill budget: a turn retained by this many failed drain cycles is
+  // quarantined (pruned + ledgered as ingest-quarantine) so one bad head can
+  // never wedge the FIFO. 0 disables quarantine (retain forever).
+  max_attempts: number
   drain_max_tokens: number
   drain_cooldown_ms: number
   // Deterministic per-turn prefilter: only unambiguously trivial turns are
@@ -82,6 +86,7 @@ export const DEFAULT_CONFIG: KnowledgeConfig = {
   min_ready_turns: 3,
   batch_turns: 8,
   max_turn_age: 86400000,
+  max_attempts: 3,
   drain_max_tokens: 150000,
   drain_cooldown_ms: 60000,
   skip_triage: true,

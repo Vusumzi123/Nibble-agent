@@ -13,6 +13,7 @@ import {
   parseMemory,
   parseSeq,
   pruneConsumed,
+  retainFailed,
   searchTemporal,
   type MemoryEntry,
 } from "./temporal.ts"
@@ -179,6 +180,70 @@ test("pruneConsumed deletes an emptied file", async () => {
   await appendMemoryEntry(file, draft("one", "r1"))
   await pruneConsumed(file, new Set([1]))
   assert.equal(existsSync(file), false)
+})
+
+// ---------------------------------------------------------------------------
+// retainFailed (retry budget / quarantine)
+
+test("retainFailed bumps attempts on failed turns and leaves the rest", async () => {
+  const file = await tmpFile()
+  await appendMemoryEntry(file, draft("one", "r1"))
+  await appendMemoryEntry(file, draft("two", "r2"))
+  await appendMemoryEntry(file, draft("three", "r3"))
+
+  const quarantined = await retainFailed(file, new Set([2]), 3)
+  assert.deepEqual(quarantined, [])
+  const parsed = parseMemory(await readFile(file, "utf8"))
+  assert.equal(parsed.find((e) => e.seq === 2)?.attempts, 1)
+  assert.equal(parsed.find((e) => e.seq === 1)?.attempts, undefined)
+  assert.equal(parsed.length, 3)
+})
+
+test("retainFailed quarantines a turn once attempts reaches max", async () => {
+  const file = await tmpFile()
+  await appendMemoryEntry(file, draft("one", "r1"))
+  await appendMemoryEntry(file, draft("two", "r2"))
+
+  // First two failures: bump only (attempts 1, 2 < 3).
+  assert.deepEqual(await retainFailed(file, new Set([1]), 3), [])
+  assert.deepEqual(await retainFailed(file, new Set([1]), 3), [])
+  // Third failure: attempts hits 3 -> quarantined.
+  const third = await retainFailed(file, new Set([1]), 3)
+  assert.equal(third.length, 1)
+  assert.equal(third[0].seq, 1)
+  assert.equal(third[0].attempts, 3)
+  assert.deepEqual(parseMemory(await readFile(file, "utf8")).map((e) => e.seq), [2])
+})
+
+test("retainFailed with maxAttempts 0 disables quarantine (bump only)", async () => {
+  const file = await tmpFile()
+  await appendMemoryEntry(file, draft("one", "r1"))
+  for (let i = 0; i < 5; i++) {
+    assert.deepEqual(await retainFailed(file, new Set([1]), 0), [])
+  }
+  const parsed = parseMemory(await readFile(file, "utf8"))
+  assert.equal(parsed.length, 1)
+  assert.equal(parsed[0].attempts, 5)
+})
+
+test("retainFailed deletes an emptied file and tolerates a missing one", async () => {
+  const file = await tmpFile()
+  await appendMemoryEntry(file, draft("one", "r1"))
+  const quarantined = await retainFailed(file, new Set([1]), 1)
+  assert.equal(quarantined.length, 1)
+  assert.equal(existsSync(file), false)
+  // Missing file: no-op, no throw.
+  assert.deepEqual(await retainFailed(file, new Set([1]), 1), [])
+})
+
+test("parseMemory round-trips the attempts field", () => {
+  const content = JSON.stringify([
+    { ...entry(1, "a", "b"), attempts: 2 },
+    entry(2, "c", "d"),
+  ])
+  const parsed = parseMemory(content)
+  assert.equal(parsed[0].attempts, 2)
+  assert.equal(parsed[1].attempts, undefined)
 })
 
 // ---------------------------------------------------------------------------
