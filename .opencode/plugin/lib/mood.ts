@@ -55,7 +55,7 @@ export type MoodEvent = (typeof MOOD_EVENTS)[number]
 // §17.7; `woken` matches §17.7 (groggy). `well_rested`/`fell_asleep` carry zero
 // delta here — their behaviour is special-cased in `applyEvent`.
 const DELTAS: Record<MoodEvent, { valence: number; arousal: number }> = {
-  engaged: { valence: 0.08, arousal: -0.06 },
+  engaged: { valence: 0.08, arousal: 0 },
   poke_ignored: { valence: -0.05, arousal: 0.05 },
   conversation_closed_unanswered: { valence: -0.1, arousal: 0.15 },
   mission_failure: { valence: -0.08, arousal: 0.04 },
@@ -110,17 +110,17 @@ export function defaultMoodState(now: string = new Date().toISOString()): MoodSt
 
 // Map the two axes to a short summary label. Pure — describes the *state*, never
 // prescribes expression (the agent expresses itself from the state; the mood
-// system only reports it).
+// system only reports it). A 5×3 circumplex: five valence bands (≤ -0.5,
+// ≤ -0.2, mid, ≥ 0.2, ≥ 0.5) crossed with three arousal bands (≤ 0.2 low, mid,
+// ≥ 0.6 high). The mid-valence column keeps its own low-arousal "flat" floor
+// (§15.1). The original nine labels (content, excited, pleased, on-edge,
+// deflated, down, restless, flat, neutral) remain a subset.
 export function describe(valence: number, arousal: number): string {
-  if (valence >= 0.25 && arousal >= 0.6) return "excited"
-  if (valence >= 0.25 && arousal <= 0.2) return "content"
-  if (valence >= 0.25) return "pleased"
-  if (valence <= -0.25 && arousal >= 0.6) return "on-edge"
-  if (valence <= -0.25 && arousal <= 0.2) return "deflated"
-  if (valence <= -0.25) return "down"
-  if (arousal >= 0.6) return "restless"
-  if (arousal <= 0.15) return "flat"
-  return "neutral"
+  if (valence >= 0.5) return arousal >= 0.6 ? "elated" : arousal <= 0.2 ? "serene" : "happy"
+  if (valence >= 0.2) return arousal >= 0.6 ? "excited" : arousal <= 0.2 ? "content" : "pleased"
+  if (valence <= -0.5) return arousal >= 0.6 ? "furious" : arousal <= 0.2 ? "despondent" : "miserable"
+  if (valence <= -0.2) return arousal >= 0.6 ? "on-edge" : arousal <= 0.2 ? "deflated" : "down"
+  return arousal >= 0.6 ? "restless" : arousal <= 0.15 ? "flat" : "neutral"
 }
 
 // Mild baseline adaptation: sustained mood drags the resting point toward the

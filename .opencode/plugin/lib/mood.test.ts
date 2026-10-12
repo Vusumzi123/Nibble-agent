@@ -59,10 +59,26 @@ test("describe maps the valence/arousal quadrants", () => {
   assert.equal(describe(0, 0.1), "flat")
 })
 
+test("describe adds the outer valence bands", () => {
+  assert.equal(describe(0.7, 0.1), "serene")
+  assert.equal(describe(0.7, 0.4), "happy")
+  assert.equal(describe(0.7, 0.8), "elated")
+  assert.equal(describe(-0.7, 0.1), "despondent")
+  assert.equal(describe(-0.7, 0.4), "miserable")
+  assert.equal(describe(-0.7, 0.8), "furious")
+})
+
+test("describe band edges resolve to the higher band", () => {
+  assert.equal(describe(0.2, 0.4), "pleased")
+  assert.equal(describe(0.5, 0.4), "happy")
+  assert.equal(describe(-0.2, 0.4), "down")
+  assert.equal(describe(-0.5, 0.4), "miserable")
+})
+
 test("applyEvent applies the deterministic delta", () => {
   const s = applyEvent(defaultMoodState(T0), "engaged", T0)
   assert.ok(s.valence > 0, "engagement raises valence")
-  assert.ok(s.arousal < 0.3, "engagement settles arousal")
+  assert.equal(s.arousal, 0.3, "engagement leaves arousal at rest")
   assert.equal(s.since, T0)
 })
 
@@ -157,7 +173,7 @@ test("writeMoodState/readMoodState round-trips clamped", async () => {
   const read = await readMoodState(file)
   assert.equal(read.valence, 0.7)
   assert.equal(read.arousal, 0.8)
-  assert.equal(read.label, "excited")
+  assert.equal(read.label, "elated")
   await rm(dir, { recursive: true, force: true })
 })
 
