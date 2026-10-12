@@ -1,6 +1,6 @@
 {
   "choice": {
-    "instructions": "Which pairing profile note(s), if any, should be updated from this exchange? Pay special attention to feedback about how the agent responded — corrections, stated preferences, or hits/misses (\"prefer it listed like this\", \"too long\", \"get to the point\", \"route X the same way every time\") — because those are durable response-improvement instructions that should shape future replies.",
+    "instructions": "Which pairing profile note(s), if any, should be updated from this exchange? Pay special attention to feedback about how the agent responded — corrections, stated preferences, or hits/misses (\"prefer it listed like this\", \"too long\", \"get to the point\", \"route X the same way every time\") — because those are durable response-improvement instructions that should shape future replies. When torn between \"none\" and a named target, choose the target: a missed durable update is worse than a marginal one, and the reviewer gate rejects anything not worth keeping.",
     "criteria": {
       "none": "no durable, lasting information; reserve for exchanges with nothing worth remembering and no feedback on how the agent responded",
       "agent": "agent persona or behavior traits (voice, style, operating rules, personality) — including response-improvement feedback: how the agent should answer in general (format, structure, detail level, ordering, routing, tone) derived from the user's hits/misses, not just this one reply",
