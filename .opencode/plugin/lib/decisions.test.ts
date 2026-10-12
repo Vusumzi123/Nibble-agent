@@ -236,6 +236,66 @@ test("BridgeDecisionProvider rejects a null value shape", async () => {
   assert.equal(res.abstained, true)
 })
 
+test("BridgeDecisionProvider retries once and recovers from a transient error", async () => {
+  let calls = 0
+  const provider = new BridgeDecisionProvider({
+    configPath: "/x",
+    backend: "llamacpp",
+    timeoutMs: 5000,
+    spawner: async () => {
+      calls++
+      if (calls === 1) return { code: 0, stdout: "", stderr: "empty structured output" }
+      return {
+        code: 0,
+        stdout: JSON.stringify({ kind: "noul", value: true, confidence: 0.9, abstained: false }),
+        stderr: "",
+      }
+    },
+  })
+  const res = await provider.decide(buildTriageRequest(TRIVIAL))
+  assert.equal(calls, 2)
+  assert.equal(res.value, true)
+  assert.equal(res.abstained, false)
+  assert.ok(!res.error)
+})
+
+test("BridgeDecisionProvider does not retry a clean abstain", async () => {
+  let calls = 0
+  const provider = new BridgeDecisionProvider({
+    configPath: "/x",
+    backend: "llamacpp",
+    timeoutMs: 5000,
+    spawner: async () => {
+      calls++
+      return {
+        code: 0,
+        stdout: JSON.stringify({ kind: "noul", value: null, confidence: 0, abstained: true }),
+        stderr: "",
+      }
+    },
+  })
+  const res = await provider.decide(buildTriageRequest(TRIVIAL))
+  assert.equal(calls, 1)
+  assert.equal(res.abstained, true)
+})
+
+test("BridgeDecisionProvider gives up after one retry and stays fail-open", async () => {
+  let calls = 0
+  const provider = new BridgeDecisionProvider({
+    configPath: "/x",
+    backend: "llamacpp",
+    timeoutMs: 5000,
+    spawner: async () => {
+      calls++
+      return { code: 1, stdout: "", stderr: "boom" }
+    },
+  })
+  const res = await provider.decide(buildTriageRequest(TRIVIAL))
+  assert.equal(calls, 2)
+  assert.equal(res.abstained, true)
+  assert.ok(res.error)
+})
+
 // ---------------------------------------------------------------------------
 // Fallback
 

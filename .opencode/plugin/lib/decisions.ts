@@ -461,42 +461,59 @@ export class BridgeDecisionProvider implements DecisionProvider {
 
   async decide(request: DecisionRequest): Promise<DecisionResult> {
     const spawner = this.opts.spawner ?? spawnBridge
-    const started = Date.now()
-    let result: BridgeSpawnResult
-    try {
-      result = await spawner({
-        script: BRIDGE_SCRIPT,
-        configPath: this.opts.configPath,
-        backend: this.opts.backend,
-        request: serializeRequest(request),
-        timeoutMs: this.opts.timeoutMs,
-      })
-    } catch (err) {
-      return this.abstained(request, `bridge spawn failed: ${err instanceof Error ? err.message : String(err)}`, Date.now() - started)
-    }
+    // One retry: the model-backed bridge occasionally returns empty structured
+    // output (a starved reasoning trace) or a transient transport error. A
+    // single re-spawn recovers the common case; a clean model abstain (no error)
+    // returns immediately and is not retried.
+    const MAX_ATTEMPTS = 2
+    let last: DecisionResult | null = null
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const started = Date.now()
+      let result: BridgeSpawnResult
+      try {
+        result = await spawner({
+          script: BRIDGE_SCRIPT,
+          configPath: this.opts.configPath,
+          backend: this.opts.backend,
+          request: serializeRequest(request),
+          timeoutMs: this.opts.timeoutMs,
+        })
+      } catch (err) {
+        last = this.abstained(request, `bridge spawn failed: ${err instanceof Error ? err.message : String(err)}`, Date.now() - started)
+        continue
+      }
 
-    if (result.code !== 0 || !result.stdout.trim()) {
-      return this.abstained(
-        request,
-        result.stderr.trim() || `bridge exited ${result.code}`,
-        Date.now() - started,
-      )
-    }
+      if (result.code !== 0 || !result.stdout.trim()) {
+        last = this.abstained(
+          request,
+          result.stderr.trim() || `bridge exited ${result.code}`,
+          Date.now() - started,
+        )
+        continue
+      }
 
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(result.stdout)
-    } catch {
-      return this.abstained(request, "bridge returned invalid JSON", Date.now() - started)
-    }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(result.stdout)
+      } catch {
+        last = this.abstained(request, "bridge returned invalid JSON", Date.now() - started)
+        continue
+      }
 
-    const normalized = normalizeBridgeResult(parsed)
-    if (!normalized) return this.abstained(request, "bridge returned an unexpected shape", Date.now() - started)
-    // `latencyMs` is the backend's own prompt-eval time; `wallMs` is the full
-    // subprocess round-trip (python startup + spawn + backend), the number that
-    // matters for the hook's scheduling budget.
-    normalized.wallMs = Date.now() - started
-    return normalized
+      const normalized = normalizeBridgeResult(parsed)
+      if (!normalized) {
+        last = this.abstained(request, "bridge returned an unexpected shape", Date.now() - started)
+        continue
+      }
+      // `latencyMs` is the backend's own prompt-eval time; `wallMs` is the full
+      // subprocess round-trip (python startup + spawn + backend), the number that
+      // matters for the hook's scheduling budget.
+      normalized.wallMs = Date.now() - started
+      if (!normalized.error) return normalized
+      // Error (e.g. empty structured output) — retry once before giving up.
+      last = normalized
+    }
+    return last ?? this.abstained(request, "bridge produced no result", Date.now())
   }
 
   private abstained(request: DecisionRequest, error: string, wallMs: number): DecisionResult {
