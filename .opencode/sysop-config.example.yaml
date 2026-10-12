@@ -350,7 +350,7 @@ autonomy:
     max_actions: 8             # grant budget per confirmed ```autonomy-batch; 0 = one-shot approvals only
   session_grant: off           # off | target | class — session-wide approval on "allow session" (floor/root/self-improve never covered)
   session_grant_ttl: 0         # minutes until a session grant expires; 0 = session lifetime (cleared on restart)
-  enforcement: per-command     # per-command | per-task — per-task: ONE JEV task classification per user turn, the agent asks to proceed, opencode natively governs the commands (floor still applies)
+  enforcement: per-task        # per-command | per-task — per-task (default): ONE JEV task classification per user turn, the agent asks to proceed, opencode natively governs the commands (floor still applies)
   chatter:                     # idle chatter mission (§16) — off until card 7b
     enabled: false
     max_pokes: 3

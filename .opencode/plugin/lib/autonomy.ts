@@ -100,9 +100,9 @@ export type AutonomyConfig = {
   session_grant: SessionGrantMode
   /** Minutes until a session grant expires; 0 = session lifetime (restart clears). */
   session_grant_ttl: number
-  /** `per-command` (default): classify+gate every call. `per-task`: one JEV
-   *  classification of the objective per turn; the agent asks to proceed and
-   *  opencode natively governs the commands (the floor still applies). */
+  /** `per-task` (default): one JEV classification of the objective per turn;
+   *  the agent asks to proceed and opencode natively governs the commands (the
+   *  floor still applies). `per-command`: classify+gate every call. */
   enforcement: "per-command" | "per-task"
   chatter: ChatterConfig
   quiet: QuietConfig
@@ -158,7 +158,7 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
   batch: { max_actions: 8 },
   session_grant: "off",
   session_grant_ttl: 0,
-  enforcement: "per-command",
+  enforcement: "per-task",
   chatter: {
     enabled: false,
     max_pokes: 3,
@@ -391,7 +391,7 @@ const AUTONOMY_SCALAR_RULES: Record<string, Rule> = {
   // Invalid value -> reject -> default `off` stands (session grants are opt-in).
   session_grant: { t: "enum", values: SESSION_GRANT_MODES },
   session_grant_ttl: { t: "int", min: 0 },
-  // Invalid value -> reject -> default `per-command` stands (no silent pivot).
+  // Invalid value -> reject -> default `per-task` stands (no silent pivot).
   enforcement: { t: "enum", values: ENFORCEMENT_MODES },
 }
 

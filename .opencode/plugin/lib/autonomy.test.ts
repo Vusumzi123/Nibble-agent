@@ -383,19 +383,19 @@ test("session_grant defaults to off, parses target/class, and fails closed on in
 // ---------------------------------------------------------------------------
 // enforcement — per-command vs per-task
 
-test("enforcement defaults to per-command, parses per-task, and fails closed on invalid", async () => {
+test("enforcement defaults to per-task, parses per-command, and fails closed on invalid", async () => {
   const missing = await configDir(["autonomy:", "  level: 2"])
   const cfgMissing = await readAutonomyConfig(missing, { onReject: () => assert.fail("unexpected reject") })
-  assert.equal(cfgMissing.enforcement, "per-command")
-  assert.equal(DEFAULT_AUTONOMY.enforcement, "per-command")
+  assert.equal(cfgMissing.enforcement, "per-task")
+  assert.equal(DEFAULT_AUTONOMY.enforcement, "per-task")
 
-  const task = await configDir(["autonomy:", "  enforcement: per-task"])
-  const cfgTask = await readAutonomyConfig(task, { onReject: () => assert.fail("unexpected reject") })
-  assert.equal(cfgTask.enforcement, "per-task")
+  const command = await configDir(["autonomy:", "  enforcement: per-command"])
+  const cfgCommand = await readAutonomyConfig(command, { onReject: () => assert.fail("unexpected reject") })
+  assert.equal(cfgCommand.enforcement, "per-command")
 
   const invalid = await configDir(["autonomy:", "  enforcement: per-objective"])
   const events: string[] = []
   const cfgInvalid = await readAutonomyConfig(invalid, { onReject: (e) => events.push(e.path) })
-  assert.equal(cfgInvalid.enforcement, "per-command") // fail-closed
+  assert.equal(cfgInvalid.enforcement, "per-task") // fail-closed to the default
   assert.deepEqual(events, ["enforcement"])
 })

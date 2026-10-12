@@ -15,7 +15,11 @@ async function project(level?: number | string, extra?: string[], decisions?: st
   await mkdir(join(dir, ".opencode"), { recursive: true })
   const lines = ["autonomy:"]
   if (level !== undefined) lines.push(`  level: ${level}`)
-  for (const e of extra ?? []) lines.push(`  ${e}`)
+  const extras = extra ?? []
+  for (const e of extras) lines.push(`  ${e}`)
+  // The product default is now per-task; the matrix tests here exercise the
+  // per-command gate, so pin it unless the caller opted into per-task.
+  if (!extras.some((e) => e.startsWith("enforcement:"))) lines.push("  enforcement: per-command")
   if (decisions) {
     lines.push("", "decisions:")
     for (const d of decisions) lines.push(`  ${d}`)

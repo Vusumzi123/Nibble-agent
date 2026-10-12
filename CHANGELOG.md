@@ -30,8 +30,10 @@ Notable changes to Nibble, newest first. Sections follow
   matrix, and injects a `[task]` directive telling the agent to ask the user to
   proceed when the kind is above the current level. Commands are then left to
   **opencode's native permission layer** — no per-command matrix gate. The
-  irreversibility floor still denies deterministically. Default stays
-  `per-command` (reversible); add `task.assertion` to `decision-prompts.yaml`.
+  irreversibility floor still denies deterministically. The default is
+  `per-task`; set `per-command` for the stricter every-call matrix gate. An
+  invalid value falls back to the default. Add `task.assertion` to
+  `decision-prompts.yaml`.
 - **Session-scoped autonomy approval ("allow session")** — the gate gains a
   grant lifetime between the one-shot exact-retry and the per-turn batch grant.
   A pending ask's class + target now ride on the pending record; replying
