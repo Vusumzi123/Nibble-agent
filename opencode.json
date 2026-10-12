@@ -27,7 +27,7 @@
         "VAULT_CONTEXT_MODE": "assisted",
         "SHARP_IGNORE_GLOBAL_LIBVIPS": "true",
         "OLLAMA_URL": "http://127.0.0.1:11434",
-        "OLLAMA_MODEL": "qwen3-embedding:0.6b",
+        "OLLAMA_MODEL": "qwen3-embedding-768",
         "OLLAMA_DIMENSIONS": "1024",
         "QUERY_INSTRUCTION_PREFIX": "",
         "RERANK_ENABLED": "true",

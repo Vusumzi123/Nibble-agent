@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
     "provider": "openjev",         # openjev | rules
     "backend": "",                 # "" = auto opencode provider; "llamacpp" = local
     "transport": "chat",           # chat | completion (see LlamaCppBackend)
+    "think": False,                # backend: ollama — allow thinking (first-token logprobs need think: false)
     "base_url": "",                # override: pin an endpoint (no /v1 suffix)
     "api_provider": "",            # override: provider id when `model` has no prefix
     "model": "",                   # opencode spec: <provider>/<model>
@@ -79,6 +80,18 @@ DEFAULTS: dict[str, Any] = {
 # Native llama.cpp endpoint used when `backend: llamacpp` (or a base_url override)
 # is selected without an explicit URL.
 DEFAULT_LLAMACPP_URL = "http://127.0.0.1:8090"
+
+# Ollama endpoint used by `backend: ollama` (native /api/chat logprobs) and
+# `backend: clef` (native /v1/systemone decision API).
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+
+# Default noul criteria for the System One (clef) backend: the two descriptions
+# are what the TRUE / FALSE sides mean for an assertion-style question. Matches
+# Ollama's own built-in defaults so callers may omit criteria entirely.
+NOUL_CRITERIA = {
+    "true": "The statement holds for this state.",
+    "false": "The statement does not hold for this state.",
+}
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_CONFIG = os.path.join(REPO_ROOT, ".opencode", "sysop-config.yaml")
@@ -477,6 +490,189 @@ class OpenAICompatBackend:
                 "base_url": self.base_url, "capability": "structured-json"}
 
 
+# --------------------------------------------------------------------------- #
+# Ollama native backends                                                       #
+#                                                                              #
+#   OllamaChatBackend (backend: ollama)                                        #
+#     POST {base}/api/chat with logprobs + think:false; reads the FIRST        #
+#     generated token's top_logprobs — same contract as LlamaCppBackend,       #
+#     but with the native Ollama body (the OpenAI-compat endpoint silently     #
+#     drops chat_template_kwargs, so thinking models would burn the only       #
+#     sampled token on their reasoning trace).                                 #
+#                                                                              #
+#   SystemOneBackend (backend: clef)                                           #
+#     POST {base}/v1/systemone — Ollama's decision capability for Clef         #
+#     models. Takes {state, questions:{id:{type,instructions,criteria}}} and    #
+#     returns per-option PROBABILITIES directly (native, calibrated). Each     #
+#     decide_* call maps its JEV request onto one typed question and           #
+#     synthesizes a logprob-shaped `top` so the existing candidate math        #
+#     (candidate_logprobs -> calibrate) is reused unchanged.                   #
+# --------------------------------------------------------------------------- #
+
+
+def _ollama_model_present(base_url: str, model: str, timeout: float) -> tuple[bool, str]:
+    """Health probe shared by both Ollama backends: the model must be in /api/tags."""
+    try:
+        with urllib.request.urlopen(base_url.rstrip("/") + "/api/tags", timeout=timeout) as resp:
+            names = [str(m.get("name", "")) for m in (json.loads(resp.read().decode("utf-8")).get("models") or [])]
+    except Exception as exc:  # noqa: BLE001 - health never raises
+        return False, f"unreachable: {exc}"
+    wanted = model.strip()
+    for name in names:
+        if name == wanted or name.startswith(wanted + ":") or name.split(":")[0] == wanted:
+            return True, "ok"
+    return False, f"model {wanted!r} not found (available: {', '.join(names) or 'none'})"
+
+
+class OllamaChatBackend:
+    """Native Ollama /api/chat with first-token logprobs (a small local chat model)."""
+
+    supports_logprobs = True
+
+    def __init__(self, base_url: str, model: str, timeout_ms: int = 30000,
+                 n_probs: int = 20, think: bool = False):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = max(1.0, float(timeout_ms) / 1000.0)
+        self.n_probs = n_probs
+        self.think = bool(think)
+
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        req = urllib.request.Request(
+            self.base_url + path, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def top_logprobs(self, prompt: str) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        body = {
+            "model": self.model,
+            "stream": False,
+            "think": self.think,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "options": {"temperature": 0.0, "num_predict": 1},
+            "logprobs": True,
+            "top_logprobs": self.n_probs,
+        }
+        resp = self._post("/api/chat", body)
+        logprobs = resp.get("logprobs") or []
+        top = logprobs[0].get("top_logprobs", []) if logprobs else []
+        if not top:
+            raise RuntimeError("ollama chat returned no first-token logprobs")
+        content = (resp.get("message") or {}).get("content") or ""
+        usage = normalize_usage(resp, "chat")
+        if not usage.get("usageKnown"):
+            # The native API reports prompt_eval_count/eval_count instead of
+            # an OpenAI-style usage block.
+            pe = int(resp.get("prompt_eval_count") or 0)
+            ec = int(resp.get("eval_count") or 0)
+            usage = {"promptTokens": pe, "completionTokens": ec,
+                     "totalTokens": pe + ec, "usageKnown": True}
+        return top, content, usage
+
+    def structured_top_logprobs(self, prompt: str,
+                                labels: list[str]) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        return self.top_logprobs(prompt)
+
+    def health(self) -> dict[str, Any]:
+        ok, detail = _ollama_model_present(self.base_url, self.model, self.timeout)
+        return {"status": "ok" if ok else "unreachable", "backend": "ollama",
+                "model": self.model, "base_url": self.base_url,
+                "detail": detail if not ok else None}
+
+
+class SystemOneBackend:
+    """Ollama System One decision API (`/v1/systemone`) backed by a Clef model.
+
+    Unlike the logprobs tiers, every answer arrives as a probability vector, so
+    `decide_*` keeps its aggregation math while skipping prompt construction:
+    transport only, no re-derivation of evidence from tokens.
+    """
+
+    supports_systemone = True
+    supports_logprobs = False
+
+    def __init__(self, base_url: str, model: str, timeout_ms: int = 30000):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = max(1.0, float(timeout_ms) / 1000.0)
+
+    def _score(self, questions: dict[str, Any], state: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        body = {"model": self.model, "state": _as_text(state) if not isinstance(state, (dict, list)) else state,
+                "questions": questions}
+        req = urllib.request.Request(
+            self.base_url + "/v1/systemone", data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+        answers = out.get("answers") or {}
+        usage_raw = out.get("usage") or {}
+        usage = {
+            "promptTokens": int(usage_raw.get("input_tokens") or 0),
+            "completionTokens": int(usage_raw.get("output_tokens") or 0),
+            "totalTokens": int(usage_raw.get("input_tokens") or 0) + int(usage_raw.get("output_tokens") or 0),
+            "usageKnown": True,
+        }
+        return answers, usage
+
+    def systemone_noul(self, state: Any, assertion: Any) -> tuple[dict[str, float], dict[str, Any]]:
+        answers, usage = self._score(
+            {"q": {"type": "noul", "instructions": str(assertion or ""),
+                   "criteria": dict(NOUL_CRITERIA)}}, state)
+        p_true = float((answers.get("q") or {}).get("noul") or 0.0)
+        return {"true": p_true, "false": 1.0 - p_true}, usage
+
+    def systemone_choice(self, state: Any, candidates: list[str],
+                         criteria: str | None, instructions: str | None) -> tuple[dict[str, float], dict[str, Any]]:
+        # Ollama's choice criteria is an option-key -> description map (null
+        # descriptions allowed); the evaluation text rides in `instructions`.
+        criteria_map: dict[str, Any] = {str(c): None for c in candidates}
+        answers, usage = self._score(
+            {"q": {"type": "choice",
+                   "instructions": str(instructions or criteria or "Choose the best option."),
+                   "criteria": criteria_map}}, state)
+        probs = dict(((answers.get("q") or {}).get("probabilities")) or {})
+        return {str(c): float(probs.get(str(c), 0.0)) for c in candidates}, usage
+
+    def systemone_score(self, state: Any, levels: list[str],
+                        criteria: str | None, instructions: str | None) -> tuple[dict[str, float], dict[str, Any]]:
+        # Clef score criteria is an ordered array of per-level descriptions;
+        # answers report probabilities keyed "0".."N-1" (0-based legend).
+        descriptions = [str(l) for l in levels]
+        answers, usage = self._score(
+            {"q": {"type": "score",
+                   "instructions": str(instructions or criteria or "Rate the state on this ordered scale."),
+                   "criteria": descriptions}}, state)
+        probs = dict(((answers.get("q") or {}).get("probabilities")) or {})
+        return {str(i): float(probs.get(str(i), 0.0)) for i in range(len(descriptions))}, usage
+
+    def structured_top_logprobs(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("SystemOneBackend answers through decide_*, not _probe")
+
+    def top_logprobs(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("SystemOneBackend answers through decide_*, not _probe")
+
+    def health(self) -> dict[str, Any]:
+        ok, detail = _ollama_model_present(self.base_url, self.model, self.timeout)
+        return {"status": "ok" if ok else "unreachable", "backend": "clef",
+                "model": self.model, "base_url": self.base_url,
+                "detail": detail if not ok else None}
+
+
+def _probs_to_top(prob_map: dict[str, float]) -> list[dict[str, Any]]:
+    """Synthesize a logprob-shaped `top` from a probability vector.
+
+    candidate_logprobs expects {token, logprob} entries; ln(p) round-trips
+    through its exp+logsumexp normalization unchanged (candidates missing from
+    the vector are floored by the shared helper, preserving fail-open).
+    """
+    return [{"token": token, "logprob": math.log(max(min(float(p), 1.0), 1e-12))}
+            for token, p in prob_map.items()]
+
+
 def _probe(backend: Any, prompt: str, labels: list[str]) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     """Return ``(top, content, usage)`` for a decision, via log-probs or the
     structured JSON path depending on the backend's capability."""
@@ -489,8 +685,6 @@ def _make_llamacpp(cfg: dict[str, Any], base_url: str) -> LlamaCppBackend:
     cfg["backend"] = "llamacpp"
     return LlamaCppBackend(base_url, cfg.get("timeout_ms", 30000),
                            cfg.get("n_probs", 20), cfg.get("transport", "chat"))
-
-
 class UnavailableBackend:
     """Placeholder backend whose every probe raises, so safe_dispatch abstains.
 
@@ -520,6 +714,10 @@ def make_backend(cfg: dict[str, Any]) -> Any:
     """Instantiate the decision backend from ``cfg``.
 
     - ``backend: llamacpp`` -> the native llama.cpp backend.
+    - ``backend: ollama`` -> Ollama native /api/chat with first-token logprobs
+      (a small local chat model; ``model`` is the Ollama tag, e.g. qwen2.5:3b).
+    - ``backend: clef`` -> Ollama's System One decision API (/v1/systemone)
+      backed by a local Clef decision model (``model`` = Ollama tag).
     - otherwise resolve an opencode provider (endpoint + credential) and build an
       ``OpenAICompatBackend``.
     - on resolution failure: a set ``base_url`` falls back to the llama.cpp path,
@@ -529,6 +727,20 @@ def make_backend(cfg: dict[str, Any]) -> Any:
     base_url = str(cfg.get("base_url") or "").strip()
     if backend == "llamacpp":
         return _make_llamacpp(cfg, base_url or DEFAULT_LLAMACPP_URL)
+    if backend in ("ollama", "chat"):
+        model = str(cfg.get("model") or "").strip()
+        if not model:
+            return UnavailableBackend("backend: ollama requires decisions.model")
+        cfg["backend"] = "ollama"
+        return OllamaChatBackend(base_url or DEFAULT_OLLAMA_URL, model,
+                                 timeout_ms=cfg.get("timeout_ms", 30000),
+                                 n_probs=cfg.get("n_probs", 20),
+                                 think=bool(cfg.get("think", False)))
+    if backend in ("clef", "systemone"):
+        model = str(cfg.get("model") or "clef-flash").strip()
+        cfg["backend"] = "clef"
+        return SystemOneBackend(base_url or DEFAULT_OLLAMA_URL, model,
+                                timeout_ms=cfg.get("timeout_ms", 30000))
     try:
         resolved = resolve_opencode_provider(cfg)
     except ProviderResolveError as exc:
@@ -709,8 +921,13 @@ def decide_choice(backend: LlamaCppBackend, cfg: dict[str, Any], state: Any,
     candidates = candidates or ["A", "B"]
     labels = [chr(65 + i) for i in range(len(candidates))]
     label_map = dict(zip(labels, candidates))
-    prompt = raw_prompt or build_choice_prompt(state, candidates, criteria, instructions)
-    top, _, usage = _probe(backend, prompt, labels)
+    if getattr(backend, "supports_systemone", False):
+        prob_map_b, usage = backend.systemone_choice(state, candidates, criteria, instructions)
+        top = _probs_to_top({chr(65 + i): prob_map_b.get(str(c), 0.0)
+                             for i, c in enumerate(candidates)})
+    else:
+        prompt = raw_prompt or build_choice_prompt(state, candidates, criteria, instructions)
+        top, _, usage = _probe(backend, prompt, labels)
     agg = candidate_logprobs(top, labels)
     probs = calibrate([agg[l] for l in labels], cfg["temperature_scaling"])
     prob_map = {label_map[l]: p for l, p in zip(labels, probs)}
@@ -726,8 +943,12 @@ def decide_noul(backend: LlamaCppBackend, cfg: dict[str, Any], state: Any,
                 raw_prompt: str | None = None,
                 instructions: str | None = None) -> dict[str, Any]:
     started = time.monotonic()
-    prompt = raw_prompt or build_noul_prompt(state, assertion, instructions)
-    top, _, usage = _probe(backend, prompt, ["TRUE", "FALSE"])
+    if getattr(backend, "supports_systemone", False):
+        prob_map_b, usage = backend.systemone_noul(state, assertion or instructions)
+        top = _probs_to_top({"TRUE": prob_map_b["true"], "FALSE": prob_map_b["false"]})
+    else:
+        prompt = raw_prompt or build_noul_prompt(state, assertion, instructions)
+        top, _, usage = _probe(backend, prompt, ["TRUE", "FALSE"])
     agg = candidate_logprobs(top, ["TRUE", "FALSE"])
     probs = calibrate([agg["TRUE"], agg["FALSE"]], cfg["temperature_scaling"])
     p_true = probs[0]
@@ -751,8 +972,13 @@ def decide_score(backend: LlamaCppBackend, cfg: dict[str, Any], state: Any,
     labels = [str(l) for l in (levels or ["1", "2", "3", "4", "5"])]
     tokens = [str(i + 1) for i in range(len(labels))]
     label_map = dict(zip(tokens, labels))
-    prompt = raw_prompt or build_score_prompt(state, labels, criteria, instructions)
-    top, _, usage = _probe(backend, prompt, tokens)
+    if getattr(backend, "supports_systemone", False):
+        prob_map_b, usage = backend.systemone_score(state, labels, criteria, instructions)
+        top = _probs_to_top({tok: prob_map_b.get(str(i), 0.0)
+                             for i, tok in enumerate(tokens)})
+    else:
+        prompt = raw_prompt or build_score_prompt(state, labels, criteria, instructions)
+        top, _, usage = _probe(backend, prompt, tokens)
     agg = candidate_logprobs(top, tokens)
     probs = calibrate([agg[t] for t in tokens], cfg["temperature_scaling"])
     prob_map = {label_map[t]: p for t, p in zip(tokens, probs)}

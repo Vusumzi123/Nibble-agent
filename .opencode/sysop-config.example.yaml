@@ -84,6 +84,7 @@ knowledge:
   min_ready_turns: 3         # start an ingestion cycle at this many unconsumed turns
   batch_turns: 8             # max turns handed to one ingestion cycle (N)
   max_turn_age: 86400000     # force-ingest turns older than this (ms); 0 disables
+  max_attempts: 3            # quarantine a turn after N failed drains; 0 = never
   drain_max_tokens: 150000   # aggregate token cap per cycle (chars/4)
   drain_cooldown_ms: 60000   # min gap between ingestion cycles
   # Conservative deterministic per-turn prefilter: only unambiguously trivial
@@ -155,17 +156,30 @@ decisions:
   enabled: true               # master on/off — gates only when true
   mode: gate                   # shadow | gate  (live gating — see header comment)
   provider: rules              # rules | openjev
-  # `model` is the ONLY provider setting; the provider id is the prefix before
-  # the first "/". Advanced overrides (custom/local/SDK-only providers):
+  # `model` is the ONLY provider setting for backend:"" — the provider id is
+  # the prefix before the first "/". Advanced overrides (custom/local/SDK-only
+  # providers):
   # model: deepseek/deepseek-chat   # opencode spec: <provider>/<model>
   # api_provider: ""           # provider id when `model` has no <provider>/ prefix
+  # Local backends (setup.sh options 3/4; model = the bare Ollama tag):
+  #   backend: ollama  — Ollama native /api/chat first-token logprobs; a small
+  #                      instruct model (e.g. qwen2.5:3b). `think: false`
+  #                      (default) is required — a thinking model burns the
+  #                      only sampled token on its reasoning trace.
+  #   backend: clef    — Ollama's System One decision API (/v1/systemone) with
+  #                      a Clef decision model (setup.sh creates the lean
+  #                      clef-flash-2k variant). Answers arrive as native
+  #                      per-option probabilities — the calibrated choice;
+  #                      ~0.2-0.6s local.
+  #   base_url:        — endpoint for either (default http://127.0.0.1:11434)
   # backend: llamacpp          # force the local llama.cpp backend
   # base_url: ""               # pin an endpoint (no /v1 suffix)
   # transport: chat            # chat | completion (llama.cpp only)
   # api_key_file: ""           # chmod-600 key file instead of opencode auth.json
   # auth_file: ""              # override path to opencode auth.json
   # models_file: ""            # override path to opencode models.json
-  temperature_scaling: 1.00    # must stay 1.0 — self-reported confidence is uncalibrated
+  temperature_scaling: 1.00    # identity for clef (native probabilities); must stay
+                               # 1.0 for the self-reported tiers (uncalibrated)
   abstain_threshold: 0.45
   noul_threshold: 0.80         # gates skip only when model p >= this
   timeout_ms: 30000            # per-call subprocess timeout

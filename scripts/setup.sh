@@ -265,32 +265,121 @@ if(!/\n  provider: rules/.test("\n"+s)){ console.error("decisions: provider not 
 ' "$CONFIG"
 }
 
-configure_decision_gate() { # interactive: pick rules vs openjev (opencode model)
+apply_decisions_backend() { # backend model [base_url] — local Ollama backends
+  # provider stays openjev (the TS bridge path); `backend` + `model` steer
+  # openjevserver.py. backend: clef uses Ollama's System One /v1/systemone
+  # decision API; backend: ollama uses native /api/chat first-token logprobs.
+  node -e '
+const fs=require("fs"),f=process.argv[1],backend=process.argv[2],model=process.argv[3],base=process.argv[4]||"";
+let s=fs.readFileSync(f,"utf8");
+s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"openjev");
+const setKey=(key,val)=>{ const re=new RegExp("^(\\s*)(#\\s*)?"+key+":.*$","m");
+  if(re.test(s)) s=s.replace(re,(m0,ind)=>ind+key+": "+val);
+  else s=s.replace(/^(\s*)provider:\s*openjev\s*$/m,(m0,ind)=>m0+"\n"+ind+key+": "+val);
+};
+setKey("backend",backend);
+setKey("model",model);
+if(base) setKey("base_url",base);
+fs.writeFileSync(f,s);
+if(!/\n  provider: openjev/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
+' "$CONFIG" "$1" "$2" "$3"
+}
+
+ollama_available() { command -v ollama >/dev/null 2>&1; }
+
+ollama_model_present() { # tag -> 0 if pulled locally
+  ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qxE "(${1//./\\.})(:latest)?"
+}
+
+ensure_clef_model() { # ensure clef-flash + a VRAM-lean variant; echoes the tag
+  local TAG=clef-flash-2k MF
+  if ! ollama_model_present clef-flash; then
+    echo "  pulling clef-flash (Cloudflare decision model, ~9.5GB)…" >&2
+    if [ "$DRY" -eq 1 ]; then echo "  [dry-run] ollama pull clef-flash"
+    else ollama pull clef-flash || return 1; fi
+  fi
+  if ! ollama_model_present "$TAG"; then
+    # The registry tag defaults to num_ctx 16384, whose compute buffers OOM a
+    # 12GB GPU and crowd out the vault embedding model; a 2k-context copy fits
+    # next to it (decisions are a few hundred tokens).
+    if [ "$DRY" -eq 1 ]; then echo "  [dry-run] ollama create $TAG (num_ctx 2048)"
+    else
+      MF="$(mktemp)" || return 1
+      printf 'FROM clef-flash\nPARAMETER num_ctx 2048\nPARAMETER num_batch 256\n' > "$MF"
+      ollama create "$TAG" -f "$MF" >/dev/null || { rm -f "$MF"; return 1; }
+      rm -f "$MF"
+    fi
+  fi
+  printf '%s' "$TAG"
+}
+
+configure_decision_gate() { # interactive: rules / openjev / clef / ollama
   echo "  decision gate provider:" >&2
   echo "    1) rules — deterministic, no model (default)" >&2
-  echo "    2) openjev — use a model already connected in opencode" >&2
-  local D BM
+  echo "    2) openjev — cloud model already connected in opencode" >&2
+  echo "    3) clef — local decision model via Ollama /v1/systemone (fast, calibrated)" >&2
+  echo "    4) ollama — local chat model via Ollama /api/chat (first-token logprobs)" >&2
+  local D BM TAG
   D="$(ask 'Choose' 1)"
-  if [ "$D" != 2 ]; then
-    if [ "$DRY" -eq 1 ]; then
-      echo "  [dry-run] decisions: provider=rules"
-    else
-      apply_decisions_rules
-      echo "  decisions = rules"
-    fi
-    return 0
-  fi
-  BM="$(pick_model 'Decision model (from opencode)')"
-  if [ -z "$BM" ]; then
-    echo "  no model chosen — decision provider left unchanged"
-    return 0
-  fi
-  if [ "$DRY" -eq 1 ]; then
-    echo "  [dry-run] decisions: provider=openjev model=$BM"
-  else
-    apply_decisions_model "$BM"
-    echo "  decisions = openjev ($BM)"
-  fi
+  case "$D" in
+    3)
+      if ! ollama_available; then
+        echo "  ollama not found — install Ollama, then re-run setup" >&2
+        return 1
+      fi
+      TAG="$(ensure_clef_model)" || { echo "  clef model setup failed — decisions unchanged"; return 1; }
+      if [ "$DRY" -eq 1 ]; then
+        echo "  [dry-run] decisions: provider=openjev backend=clef model=$TAG"
+      else
+        apply_decisions_backend clef "$TAG" "http://127.0.0.1:11434"
+        echo "  decisions = clef via Ollama ($TAG)"
+      fi
+      ;;
+    4)
+      if ! ollama_available; then
+        echo "  ollama not found — install Ollama, then re-run setup" >&2
+        return 1
+      fi
+      BM="$(ask 'Ollama chat model tag (small instruct model, e.g. qwen2.5:3b)' 'qwen2.5:3b')"
+      [ -n "$BM" ] || { echo "  no model chosen — decisions unchanged"; return 0; }
+      if ! ollama_model_present "$BM"; then
+        if confirm "Model '$BM' is not pulled. Pull it now?" y; then
+          if [ "$DRY" -eq 1 ]; then echo "  [dry-run] ollama pull $BM"
+          else ollama pull "$BM" || { echo "  pull failed — decisions unchanged"; return 1; }; fi
+        else
+          echo "  model not available — decisions unchanged"; return 1
+        fi
+      fi
+      if [ "$DRY" -eq 1 ]; then
+        echo "  [dry-run] decisions: provider=openjev backend=ollama model=$BM"
+      else
+        apply_decisions_backend ollama "$BM" "http://127.0.0.1:11434"
+        echo "  decisions = ollama chat ($BM)"
+        echo "  note: small chat models are weaker judges on nuanced noul questions than clef"
+      fi
+      ;;
+    2)
+      BM="$(pick_model 'Decision model (from opencode)')"
+      if [ -z "$BM" ]; then
+        echo "  no model chosen — decision provider left unchanged"
+        return 0
+      fi
+      if [ "$DRY" -eq 1 ]; then
+        echo "  [dry-run] decisions: provider=openjev model=$BM"
+      else
+        apply_decisions_model "$BM"
+        echo "  decisions = openjev ($BM)"
+      fi
+      ;;
+    *)
+      if [ "$DRY" -eq 1 ]; then
+        echo "  [dry-run] decisions: provider=rules"
+      else
+        apply_decisions_rules
+        echo "  decisions = rules"
+      fi
+      ;;
+  esac
 }
 
 set_block_key() { # set_block_key <file> <block> <key> <value>
