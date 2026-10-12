@@ -371,6 +371,29 @@ mood:                          # feeling system (§15) — card 5 reads this
   dispatch_influence: true     # bounded + ledger-journaled; false = expression only
   decay_half_life: 6h
 
+soul:                          # first-person identity + journal (soul-hook) — self-model card reads this
+  enabled: true
+  soul_file: Soul.md           # under <vault> (absolute paths honored)
+  journal_file: Agent Journal.md
+  inject: true                 # first-turn [soul] injection (identity + journal tail)
+  inject_max_bytes: 4000       # shares the profile injection budget philosophy
+  decide: true                 # idle JEV noul fold-down decision
+  cooldown_turns: 3            # min top-level idle turns between soul fold-downs
+  journal_tail_bytes: 6000     # recent journal bytes handed to the self-writer
+  writer_agent: self-writer    # generation child (see .opencode/agents/self-writer.md)
+  child_timeout_ms: 90000
+  note_max_bytes: 6000         # Soul.md hard budget
+  review: true                 # post-draft honesty/durability gate before write
+  review_threshold: 0.6
+  log: soul-hook.log           # under <log>
+  log_rotate_bytes: 1048576
+  log_keep_generations: 5
+  log_retention_days: 90
+  log_compress: true
+  log_compress_after: 1
+  log_compress_level: 6
+  log_rotate_by: size
+
 comms:                         # notification/approval channels (§7) — card 10 reads this
   default_channel: telegram    # telegram | email
   session_ttl: 24h             # lazy chat-session expiry (D15)

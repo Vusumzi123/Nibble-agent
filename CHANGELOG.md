@@ -4,6 +4,38 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-12
+
+### Added
+
+- **Mood system (`lib/mood.ts`, `mood-hook.ts`)** — a deterministic, token-free
+  feeling state (`valence` ∈ [-1,1], `arousal` ∈ [0,1]) that drifts with
+  interaction outcomes and decays toward a slowly-adapting baseline (read-time
+  exponential decay, half-life from `mood.decay_half_life`, default 6h). Pure
+  library (`applyEvent`, `decay`, `describe`, `adaptBaseline`, `halfLifeMs`)
+  plus a per-turn `[mood]` injection block injected the same way `retrieval-hook`
+  injects `[brain-first]`. The hook feeds `engaged` on each user message, decays
+  and persists on `session.idle`, and journals every event to `mood.ndjson`
+  (state at `.opencode/state/mood.json`). Mood is advisory only — it colours
+  expression and, bounded and ledger-journaled, will steer mission selection in
+  the heartbeat digest (card 4); it never touches the gate, locks, approvals, or
+  the floor. The deterministic event delta table (§15.2) includes the dream/wake
+  events so the sleep system (card 6) can feed it directly.
+- **Soul system (`lib/soul.ts`, `soul-hook.ts`, `agents/self-writer.md`)** — the
+  first-person counterpart to the profile. `Agent.md` is curated *about* the
+  agent; `Soul.md` is written *by* it — who it is, what it values, what it is
+  working on becoming, and open commitments — distilled from an append-only
+  first-person journal (`Agent Journal.md`, `what`/`why`/`felt` entries). The
+  `soul-hook` injects a first-turn `[soul]` block (identity + bounded journal
+  tail, sharing the profile injection budget philosophy) so a fresh session is
+  situated in "who I am and how the last iteration behaved and why", not just a
+  persona. On `session.idle` + cooldown, a JEV `noul` gate decides whether the
+  journal/session carries durable self-change; a confident verdict spawns the
+  tool-free `self-writer` child, which redrafts `Soul.md` and emits one journal
+  entry; the note passes a second `noul` honesty/durability reviewer before an
+  atomic write (fail-open on decide, fail-closed on review). Config lives in the
+  `soul:` block.
+
 ## 2026-10-11
 
 ### Changed
