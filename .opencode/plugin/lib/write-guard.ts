@@ -118,33 +118,38 @@ export type BulletDiff =
 
 const DASH_BULLET = /^(\s*)-(\s.*)?$/
 const STAR_AT_SAME_TEXT = /^(\s*)\*(\s.*)?$/
+// remark-stringify backslash-escapes markdown punctuation (`~`, `_`, `[`, ...).
+// Those escapes are cosmetic for a marker-only decision, so strip them before
+// comparing bullet text (the original before-line is restored verbatim).
+const OVER_ESCAPE = /\\([\\`*_{}\[\]()#+.!>|~-])/g
+const stripOverEscapes = (s: string): string => s.replace(OVER_ESCAPE, "$1")
 
-// Compare a pre-write snapshot to the post-write bytes. A marker-only diff
-// (`-` -> `*` with identical trailing text, same line count) is unambiguously a
-// serializer artifact and is restored. Anything else is reported as ambiguous
-// rather than guessed at, so an intentional `*` bullet (or a real content edit)
-// is never clobbered.
+// Compare a pre-write snapshot to the post-write bytes. Only lines that were
+// `-` bullets before the write are candidates for serializer mangling: a
+// marker-only change (`-` -> `*` with equivalent trailing text) is restored, and
+// a dash-bullet line that became anything else is ambiguous (never guessed at).
+// Changes to prose, tables, or frontmatter — legitimate content edits and other
+// serializer artifacts — are ignored, so a real edit never retains the batch.
 export function diffBulletRewrites(before: string, after: string): BulletDiff {
   if (before === after) return { kind: "none", repaired: after, count: 0 }
   const b = before.split("\n")
   const a = after.split("\n")
-  if (b.length !== a.length) return { kind: "ambiguous", repaired: null, count: 0 }
+  if (b.length !== a.length) return { kind: "none", repaired: after, count: 0 }
 
   const restored = [...a]
   let markerOnly = 0
-  let otherChanges = 0
   for (let i = 0; i < a.length; i++) {
     if (b[i] === a[i]) continue
     const bm = DASH_BULLET.exec(b[i])
+    if (!bm) continue
     const am = STAR_AT_SAME_TEXT.exec(a[i])
-    if (bm && am && bm[1] === am[1] && (bm[2] ?? "") === (am[2] ?? "")) {
+    if (am && bm[1] === am[1] && stripOverEscapes(bm[2] ?? "") === stripOverEscapes(am[2] ?? "")) {
       markerOnly++
       restored[i] = b[i]
     } else {
-      otherChanges++
+      return { kind: "ambiguous", repaired: null, count: markerOnly }
     }
   }
-  if (otherChanges > 0) return { kind: "ambiguous", repaired: null, count: markerOnly }
   if (markerOnly === 0) return { kind: "none", repaired: after, count: 0 }
   return { kind: "safe", repaired: restored.join("\n"), count: markerOnly }
 }

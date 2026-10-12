@@ -78,16 +78,32 @@ test("diffBulletRewrites returns none for identical content", () => {
   assert.equal(diffBulletRewrites(same, same).kind, "none")
 })
 
-test("diffBulletRewrites refuses to guess on ambiguous changes", () => {
-  const diff = diffBulletRewrites("- one\n- two\n", "* one\n- two\n* three\n")
-  assert.equal(diff.kind, "ambiguous")
-
+test("diffBulletRewrites refuses to guess on ambiguous bullet changes", () => {
+  // A dash-bullet line that did not become an identical-text `*` bullet cannot
+  // be proven a serializer artifact.
   const contentChange = diffBulletRewrites("- one\n", "- one changed\n")
   assert.equal(contentChange.kind, "ambiguous")
+
+  const starWithEdit = diffBulletRewrites("- one\n", "* one changed\n")
+  assert.equal(starWithEdit.kind, "ambiguous")
 })
 
-test("diffBulletRewrites treats a plain content edit as ambiguous", () => {
-  assert.equal(diffBulletRewrites("a\n", "b\n").kind, "ambiguous")
+test("diffBulletRewrites ignores non-bullet content edits", () => {
+  // Prose/table/frontmatter edits and line-count changes are legitimate and
+  // must not retain a batch for retry.
+  assert.equal(diffBulletRewrites("a\n", "b\n").kind, "none")
+  assert.equal(diffBulletRewrites("- one\n- two\n", "* one\n- two\n* three\n").kind, "none")
+})
+
+test("diffBulletRewrites restores markers when only serializer escapes differ", () => {
+  const before = "- ~80% of turns\n- [[Agent]]\n"
+  const after = "* \\~80% of turns\n* [[Agent]]\n"
+  const diff = diffBulletRewrites(before, after)
+  assert.equal(diff.kind, "safe")
+  if (diff.kind === "safe") {
+    assert.equal(diff.count, 2)
+    assert.equal(diff.repaired, before)
+  }
 })
 
 // ---------------------------------------------------------------------------
