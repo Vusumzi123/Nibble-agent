@@ -5,9 +5,10 @@ Brain/
 SETUP.md
 
 # Local design notes — not part of the public push
-# (the autonomy-integration contract is the one public exception, below)
+# (public exceptions: the autonomy-integration contract + the sysop-config reference)
 docs/*
 !docs/autonomy-integration.md
+!docs/sysop-config-reference.md
 
 # Local config with personal values (generated from example, setup.sh)
 .opencode/sysop-config.yaml
