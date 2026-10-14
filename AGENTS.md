@@ -62,11 +62,11 @@ missing or outdated, run `./scripts/setup.sh` to (re)generate it.
 
 ## 4. What Runs Where
 
-The plugin/hook/agent ↔ config-block map, audit-trail format, and
-project-local log/state layout live in the **architecture-reference** skill —
-load it when debugging hook behavior, editing `sysop-config.yaml`, or locating
-a log/state file. All hooks read `.opencode/sysop-config.yaml` live; failures
-are fail-open — the system degrades, it does not stop.
+Derive the architecture live — no static map to drift: hooks/plugins live in
+`.opencode/plugin/`, their toggles in `.opencode/sysop-config.yaml`, logs in
+`.opencode/logs/`, transient state in `.opencode/state/`. All hooks read
+`sysop-config.yaml` live (no restart for most toggles); failures are fail-open
+— the system degrades, it does not stop.
 
 ---
 
@@ -113,5 +113,4 @@ dry-run → confirm → live workflow, and a worked example session.
 Load via the `skill` tool when the matching work starts:
 
 - `os-security` — before any root, package, service, or destructive operation.
-- `architecture-reference` — hook/plugin/config map, log and state locations.
 - `web-delegation` — briefing `safe-browser` for any web access.

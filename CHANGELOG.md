@@ -147,6 +147,12 @@ Notable changes to Nibble, newest first. Sections follow
   independently clock-stamped `since` values (1ms race); it now compares
   shape and validates the timestamp format instead.
 
+### Removed
+
+- **`architecture-reference` skill** — a static plugin/config/log map was a
+  second source of truth that went stale on every feature; AGENTS.md §4 now
+  points at the live sources (plugin dir, `sysop-config.yaml`, logs/state dirs).
+
 ## 2026-10-12
 
 ### Added
