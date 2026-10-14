@@ -22,7 +22,7 @@ import { readResolvedPaths } from "./lib/paths.ts"
 // and its second rotation implementation are retired), so a bash command no
 // longer pays a `python3` spawn and cannot race the other logs.
 
-// root escalation wrappers (per AGENTS.md §2 escalation protocol)
+// root escalation wrappers (per AGENTS.md "Hard rules" — security-locks gate)
 const ROOT_RE = /(^|[\s;&|])(sudo|pkexec|doas|su)(\s|$)/
 // sandbox engines (per SETUP.md)
 const DOCKER_RE = /\bdocker\b/
