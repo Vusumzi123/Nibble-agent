@@ -83,7 +83,7 @@ import { nowIso, sleep } from "./lib/util.ts"
 
 /** A mission child session that never idles is abandoned after this budget
  *  (the lock's stale steal is the crash backstop for the whole tick). */
-export const HEARTBEAT_TICK_TIMEOUT_MS = 15 * 60_000
+const HEARTBEAT_TICK_TIMEOUT_MS = 15 * 60_000
 
 export default (async ({ client, directory, ...rest }) => {
   const dir = directory ?? process.cwd()

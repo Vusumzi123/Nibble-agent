@@ -88,7 +88,7 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 // The loop's timers are unref'd: the dream timer lives and dies with the main
 // opencode instance (D-M9 tradeoff) and never keeps the test runner alive.
 /** A dream child session that never idles is abandoned after this budget. */
-export const DREAM_TICK_TIMEOUT_MS = 15 * 60_000
+const DREAM_TICK_TIMEOUT_MS = 15 * 60_000
 
 export default (async ({ client, directory, ...rest }) => {
   const dir = directory ?? process.cwd()
