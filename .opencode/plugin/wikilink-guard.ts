@@ -13,6 +13,7 @@ import {
   vaultLabel,
 } from "./lib/write-guard.ts"
 import { isReadonlyVaultPath, parseReadonlyDirs, readVaultPolicy } from "./lib/vault-policy.ts"
+import { isEnoent } from "./lib/util.ts"
 import { recordIssue, recordWrite } from "./lib/verification.ts"
 
 // Deterministic post-write guard (Plan A). Replaces the former rag-brain
@@ -44,7 +45,7 @@ export default (async ({ directory }) => {
   const policy = await readVaultPolicy(directory ?? process.cwd())
   const readonlyDirs = parseReadonlyDirs(policy.readonly)
   const STATE_FILE = join(stateDir, "wikilink-guard.json")
-  const diag = createDiagnostics({ logDir, home: homedir(), channel: "wikilink-guard" })
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "wikilink-guard", hook: "wikilink-guard" })
   const notified = new Set<string>()
 
   const snapshots = new Map<string, Snapshot>()
@@ -81,7 +82,10 @@ export default (async ({ directory }) => {
       await writeFile(fp, out, "utf8")
       void diag.error(`[wikilink-guard] repaired ${count} escape(s), ${fixed} date(s) in ${fp}`)
       return count + fixed
-    } catch {
+    } catch (err) {
+      // ENOENT is the normal deleted-file case; anything else means the idle
+      // sweep could not do its job and must be visible.
+      if (!isEnoent(err)) void diag.warn(`[wikilink-guard] repair failed ${fp}:`, err)
       return 0
     }
   }
@@ -99,7 +103,10 @@ export default (async ({ directory }) => {
     let current: string
     try {
       current = await readFile(fp, "utf8")
-    } catch {
+    } catch (err) {
+      // Deleted between snapshot and verify is normal; anything else means
+      // verification is blind for this write.
+      if (!isEnoent(err)) void diag.warn(`[wikilink-guard] verify read failed ${fp}:`, err)
       return
     }
     const label = vaultLabel(vaultRoot, fp)
@@ -176,7 +183,8 @@ export default (async ({ directory }) => {
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      if (!isEnoent(err)) void diag.warn(`[wikilink-guard] sweep cannot read dir ${dir}:`, err)
       return
     }
     for (const e of entries) {
@@ -198,7 +206,12 @@ export default (async ({ directory }) => {
         let content: string | null = null
         try {
           content = await readFile(p, "utf8")
-        } catch {
+        } catch (err) {
+          // A brand-new file has no pre-write bytes; other failures mean the
+          // snapshot baseline is missing for this call.
+          if (!isEnoent(err)) {
+            void diag.warn(`[wikilink-guard] snapshot read failed ${p}:`, err)
+          }
           content = null
         }
         snapshots.set(input.callID, { path: p, content, at: Date.now() })

@@ -265,6 +265,26 @@ test("matrix: self-improve paths — deny at L0, ask at L1–L3, JEV at L4", () 
   )
 })
 
+test("matrix: mission-file writes are self-improve — deny at L0, ask at L1–L3, JEV at L4", () => {
+  // Missions-plan §8: without this a mission drop would be plain
+  // project-write — free at L3 — and the agent could install its own
+  // autonomous missions without approval.
+  expectRow("write mission", "write", { filePath: ".opencode/missions/drain.md" }, ["deny", "ask", "ask", "ask", "ask"], "self-improve", [4])
+  expectRow("edit mission", "edit", { filePath: "/abs/project/.opencode/missions/custom.md" }, ["deny", "ask", "ask", "ask", "ask"], "self-improve", [4])
+  expectRow(
+    "bash mission write",
+    "bash",
+    { command: "cat > .opencode/missions/custom.md <<'EOF'\nx\nEOF" },
+    ["deny", "ask", "ask", "ask", "ask"],
+    "self-improve",
+    [4],
+  )
+  // And self-improve is never session-grantable (SESSION_GRANT_EXCLUDED).
+  const store: SessionGrantStore = new Map()
+  assert.equal(mintSessionGrant(store, "s1", "self-improve", ".opencode/missions/drain.md", "target", Date.now()), false)
+  assert.equal(mintSessionGrant(store, "s1", "self-improve", "", "class", Date.now()), false)
+})
+
 test("matrix: borderline — bash only now; deny at L0, JEV at L1–L4", () => {
   expectRow("node build", "bash", { command: "node build.js" }, ["deny", "ask", "ask", "ask", "ask"], "borderline", [1, 2, 3, 4])
   expectRow("redirect write", "bash", { command: "echo hi > notes.txt" }, ["deny", "ask", "ask", "ask", "ask"], "borderline", [1, 2, 3, 4])

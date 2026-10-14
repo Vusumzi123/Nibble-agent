@@ -10,6 +10,16 @@ export const nowIso = (): string => new Date().toISOString()
 export const errText = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
 
+// True for fs "file does not exist" errors — the benign case for reads of
+// optional files (state, snapshots), distinct from real I/O failures.
+export function isEnoent(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    typeof (err as { code?: unknown }).code === "string" &&
+    (err as { code: string }).code === "ENOENT"
+  )
+}
+
 export const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 

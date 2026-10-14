@@ -12,6 +12,7 @@
 //
 // Loaded via relative import only (same convention as the other lib files).
 import { atomicRead, atomicWrite } from "./fsx.ts"
+import { nowIso } from "./util.ts"
 
 export type MoodBaseline = { valence: number; arousal: number }
 
@@ -229,4 +230,87 @@ export async function readMoodState(file: string): Promise<MoodState> {
 
 export async function writeMoodState(file: string, state: MoodState): Promise<void> {
   await atomicWrite(file, JSON.stringify(clampState(state), null, 2))
+}
+
+// ---------------------------------------------------------------------------
+// Shared mood feed (kanban card E, missions-plan §7): the decay → apply →
+// write → journal sequence that lived privately in mood-hook.ts:61-82,
+// extracted so the heartbeat (`mission_failure`, `long_silence`) and the later
+// chatter/sleep hooks feed events without duplicating the queue. One feed per
+// plugin instance; mutations serialize through its queue so a user message, an
+// idle, and a late child event can never interleave a read-modify-write of the
+// state file. A failure reaches `onError` and never throws into the caller.
+
+export type MoodFeedLogger = { append(entry: Record<string, unknown>): Promise<void> }
+
+export type MoodFeedOptions = {
+  /** mood.json path (usually `<state>/mood.json`). */
+  file: string
+  /** Raw `mood.decay_half_life` value (e.g. `"6h"`); malformed → default. */
+  halfLife: string
+  /** Optional mood.ndjson journal (before/after deltas per applied event). */
+  logger?: MoodFeedLogger
+  /** Error sink; defaults to a no-op (mood is advisory and must never break). */
+  onError?: (err: unknown) => void
+}
+
+export type MoodFeed = {
+  /** Current in-memory state (no mutation). */
+  get(): MoodState
+  /** Decayed view of the current state — read-only, for `[mood]` injection. */
+  view(): MoodState
+  /** decay → applyEvent → write → journal. Never throws. */
+  apply(event: MoodEvent): Promise<void>
+  /** decay → write (no journal, no event). Never throws. */
+  realizeDecay(): Promise<void>
+}
+
+export async function createMoodFeed(opts: MoodFeedOptions): Promise<MoodFeed> {
+  const halfLife = halfLifeMs(opts.halfLife)
+  let state = await readMoodState(opts.file)
+  let queue: Promise<void> = Promise.resolve()
+  const fail = (err: unknown): void => opts.onError?.(err)
+
+  const apply = (event: MoodEvent): Promise<void> => {
+    queue = queue.then(async () => {
+      try {
+        const before = state
+        const next = applyEvent(decay(state, Date.now(), halfLife), event)
+        state = next
+        await writeMoodState(opts.file, next)
+        await opts.logger?.append({
+          ts: nowIso(),
+          event,
+          valence_before: before.valence,
+          arousal_before: before.arousal,
+          valence_after: next.valence,
+          arousal_after: next.arousal,
+          label_after: next.label,
+        })
+      } catch (err) {
+        fail(err)
+      }
+    })
+    return queue
+  }
+
+  const realizeDecay = (): Promise<void> => {
+    queue = queue.then(async () => {
+      try {
+        const next = decay(state, Date.now(), halfLife)
+        state = next
+        await writeMoodState(opts.file, next)
+      } catch (err) {
+        fail(err)
+      }
+    })
+    return queue
+  }
+
+  return {
+    get: () => state,
+    view: () => decay(state, Date.now(), halfLife),
+    apply,
+    realizeDecay,
+  }
 }

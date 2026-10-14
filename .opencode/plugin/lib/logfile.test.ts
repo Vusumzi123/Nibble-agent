@@ -196,6 +196,50 @@ test("onError is invoked on a logging failure and append never rejects", async (
   assert.equal(errors.length, 1)
 })
 
+test("append failures are phase-tagged so the origin is diagnosable", async () => {
+  const dir = await tmpDir()
+  const bad = join(dir, "afile", "k.log")
+  await writeFile(join(dir, "afile"), "x")
+  const errors: Error[] = []
+  const logger = createNdjsonLogger({
+    log: bad,
+    rotateBytes: 0,
+    keepGenerations: 3,
+    retentionDays: 0,
+    onError: (e) => errors.push(e as Error),
+  })
+  await logger.append({ event: "ignored" })
+  assert.equal(errors.length, 1)
+  assert.equal((errors[0] as unknown as { phase?: string }).phase, "append")
+  assert.match(errors[0].message, /\[logfile:append\]/)
+  assert.ok(errors[0].cause instanceof Error, "original error preserved as cause")
+})
+
+test("a throwing onError handler is surfaced, not swallowed", async () => {
+  const dir = await tmpDir()
+  const bad = join(dir, "afile", "k.log")
+  await writeFile(join(dir, "afile"), "x")
+  const logger = createNdjsonLogger({
+    log: bad,
+    rotateBytes: 0,
+    keepGenerations: 3,
+    retentionDays: 0,
+    onError: () => {
+      throw new Error("handler is broken too")
+    },
+  })
+  const original = console.error
+  const seen: unknown[][] = []
+  console.error = (...args: unknown[]) => seen.push(args)
+  try {
+    await assert.doesNotReject(() => logger.append({ event: "ignored" }))
+  } finally {
+    console.error = original
+  }
+  assert.equal(seen.length, 1, "double fault must be surfaced to the console")
+  assert.match(String(seen[0][0]), /onError handler itself failed/)
+})
+
 test("a logging failure never rejects the caller", async () => {
   const dir = await tmpDir()
   // A path whose parent is a file cannot be created — the logger must swallow it.

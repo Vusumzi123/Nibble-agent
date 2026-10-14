@@ -110,3 +110,50 @@ test("createDiagnostics writes a structured line and keeps console output", asyn
   assert.equal(line.level, "error")
   assert.match(line.msg, /\[demo\] something broke boom/)
 })
+
+test("diagnostics lines carry the stack, error name, and hook label", async () => {
+  clearLoggerCache()
+  const dir = await tmpDir()
+  const original = console.error
+  console.error = () => {}
+  try {
+    const diag = createDiagnostics({ logDir: dir, hook: "test-hook" })
+    const err = Object.assign(new Error("kaboom"), { code: "EWHATEVER" })
+    await diag.error("[test-hook] failed:", err)
+  } finally {
+    console.error = original
+  }
+  const text = await readFile(join(dir, "diagnostics.log"), "utf8")
+  const line = JSON.parse(text.trim().split("\n").pop() as string)
+  assert.equal(line.hook, "test-hook")
+  assert.equal(line.errName, "Error")
+  assert.equal(line.code, "EWHATEVER")
+  assert.match(line.stack, /kaboom/)
+  assert.match(line.msg, /kaboom/)
+})
+
+test("a failing log write is persisted to logging-fallback.log (rate-limited)", async () => {
+  clearLoggerCache()
+  const dir = await tmpDir()
+  // Make every append to diagnostics.log fail: parent path is a file.
+  const blocked = join(dir, "blocked")
+  const { writeFile: wf } = await import("node:fs/promises")
+  await wf(blocked, "x")
+  const originalError = console.error
+  console.error = () => {}
+  try {
+    const settings = { ...LOG_DEFAULTS, file: "blocked/diagnostics.log" }
+    const logger = getLogger(settings, { logDir: dir, channel: "diagnostics" })
+    await logger.append({ event: "boom" })
+    await logger.flush()
+  } finally {
+    console.error = originalError
+  }
+  // The fallback write is fire-and-forget; give it a beat to land.
+  await new Promise((r) => setTimeout(r, 50))
+  const fallback = await readFile(join(dir, "logging-fallback.log"), "utf8")
+  const line = JSON.parse(fallback.trim().split("\n").pop() as string)
+  assert.equal(line.event, "log-write-failed")
+  assert.equal(line.channel, "diagnostics")
+  assert.ok(typeof line.error === "string" && line.error.length > 0)
+})

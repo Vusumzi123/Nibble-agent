@@ -198,15 +198,31 @@ export function findOpenDuplicate(
 // ---------------------------------------------------------------------------
 // NDJSON parse/serialize (tolerant: blank + malformed lines are skipped)
 
-export function parseNdjsonEntries(text: string): BacklogEntry[] {
+export function parseNdjsonEntries(
+  text: string,
+  onSkipped?: (lineNo: number, line: string) => void,
+): BacklogEntry[] {
   const out: BacklogEntry[] = []
-  for (const line of text.split("\n")) {
-    const t = line.trim()
+  const lines = text.split("\n")
+  // Report at most one malformed line per parse: a corrupt file must be
+  // visible, but a turn must not pay a warning flood.
+  let reported = false
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim()
     if (!t) continue
     try {
       out.push(JSON.parse(t) as BacklogEntry)
-    } catch {
-      // skip a malformed line — fail-open, never throw into a turn
+    } catch (err) {
+      // skip a malformed line — fail-open, never throw into a turn — but
+      // surface it once so silent data loss is discoverable.
+      if (!reported) {
+        reported = true
+        if (onSkipped) onSkipped(i + 1, t)
+        else {
+          const detail = err instanceof Error ? err.message : String(err)
+          console.warn(`[backlog] skipped malformed NDJSON line ${i + 1}: ${detail}`)
+        }
+      }
     }
   }
   return out

@@ -18,6 +18,7 @@ import {
 } from "./decision-prompts.ts"
 import { INGEST_ASSERTION } from "./decisions.ts"
 import { DEFAULT_AUTONOMY_ASSERTION } from "./autonomy-gate.ts"
+import { DEFAULT_DIGEST_ASSERTION } from "./heartbeat.ts"
 import { DEFAULT_RETRIEVAL_ASSERTION } from "./retrieval.ts"
 
 const VALID_YAML = [
@@ -37,6 +38,9 @@ const VALID_YAML = [
   "autonomy:",
   '  assertion: "Custom autonomy assertion."',
   "",
+  "digest:",
+  '  assertion: "Custom digest assertion."',
+  "",
 ].join("\n")
 
 test("defaults carry every gate key and re-use the owning modules' strings", () => {
@@ -45,6 +49,9 @@ test("defaults carry every gate key and re-use the owning modules' strings", () 
   assert.ok(DEFAULT_DECISION_PROMPTS.tags.choice_criteria.includes("NEW"))
   assert.ok(DEFAULT_DECISION_PROMPTS.tags.score_criteria.includes("ephemeral"))
   assert.equal(DEFAULT_DECISION_PROMPTS.autonomy.assertion, DEFAULT_AUTONOMY_ASSERTION)
+  assert.equal(DEFAULT_DECISION_PROMPTS.digest.assertion, DEFAULT_DIGEST_ASSERTION)
+  assert.ok(DEFAULT_DIGEST_ASSERTION.includes("no_reply"))
+  assert.ok(DEFAULT_DIGEST_ASSERTION.includes("mission:<id>"))
 })
 
 test("parseDecisionPrompts reads all sections and strips comment lines + quotes", () => {
@@ -53,6 +60,7 @@ test("parseDecisionPrompts reads all sections and strips comment lines + quotes"
   assert.deepEqual(parsed.ingest, { assertion: "Custom ingest assertion." })
   assert.deepEqual(parsed.tags, { choice_criteria: "Pick a tag.", score_criteria: "Score it 1-5." })
   assert.deepEqual(parsed.autonomy, { assertion: "Custom autonomy assertion." })
+  assert.deepEqual(parsed.digest, { assertion: "Custom digest assertion." })
 })
 
 test("parseDecisionPrompts ignores unknown sections, keys, and blank input", () => {
@@ -77,6 +85,11 @@ test("mergeDecisionPrompts fills per key, not per section", () => {
   assert.equal(merged.tags.choice_criteria, DEFAULT_DECISION_PROMPTS.tags.choice_criteria)
   assert.equal(merged.tags.score_criteria, "Custom score.")
   assert.equal(merged.autonomy.assertion, DEFAULT_DECISION_PROMPTS.autonomy.assertion)
+  assert.equal(merged.digest.assertion, DEFAULT_DECISION_PROMPTS.digest.assertion)
+
+  const digestMerged = mergeDecisionPrompts({ digest: { assertion: "Custom digest." } })
+  assert.equal(digestMerged.digest.assertion, "Custom digest.")
+  assert.equal(digestMerged.retrieval.assertion, DEFAULT_DECISION_PROMPTS.retrieval.assertion)
 })
 
 test("readDecisionPromptsFrom returns null for missing and unparseable files", async () => {

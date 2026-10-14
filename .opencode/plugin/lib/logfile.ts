@@ -20,6 +20,7 @@ import { createReadStream, createWriteStream } from "node:fs"
 import { createGzip } from "node:zlib"
 import { pipeline } from "node:stream/promises"
 import { dirname } from "node:path"
+import { isEnoent } from "./util.ts"
 
 export type RotateBy = "size" | "daily" | "weekly"
 
@@ -65,16 +66,26 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-async function safeUnlink(p: string): Promise<void> {
+// A report callback receives phase-tagged failures from the best-effort
+// internals (rotation, compression, retention) so they are no longer silent.
+// `err` keeps its original error as `cause`; the `phase` field marks the
+// origin. Untagged errors coming back through `append` get phase "append".
+type Report = (phase: string, err: unknown) => void
+
+async function safeUnlink(p: string, report?: Report): Promise<void> {
   try {
     await unlink(p)
-  } catch {}
+  } catch (err) {
+    if (!isEnoent(err)) report?.("unlink", err)
+  }
 }
 
-async function safeRename(from: string, to: string): Promise<void> {
+async function safeRename(from: string, to: string, report?: Report): Promise<void> {
   try {
     await rename(from, to)
-  } catch {}
+  } catch (err) {
+    if (!isEnoent(err)) report?.("rename", err)
+  }
 }
 
 // UTC period start for the active file's rotation window. `daily` is midnight
@@ -88,7 +99,7 @@ function periodStart(rotateBy: RotateBy, ms: number): number {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
 }
 
-async function enforceRetention(cfg: NdjsonLogConfig, nowMs: number): Promise<void> {
+async function enforceRetention(cfg: NdjsonLogConfig, nowMs: number, report: Report): Promise<void> {
   if (cfg.retentionDays <= 0) return
   const cutoff = nowMs - cfg.retentionDays * DAY_MS
   const keep = Math.max(1, cfg.keepGenerations)
@@ -98,8 +109,9 @@ async function enforceRetention(cfg: NdjsonLogConfig, nowMs: number): Promise<vo
       try {
         const s = await stat(p)
         if (s.mtimeMs < cutoff) await unlink(p)
-      } catch {
-        // not present / not permitted — nothing to do
+      } catch (err) {
+        // not present — nothing to do; anything else is a real failure.
+        if (!isEnoent(err)) report("retention", err)
       }
     }
   }
@@ -127,54 +139,57 @@ async function compressGeneration(
   cfg: NdjsonLogConfig,
   index: number,
   level: number,
+  report: Report,
 ): Promise<void> {
   const src = `${cfg.log}.${index}`
   if (!(await exists(src))) return
   const dest = `${src}.gz`
-  await safeUnlink(dest)
+  await safeUnlink(dest, report)
   try {
     await pipeline(createReadStream(src), createGzip({ level }), createWriteStream(dest))
     await unlink(src)
-  } catch {
-    // Compression is best-effort: leave the plain file if gzip failed.
-    await safeUnlink(dest)
+  } catch (err) {
+    // Compression is best-effort: leave the plain file if gzip failed —
+    // but report the failure so a silently degrading archive is visible.
+    report("compress", err)
+    await safeUnlink(dest, report)
   }
 }
 
 // Move generation `from` -> `to`, handling both plain and `.gz` variants and
 // clearing the target first so a stale file can never survive a shift.
-async function moveGeneration(log: string, from: number, to: number): Promise<void> {
-  await safeUnlink(`${log}.${to}`)
-  await safeUnlink(`${log}.${to}.gz`)
+async function moveGeneration(log: string, from: number, to: number, report: Report): Promise<void> {
+  await safeUnlink(`${log}.${to}`, report)
+  await safeUnlink(`${log}.${to}.gz`, report)
   if (await exists(`${log}.${from}.gz`)) {
-    await safeRename(`${log}.${from}.gz`, `${log}.${to}.gz`)
+    await safeRename(`${log}.${from}.gz`, `${log}.${to}.gz`, report)
   }
   if (await exists(`${log}.${from}`)) {
-    await safeRename(`${log}.${from}`, `${log}.${to}`)
+    await safeRename(`${log}.${from}`, `${log}.${to}`, report)
   }
 }
 
-async function rotate(cfg: NdjsonLogConfig, nowMs: number): Promise<void> {
+async function rotate(cfg: NdjsonLogConfig, nowMs: number, report: Report): Promise<void> {
   const keep = Math.max(1, cfg.keepGenerations)
   const compressAfter = Math.max(0, Math.min(cfg.compressAfter ?? 1, keep))
   const level = Math.max(1, Math.min(cfg.compressLevel ?? 6, 9))
 
   // Drop the oldest slot, then shift every generation down by one.
-  await safeUnlink(`${cfg.log}.${keep}`)
-  await safeUnlink(`${cfg.log}.${keep}.gz`)
+  await safeUnlink(`${cfg.log}.${keep}`, report)
+  await safeUnlink(`${cfg.log}.${keep}.gz`, report)
   for (let i = keep - 1; i >= 1; i--) {
-    await moveGeneration(cfg.log, i, i + 1)
+    await moveGeneration(cfg.log, i, i + 1, report)
   }
 
   // Active -> .1 (always plain).
-  await safeUnlink(`${cfg.log}.1`)
-  await safeUnlink(`${cfg.log}.1.gz`)
-  await safeRename(cfg.log, `${cfg.log}.1`)
+  await safeUnlink(`${cfg.log}.1`, report)
+  await safeUnlink(`${cfg.log}.1.gz`, report)
+  await safeRename(cfg.log, `${cfg.log}.1`, report)
 
   // Compress generations beyond the hot window.
   if (cfg.compress) {
     for (let i = compressAfter + 1; i <= keep; i++) {
-      await compressGeneration(cfg, i, level)
+      await compressGeneration(cfg, i, level, report)
     }
   }
 
@@ -185,18 +200,38 @@ async function rotate(cfg: NdjsonLogConfig, nowMs: number): Promise<void> {
     : { ts, event: "log-rotation" }
   try {
     await appendFile(cfg.log, JSON.stringify(notice) + "\n", "utf8")
-  } catch {}
+  } catch (err) {
+    report("marker", err)
+  }
 }
 
 export function createNdjsonLogger(cfg: NdjsonLogConfig): NdjsonLogger {
   const now = cfg.now ?? Date.now
   let queue: Promise<void> = Promise.resolve()
 
+  // Tag an error with its origin phase (once), preserving the original as
+  // `cause`, and hand it to onError without ever letting onError throw back.
+  const report: Report = (phase, err) => {
+    let tagged = err
+    if (!(err instanceof Error && "phase" in err)) {
+      const base = err instanceof Error ? err : new Error(String(err))
+      tagged = new Error(`[logfile:${phase}] ${base.message}`, { cause: base })
+      ;(tagged as { phase?: string }).phase = phase
+    }
+    try {
+      cfg.onError?.(tagged)
+    } catch (handlerErr) {
+      // Double fault: the error handler itself failed — surface it so a
+      // broken onError cannot silently erase every future report.
+      console.error("[logfile] onError handler itself failed:", handlerErr)
+    }
+  }
+
   async function write(entry: Record<string, unknown>): Promise<void> {
     await mkdir(dirname(cfg.log), { recursive: true })
     const nowMs = now()
-    if (await shouldRotate(cfg, nowMs)) await rotate(cfg, nowMs)
-    await enforceRetention(cfg, nowMs)
+    if (await shouldRotate(cfg, nowMs)) await rotate(cfg, nowMs, report)
+    await enforceRetention(cfg, nowMs, report)
     await appendFile(cfg.log, JSON.stringify(entry) + "\n", "utf8")
   }
 
@@ -205,9 +240,7 @@ export function createNdjsonLogger(cfg: NdjsonLogConfig): NdjsonLogger {
       // Serialize; swallow failures so a log problem never surfaces as a hook
       // error or breaks the pipeline. Report via onError when provided.
       queue = queue.then(() => write(entry)).catch((err) => {
-        try {
-          cfg.onError?.(err)
-        } catch {}
+        report("append", err)
       })
       return queue
     },

@@ -3,6 +3,9 @@
 // sections of sysop-config.yaml:
 //
 //   autonomy:  capability dial + heartbeat/chatter/quiet sub-blocks (§4, §16, §17)
+//              + the restrict-only missions overlay `missions.<id>.*` (§6 of
+//              the missions plan — parsed by readMissionOverlay, enforced by
+//              lib/missions.ts)
 //   mood:      feeling-system dials (§15)
 //   comms:     channel selection for notifications/approvals (§7, §16.4)
 //   dashboard: local web UI bind + auth mode (§9)
@@ -24,10 +27,14 @@
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
 // never loaded as a plugin itself.
 import { homedir } from "node:os"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 import {
+  extractBlock,
   isDuration,
   parseInlineList,
   readNestedSection,
+  SYSCONFIG,
   type NestedCoerce,
   type NestedDefaults,
   type NestedReject,
@@ -71,8 +78,6 @@ export type QuietConfig = {
   nightly_dream_cap: number
   /** 30->60->120m on consecutive no-ops (§17.8). */
   backoff: boolean
-  /** Strict night whitelist — subset of NIGHT_MENU (§17.4). */
-  dream_missions: string[]
 }
 
 export type AutonomyConfig = {
@@ -174,7 +179,6 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
     dream_token_budget: 8000,
     nightly_dream_cap: 3,
     backoff: true,
-    dream_missions: ["drain", "dream"],
   },
 }
 
@@ -195,8 +199,9 @@ export const DEFAULT_DASHBOARD: DashboardConfig = {
   auth: { mode: "off", require_tls: false },
 }
 
-// Strict night menu (§17.4): the only missions the quiet window admits.
-export const NIGHT_MENU = ["drain", "dream"] as const
+// Night menu (plan §5 of the missions plan): per-mission `menus:` frontmatter
+// is the single source; the old `quiet.dream_missions` dial was removed with
+// the mission loader (heartbeat-missions-plan D-M4).
 export const AUTH_MODES = ["off", "login", "login+2fa"] as const
 export const COMMS_CHANNELS = ["telegram", "email"] as const
 export const GATE_MODES = ["shadow", "gate"] as const
@@ -418,7 +423,6 @@ const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {
     dream_token_budget: { t: "int", min: 0 },
     nightly_dream_cap: { t: "int", min: 0 },
     backoff: { t: "bool" },
-    dream_missions: { t: "list", members: NIGHT_MENU },
   },
 }
 
@@ -461,6 +465,9 @@ const AUTONOMY_OPTS: NestedSectionOptions = {
   blockKeys: blocksOf(AUTONOMY_BLOCK_RULES),
   listKeys: listOf(AUTONOMY_SCALAR_RULES),
   blockListKeys: blockListsOf(AUTONOMY_BLOCK_RULES),
+  // `missions.<id>.*` is two levels deep and is parsed by readMissionOverlay
+  // below; skip it here so it never surfaces as an unknown-key reject.
+  skipBlocks: new Set(["missions"]),
   coerce: makeCoerce(AUTONOMY_SCALAR_RULES, AUTONOMY_BLOCK_RULES),
 }
 
@@ -502,7 +509,10 @@ export function clearRejectWarnCache(): void {
   warned.clear()
 }
 
-async function reportRejects(
+/** Report config rejects once per process to <log>/autonomy-config.log (or via
+ *  the caller's onReject). Exported for the missions overlay (lib/missions.ts),
+ *  which shares the same ledger and dedupe set. */
+export async function reportRejects(
   directory: string,
   section: string,
   rejects: NestedReject[],
@@ -586,5 +596,124 @@ export async function readDashboardConfig(
   const parsed = await readNestedSection(directory, "dashboard", dashboardDefaults(), DASHBOARD_OPTS)
   await reportRejects(directory, "dashboard", parsed.rejects, opts.onReject)
   return typed(DEFAULT_DASHBOARD, parsed.scalars, parsed.blocks)
+}
+
+// ---------------------------------------------------------------------------
+// Mission overlay — `autonomy.missions.<id>.*` (missions-plan §6, D-M5).
+//
+// Config is restrict-only: it may disable a mission, raise its `min_level`,
+// move `frequency` toward `low`, or narrow `menus` — never widen any of them
+// (enforced by applyMissionOverlay in lib/missions.ts, which owns the file
+// values). This reader only parses + type-checks the overlay; every invalid
+// value falls back (key ignored) and warns once to <log>/autonomy-config.log.
+// The two-level nesting is deeper than parseNestedSection supports, hence the
+// dedicated scanner below; readAutonomyConfig skips the subtree via
+// AUTONOMY_OPTS.skipBlocks.
+
+export const MISSION_FREQUENCIES = ["high", "mid", "low"] as const
+export type MissionFrequency = (typeof MISSION_FREQUENCIES)[number]
+
+/** Frontmatter/menu window values — `both` is sugar for [day, night]. */
+export const MISSION_MENU_WINDOWS = ["day", "night", "both"] as const
+
+export type MissionOverlay = {
+  enabled?: boolean
+  min_level?: number
+  frequency?: string
+  menus?: string[]
+}
+
+const MISSION_OVERLAY_RULES: Record<string, Rule> = {
+  enabled: { t: "bool" },
+  min_level: { t: "int", min: 0, max: 4 },
+  frequency: { t: "enum", values: MISSION_FREQUENCIES },
+  menus: { t: "list", members: MISSION_MENU_WINDOWS },
+}
+
+const HYPHEN_ID_RE = /^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$/
+
+function stripValueComment(raw: string): string {
+  return raw.replace(/\s+#.*$/, "").trim()
+}
+
+/** Parse `autonomy.missions.<id>.*` from raw sysop-config text. Pure + total:
+ *  missing block → empty overlay, every bad line → a reject, never throws. */
+export function parseMissionOverlay(yamlText: string): {
+  overlay: Record<string, MissionOverlay>
+  rejects: NestedReject[]
+} {
+  const overlay: Record<string, MissionOverlay> = {}
+  const rejects: NestedReject[] = []
+  const body = extractBlock(yamlText, "autonomy")
+  if (!body) return { overlay, rejects }
+
+  const lines = body.split("\n")
+  let baseIndent = -1
+  for (const line of lines) {
+    const t = line.trim()
+    if (t !== "" && !t.startsWith("#")) {
+      baseIndent = line.length - line.trimStart().length
+      break
+    }
+  }
+  if (baseIndent < 0) return { overlay, rejects }
+
+  let missionsIndent = -1
+  let childIndent = -1
+  let currentId: string | null = null
+  for (const line of lines) {
+    const t = line.trim()
+    if (t === "" || t.startsWith("#")) continue
+    const indent = line.length - line.trimStart().length
+    if (missionsIndent === -1) {
+      if (indent === baseIndent && /^missions\s*:\s*(?:#.*)?$/.test(t)) missionsIndent = indent
+      continue
+    }
+    if (indent <= missionsIndent) break // missions block ended
+    const m = t.match(HYPHEN_ID_RE)
+    if (!m) continue
+    const raw = stripValueComment(m[2])
+    if (childIndent === -1) childIndent = indent
+    if (indent === childIndent) {
+      if (raw !== "") {
+        rejects.push({ path: `missions.${m[1]}`, raw: raw.slice(0, 200), reason: "expected a per-mission block" })
+        currentId = null
+        continue
+      }
+      currentId = m[1]
+      overlay[currentId] = overlay[currentId] ?? {}
+      continue
+    }
+    if (currentId === null) continue // deeper orphan before any id block
+    const rule = MISSION_OVERLAY_RULES[m[1]]
+    if (!rule) {
+      rejects.push({ path: `missions.${currentId}.${m[1]}`, raw: raw.slice(0, 200), reason: "unknown overlay key" })
+      continue
+    }
+    const res = coerceRule(rule, raw)
+    if (!res.ok) {
+      rejects.push({ path: `missions.${currentId}.${m[1]}`, raw: raw.slice(0, 200), reason: res.reason })
+      continue
+    }
+    ;(overlay[currentId] as Record<string, unknown>)[m[1]] = res.value
+  }
+  return { overlay, rejects }
+}
+
+/** Hot-read the mission overlay for a project. Missing config → {}; invalid
+ *  keys warn once to autonomy-config.log (or go to opts.onReject in tests). */
+export async function readMissionOverlay(
+  directory: string,
+  opts: ReadAutonomyOpts = {},
+): Promise<Record<string, MissionOverlay>> {
+  let raw = ""
+  try {
+    raw = await readFile(join(directory, SYSCONFIG), "utf8")
+  } catch {
+    return {}
+  }
+  const { overlay, rejects } = parseMissionOverlay(raw)
+  await reportRejects(directory, "autonomy", rejects, opts.onReject)
+  return overlay
 }
 

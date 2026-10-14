@@ -1,0 +1,778 @@
+// Deterministic signal digest for the heartbeat pre-gate (kanban card B,
+// docs/heartbeat-missions-plan.md §3, §4, §9 phase B).
+//
+// Everything here is zero-LLM and fail-open: counts and ages read from files
+// the other libs already own (backlog.ndjson, memory.json, audit.log,
+// profile-note mtimes), the quiet-window predicate, the candidate-list build
+// (enabled ∧ menus.contains(now) ∧ level ≥ min_level ∧ D-M8 candidacy), the
+// bounded frequency × mood bias, and a stable `digest_hash` over the signal
+// set (B7 groundwork — repeated identical digests drive adaptive backoff).
+//
+// The pre-gate contract (plan §6.2, §12.1 step 5): an all-quiet tick at
+// level ≤ L2 ends as NO_REPLY with zero LLM calls. `computeDigest` is the
+// pure data the JEV digest decision (card C, below) reads; the scheduler
+// that drives it lives in heartbeat-hook.ts (card D).
+//
+// Mood is advisory only (§15.5): the dispatch bias here is a bounded
+// multiplier journaled for calibration; it NEVER touches the autonomy gate,
+// locks, approvals, or the irreversibility floor.
+//
+// Loaded via relative import only. The plugin auto-discovery glob
+// "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
+// never loaded as a plugin itself.
+import { createHash } from "node:crypto"
+import { mkdir, open, stat, unlink } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
+import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
+import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
+import type { DecisionRequest, DecisionResult } from "./decisions.ts"
+import { atomicRead } from "./fsx.ts"
+import { readAuditConfig } from "./audit.ts"
+import { readKnowledgeConfig, resolveMemoryFile } from "./knowledge.ts"
+import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
+import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
+import { readResolvedPaths } from "./paths.ts"
+import { readProfileConfig, resolveProfileFile } from "./profile.ts"
+import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
+import { readMemory } from "./temporal.ts"
+import { errText, nowIso } from "./util.ts"
+
+// ---------------------------------------------------------------------------
+// Quiet-window predicate (plan §17.1 — "one window concept, three consumers";
+// this is the heartbeat pre-gate's consumer; the dream timer and idea-express
+// are the other two, cards G/6).
+
+const WINDOW_RE = /^([01]?\d|2[0-3]):([0-5]\d)-([01]?\d|2[0-3]):([0-5]\d)$/
+
+/** Parse "HH:MM-HH:MM" into minutes-of-day. Malformed → null. */
+export function parseWindow(window: string): { startMin: number; endMin: number } | null {
+  const m = WINDOW_RE.exec(window.trim())
+  if (!m) return null
+  return {
+    startMin: parseInt(m[1], 10) * 60 + parseInt(m[2], 10),
+    endMin: parseInt(m[3], 10) * 60 + parseInt(m[4], 10),
+  }
+}
+
+/**
+ * True when `now` falls inside the quiet window. Windows may wrap midnight
+ * (23:00-08:00). A malformed window or a zero-length window is never quiet
+ * (fail-open to the day menu — the config reader already validated the dial).
+ */
+export function isQuietNow(window: string, now: Date = new Date()): boolean {
+  const w = parseWindow(window)
+  if (!w) return false
+  if (w.startMin === w.endMin) return false
+  const cur = now.getHours() * 60 + now.getMinutes()
+  if (w.startMin < w.endMin) return cur >= w.startMin && cur < w.endMin
+  return cur >= w.startMin || cur < w.endMin
+}
+
+// ---------------------------------------------------------------------------
+// Frequency weights (plan §4, D-M3): a digest WEIGHT, never a gate.
+
+export const FREQUENCY_WEIGHTS: Record<MissionFrequency, number> = {
+  high: 1.0,
+  mid: 0.5,
+  low: 0.2,
+}
+
+// ---------------------------------------------------------------------------
+// Signals + all-quiet
+
+export type HeartbeatSignals = {
+  /** Open `pending` backlog entries at or below the current level. */
+  backlog_pending: number
+  /** Unconsumed turns in the temporal buffer (memory.json). */
+  unconsumed_turns: number
+  /** Non-zero exit codes in the active audit.log. */
+  audit_failures: number
+  /** Hours since mtime per tracked reference file (missing files omitted). */
+  staleness: Record<string, number>
+  /** isQuietNow() over autonomy.quiet.window. */
+  quiet: boolean
+}
+
+/** A reference file this old (hours) counts as a staleness signal. */
+export const STALE_AFTER_HOURS = 72
+
+/** All signals silent: no pending work, no failures, nothing stale. */
+export function isAllQuiet(
+  signals: HeartbeatSignals,
+  staleAfterHours: number = STALE_AFTER_HOURS,
+): boolean {
+  if (signals.backlog_pending > 0) return false
+  if (signals.unconsumed_turns > 0) return false
+  if (signals.audit_failures > 0) return false
+  return Object.values(signals.staleness).every((h) => h < staleAfterHours)
+}
+
+// ---------------------------------------------------------------------------
+// digest_hash (B7 groundwork): stable over an identical signal set. Staleness
+// ages are bucketed to whole hours so the hash holds within an hour — ms
+// jitter would defeat "repeated identical digest" backoff.
+
+export function digestHash(signals: HeartbeatSignals): string {
+  const canonical = JSON.stringify({
+    backlog_pending: signals.backlog_pending,
+    unconsumed_turns: signals.unconsumed_turns,
+    audit_failures: signals.audit_failures,
+    staleness: Object.fromEntries(
+      Object.entries(signals.staleness)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([k, h]) => [k, Math.floor(h)]),
+    ),
+    quiet: signals.quiet,
+  })
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16)
+}
+
+// ---------------------------------------------------------------------------
+// Mood dispatch bias (plan §4, §15.4): effective bias =
+// frequency_weight × mood_dispatch_bias. With `dispatch_influence: false`
+// (hot dial) the mood term is exactly 1.0 and only the frequency weight
+// applies. Bounded to [0.5, 1.5]; at rest (neutral valence, baseline
+// arousal) the term is 1.0.
+
+export const MOOD_BIAS_MIN = 0.5
+export const MOOD_BIAS_MAX = 1.5
+
+export function moodDispatchBias(mood: MoodState, dispatchInfluence: boolean): number {
+  if (!dispatchInfluence) return 1
+  const raw =
+    1 + 0.25 * mood.valence + 0.25 * (mood.arousal - DEFAULT_BASELINE.arousal)
+  return Math.max(MOOD_BIAS_MIN, Math.min(MOOD_BIAS_MAX, raw))
+}
+
+// ---------------------------------------------------------------------------
+// Candidacy predicates (D-M8): named, deterministic, evaluated before JEV.
+
+/** The dream-timer gates for `dream-gate` (plan §17.3): the roll and the
+ *  nightly cap ride the predicate so no path can dispatch a dream without
+ *  them (heartbeat woken-ticks see the sleep status and are gated out). */
+export type SleepGateCtx = {
+  status: SleepStatus
+  /** quiet.dream_chance (hot config). */
+  chance: number
+  /** sleep.json dreams_tonight. */
+  dreamsTonight: number
+  /** quiet.nightly_dream_cap. */
+  nightlyCap: number
+}
+
+export type CandidacyContext = {
+  backlogPending: number
+  nowMs: number
+  /** Unconsumed turns in the temporal buffer (`turns-pending`; §17.3 drain gate). */
+  unconsumedTurns?: number
+  /** Sleep state + dream dials (`dream-gate`); absent = fail closed. */
+  sleep?: SleepGateCtx
+  /** state-key → last-run epoch ms (`min-gap:` predicates; cards 6/7a own the store). */
+  gaps?: Record<string, number>
+  /** state-key → required gap ms; a missing key means 0 (any elapsed time passes). */
+  minGapMs?: Record<string, number>
+  /** Injectable for tests; default Math.random (`roll:` predicates). */
+  random?: () => number
+  /** Fires for the stochastic `dream-gate` evaluation only — the roll must be
+   *  journaled with its outcome (§17.3). Dream-hook collects; heartbeat
+   *  passes none. */
+  onDreamGate?: (info: { id: string; chance: number; passed: boolean; reason: "roll" | "status" | "nightly-cap" }) => void
+}
+
+export function candidacyPasses(mission: Mission, ctx: CandidacyContext): boolean {
+  const c: MissionCandidacy = mission.candidacy
+  if (c === "digest" || c === "always") return true
+  if (c === "backlog-pending") return ctx.backlogPending > 0
+  if (c === "turns-pending") return (ctx.unconsumedTurns ?? 0) > 0
+  if (c === "dream-gate") {
+    const s = ctx.sleep
+    const report = (passed: boolean, reason: "roll" | "status" | "nightly-cap"): void =>
+      ctx.onDreamGate?.({ id: mission.id, chance: s?.chance ?? 0, passed, reason })
+    if (!s || s.status !== "dreaming") {
+      report(false, "status")
+      return false
+    }
+    if (s.dreamsTonight >= s.nightlyCap) {
+      report(false, "nightly-cap")
+      return false
+    }
+    const passed = (ctx.random ?? Math.random)() < s.chance
+    report(passed, "roll")
+    return passed
+  }
+  if (c.startsWith("min-gap:")) {
+    const key = c.slice("min-gap:".length)
+    const last = ctx.gaps?.[key]
+    if (last === undefined) return true // never ran → eligible
+    const need = ctx.minGapMs?.[key] ?? 0
+    return ctx.nowMs - last >= need
+  }
+  if (c.startsWith("roll:")) {
+    const chance = parseFloat(c.slice("roll:".length))
+    if (!Number.isFinite(chance)) return false
+    return (ctx.random ?? Math.random)() < chance
+  }
+  return false // unknown predicate — fail closed (parser guarantees shape)
+}
+
+// ---------------------------------------------------------------------------
+// Candidate list (plan §3): the filtered set handed to the JEV digest. A
+// mission that fails any filter is invisible to the model, so it cannot be
+// prompted into existence.
+
+export type DigestCandidate = {
+  id: string
+  title: string
+  frequency: MissionFrequency
+  min_level: number
+  menus: string[]
+  candidacy: MissionCandidacy
+  frequency_weight: number
+  mood_bias: number
+  /** frequency_weight × mood_bias — the journaled dispatch weight (§4). */
+  weight: number
+}
+
+export type CandidateCtx = {
+  level: number
+  quiet: boolean
+  mood: MoodState
+  dispatchInfluence: boolean
+  candidacy: CandidacyContext
+}
+
+export function buildCandidates(missions: Mission[], ctx: CandidateCtx): DigestCandidate[] {
+  const window = ctx.quiet ? "night" : "day"
+  const moodBias = moodDispatchBias(ctx.mood, ctx.dispatchInfluence)
+  const out: DigestCandidate[] = []
+  for (const m of missions) {
+    if (!m.enabled) continue
+    if (!m.menus.includes(window)) continue
+    if (ctx.level < m.min_level) continue
+    if (!candidacyPasses(m, ctx.candidacy)) continue
+    const frequencyWeight = FREQUENCY_WEIGHTS[m.frequency]
+    out.push({
+      id: m.id,
+      title: m.title,
+      frequency: m.frequency,
+      min_level: m.min_level,
+      menus: m.menus,
+      candidacy: m.candidacy,
+      frequency_weight: frequencyWeight,
+      mood_bias: moodBias,
+      weight: frequencyWeight * moodBias,
+    })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Digest assembly (never throws; every gatherer degrades to a silent signal)
+
+export type HeartbeatDigest = {
+  ts: string
+  level: number
+  quiet: boolean
+  all_quiet: boolean
+  /** sleep.json status (§17.1) — the dreaming NO_REPLY gate reads it (§17.2). */
+  sleep_status: SleepStatus
+  signals: HeartbeatSignals
+  candidates: DigestCandidate[]
+  bias: { mood: number; dispatch_influence: boolean }
+  digest_hash: string
+}
+
+async function countAuditFailures(file: string): Promise<number> {
+  const text = await atomicRead(file)
+  let failures = 0
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue
+    try {
+      const e = JSON.parse(line) as { exit?: unknown }
+      if (typeof e.exit === "number" && e.exit !== 0) failures++
+    } catch {
+      // malformed line — skip, never fatal
+    }
+  }
+  return failures
+}
+
+async function stalenessHours(
+  targets: Array<{ key: string; file: string }>,
+  nowMs: number,
+): Promise<Record<string, number>> {
+  const out: Record<string, number> = {}
+  for (const t of targets) {
+    try {
+      const s = await stat(t.file)
+      out[t.key] = (nowMs - s.mtimeMs) / 3_600_000
+    } catch {
+      // missing file — no staleness signal
+    }
+  }
+  return out
+}
+
+export type ComputeDigestOpts = {
+  now?: Date
+  /** Injectable randomness for `roll:`/`dream-gate` candidacy (tests). */
+  random?: () => number
+  /** min-gap store for `min-gap:` candidacy (cards 6/7a pass theirs). */
+  gaps?: Record<string, number>
+  minGapMs?: Record<string, number>
+  /** Dream-hook's roll journal seam (§17.3); heartbeat passes none. */
+  onDreamGate?: CandidacyContext["onDreamGate"]
+}
+
+/**
+ * Compute the full deterministic digest for a project. Hot-reads every config
+ * and state file; a missing/broken input degrades to a silent signal, never a
+ * throw. Zero LLM calls anywhere in this path.
+ */
+export async function computeDigest(
+  directory: string,
+  opts: ComputeDigestOpts = {},
+): Promise<HeartbeatDigest> {
+  const now = opts.now ?? new Date()
+  const nowMs = now.getTime()
+
+  const autonomy = await readAutonomyConfig(directory)
+  const moodCfg = await readMoodConfig(directory)
+  const { stateDir, logDir, vaultDir } = await readResolvedPaths(directory)
+
+  const backlogCfg = await readBacklogConfig(directory)
+  const knowledgeCfg = await readKnowledgeConfig(directory)
+  const auditCfg = await readAuditConfig(directory)
+  const profileCfg = await readProfileConfig(directory)
+
+  const mood = await readMoodState(join(stateDir, "mood.json"))
+  const sleep = await readSleepState(join(stateDir, "sleep.json"))
+
+  let backlog_pending = 0
+  let unconsumed_turns = 0
+  let audit_failures = 0
+  try {
+    backlog_pending = await pendingCount(resolveBacklogFile(stateDir, backlogCfg), autonomy.level)
+  } catch {
+    /* silent */
+  }
+  try {
+    unconsumed_turns = (await readMemory(resolveMemoryFile(stateDir, knowledgeCfg))).length
+  } catch {
+    /* silent */
+  }
+  try {
+    audit_failures = await countAuditFailures(join(logDir, auditCfg.log))
+  } catch {
+    /* silent */
+  }
+
+  const staleness = await stalenessHours(
+    [
+      { key: profileCfg.agent_file, file: resolveProfileFile(vaultDir, profileCfg.agent_file) },
+      { key: profileCfg.user_file, file: resolveProfileFile(vaultDir, profileCfg.user_file) },
+      { key: "SETUP.md", file: join(directory, "SETUP.md") },
+    ],
+    nowMs,
+  )
+
+  const quiet = isQuietNow(autonomy.quiet.window, now)
+  const signals: HeartbeatSignals = {
+    backlog_pending,
+    unconsumed_turns,
+    audit_failures,
+    staleness,
+    quiet,
+  }
+
+  let missions: Mission[] = []
+  try {
+    missions = await loadMissions(directory)
+  } catch {
+    missions = []
+  }
+
+  const candidates = buildCandidates(missions, {
+    level: autonomy.level,
+    quiet,
+    mood,
+    dispatchInfluence: moodCfg.dispatch_influence,
+    candidacy: {
+      backlogPending: backlog_pending,
+      unconsumedTurns: unconsumed_turns,
+      sleep: {
+        status: sleep.status,
+        chance: autonomy.quiet.dream_chance,
+        dreamsTonight: sleep.dreams_tonight,
+        nightlyCap: autonomy.quiet.nightly_dream_cap,
+      },
+      nowMs,
+      gaps: opts.gaps,
+      minGapMs: opts.minGapMs,
+      random: opts.random,
+      onDreamGate: opts.onDreamGate,
+    },
+  })
+
+  return {
+    ts: nowIso(),
+    level: autonomy.level,
+    quiet,
+    all_quiet: isAllQuiet(signals),
+    sleep_status: sleep.status,
+    signals,
+    candidates,
+    bias: { mood: moodDispatchBias(mood, moodCfg.dispatch_influence), dispatch_influence: moodCfg.dispatch_influence },
+    digest_hash: digestHash(signals),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JEV digest decision (kanban card C, missions-plan §3, §9 phase C): the
+// typed `no_reply | mission:<id>` choice over the already-filtered candidate
+// list, plus the brief assembly (D-M1, D-M7). Deterministic and fail-OPEN to
+// no_reply: an error, abstain, non-string, or unknown mission id all resolve
+// to silence — a broken digest never invents work.
+
+/** Built-in digest assertion (mirrored in .opencode/decision-prompts.yaml's
+ *  `digest:` section — the file is the single source of truth for the live
+ *  text; this is the missing-file fallback). */
+export const DEFAULT_DIGEST_ASSERTION =
+  "Decide whether this heartbeat tick should run one of the listed maintenance missions or stay silent. " +
+  "Answer no_reply when none of the candidates is clearly warranted by the current signals — the default " +
+  "is silence; never invent work. Answer mission:<id> only for a candidate that appears in the list, " +
+  "using the frequency × mood weight as a tie-breaker among missions the signals actually justify."
+
+/** The typed digest verdict: run exactly one mission, or stay silent. */
+export type DigestVerdict = { kind: "no_reply" } | { kind: "mission"; id: string }
+
+/** Map a raw JEV choice value to a typed verdict. Anything unrecognised —
+ *  non-strings, bare `mission:` with no id, ids not in the candidate list —
+ *  fails closed to no_reply (mirrors taskKindFromVerdict). Ids are matched
+ *  after lowercasing, per the lowercase-by-convention mission filenames. */
+export function digestVerdictFromValue(value: unknown, candidateIds: readonly string[]): DigestVerdict {
+  if (typeof value !== "string") return { kind: "no_reply" }
+  const v = value.trim().toLowerCase()
+  if (v === "no_reply") return { kind: "no_reply" }
+  if (v.startsWith("mission:")) {
+    const id = v.slice("mission:".length)
+    if (candidateIds.includes(id)) return { kind: "mission", id }
+  }
+  return { kind: "no_reply" }
+}
+
+/** Fail-open verdict reading from a full DecisionResult (mirrors jevAllows):
+ *  a null result, an error, or an abstain all mean no_reply. */
+export function digestVerdictFromResult(
+  result: DecisionResult | null,
+  candidateIds: readonly string[],
+): DigestVerdict {
+  if (!result || result.error || result.abstained) return { kind: "no_reply" }
+  return digestVerdictFromValue(result.value, candidateIds)
+}
+
+/** Compact one-block digest state for the JEV `choice` (mirrors
+ *  jevStateSummary's 1500-char cap): signals, bias, and the candidates with
+ *  their effective weights — everything the verdict needs, nothing more. */
+export function digestStateSummary(digest: HeartbeatDigest): string {
+  const summary = {
+    level: digest.level,
+    quiet: digest.quiet,
+    all_quiet: digest.all_quiet,
+    signals: {
+      backlog_pending: digest.signals.backlog_pending,
+      unconsumed_turns: digest.signals.unconsumed_turns,
+      audit_failures: digest.signals.audit_failures,
+      staleness: Object.fromEntries(
+        Object.entries(digest.signals.staleness).map(([k, h]) => [k, Math.round(h)]),
+      ),
+    },
+    bias: digest.bias,
+    candidates: digest.candidates.map((c) => ({
+      id: c.id,
+      title: c.title,
+      weight: Number(c.weight.toFixed(2)),
+    })),
+    digest_hash: digest.digest_hash,
+  }
+  const s = JSON.stringify(summary)
+  return s.length > 1500 ? s.slice(0, 1500) + "…" : s
+}
+
+/** The `choice` request for one heartbeat digest: candidates are `no_reply`
+ *  plus `mission:<id>` for every candidate that passed the structural filter
+ *  (a mission JEV cannot see cannot be prompted into existence — §3). */
+export function buildDigestChoiceRequest(digest: HeartbeatDigest, criteria: string): DecisionRequest {
+  return {
+    kind: "choice",
+    state: digestStateSummary(digest),
+    candidates: ["no_reply", ...digest.candidates.map((c) => `mission:${c.id}`)],
+    criteria,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Brief assembly (D-M1, D-M7): the heartbeat prompt is fixed — the plugin
+// injects the JEV verdict and the mission body (no prompt-per-mission
+// sprawl). `agent` carries the mission's `agent:` field: "" means the default
+// heartbeat agent, a name pins the child session to that opencode agent.
+
+/** The fixed heartbeat prompt every mission turn starts from. */
+export const HEARTBEAT_FIXED_PROMPT =
+  "You are the heartbeat agent for this project — an autonomous maintenance tick, not a user " +
+  "conversation. Perform exactly one mission: the brief below. Do not invent additional work, do " +
+  "not ask the user questions, and stop as soon as the mission's final step is done. Record one " +
+  "line describing what changed (or that there was nothing to do)."
+
+export type MissionBrief = {
+  prompt: string
+  /** opencode agent name for the child session; "" = the default heartbeat agent (D-M7). */
+  agent: string
+  mission_id: string
+}
+
+/** Assemble the child-session brief: fixed prompt + verdict + mission body.
+ *  Returns null on a no_reply verdict or a verdict/mission mismatch — the
+ *  caller treats null as "end the tick without a session" (§12.1 step 6). */
+export function assembleMissionBrief(
+  verdict: DigestVerdict,
+  mission: Mission | undefined,
+  fixedPrompt: string = HEARTBEAT_FIXED_PROMPT,
+): MissionBrief | null {
+  if (verdict.kind === "no_reply") return null
+  if (!mission || mission.id !== verdict.id) return null
+  const prompt = [
+    fixedPrompt.trim(),
+    `Verdict: mission:${mission.id} — ${mission.title}`,
+    mission.body,
+  ]
+    .filter((p) => p.trim() !== "")
+    .join("\n\n")
+  return { prompt, agent: mission.agent, mission_id: mission.id }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler primitives (kanban card D, plan §12.1). The self-rescheduling
+// `setTimeout` loop lives in heartbeat-hook.ts; the due math and the file
+// lock are pure/here so the hook stays a thin runtime shell.
+
+/** The self-rescheduling wake is always capped here, so a hot config flip
+ *  (level → L0, frequency → off, or a shorter frequency) applies within a
+ *  minute — no restart, no `daemon-reload`. */
+export const HEARTBEAT_WAKE_CAP_MS = 60_000
+
+/** A tick holding the lock longer than this is presumed dead (crashed child,
+ *  wedged session) and the next acquire steals the lock — the overrun
+ *  watchdog from the D-M9 survey. */
+export const HEARTBEAT_LOCK_STALE_MS = 30 * 60_000
+
+/** `off` → null (sleep); `12h`/`30m` → ms. Malformed → null (never ticks —
+ *  a garbage dial must not fire the heartbeat). */
+export function frequencyToMs(frequency: string): number | null {
+  if (frequency === "off") return null
+  const m = /^(\d+)([mh])$/.exec(frequency.trim())
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n * (m[2] === "h" ? 3_600_000 : 60_000)
+}
+
+/**
+ * Effective day cadence after B7 adaptive backoff (missions-plan §7, §11 —
+ * the day twin of the §17.8 dream ladder): repeated identical-digest NO_REPLY
+ * ticks stretch the frequency ×2 at streak 2 and ×4 at streak 3+; a mission
+ * execution or a changed digest resets the streak (recorded in
+ * `.opencode/state/heartbeat.json`). `null` (off) passes through.
+ */
+export function effectiveFrequencyMs(baseMs: number | null, noopStreak: number): number | null {
+  if (baseMs === null) return null
+  return baseMs * backoffMultiplier(noopStreak)
+}
+
+export type WakeInput = {
+  /** autonomy.level hot-read; L0 disables the loop entirely (frequency ignored). */
+  level: number
+  /** frequencyToMs() hot-read; null = off. */
+  frequencyMs: number | null
+  /** last tick epoch ms; null/0 = never ticked → overdue → fires once soon after boot. */
+  lastTickMs: number | null
+  nowMs: number
+}
+
+/**
+ * Pure due math for one wake (plan §12.1 steps 2-3):
+ *
+ *   L0 or frequency off → HEARTBEAT_WAKE_CAP_MS (sleep on, re-check in ≤60s)
+ *   not yet due         → min(remaining, cap)  (coalesces missed ticks — the
+ *                        remaining window is recomputed from last_tick, so a
+ *                        long outage fires once, never a replayed backlog)
+ *   due (or overdue)    → 0
+ */
+export function computeWakeDelayMs(input: WakeInput): number {
+  if (input.level <= 0 || input.frequencyMs === null) return HEARTBEAT_WAKE_CAP_MS
+  if (input.lastTickMs === null || input.lastTickMs <= 0) return 0
+  const remaining = input.lastTickMs + input.frequencyMs - input.nowMs
+  if (remaining <= 0) return 0
+  return Math.min(remaining, HEARTBEAT_WAKE_CAP_MS)
+}
+
+// ---------------------------------------------------------------------------
+// In-progress lock (plan §12.1 step 4): `.opencode/state/heartbeat.lock`, an
+// exclusive-create file holding { pid, acquired_ms }. A TUI-embedded server
+// and a separate `opencode serve` can each load this plugin, so the
+// in-process single-flight flag alone is not enough — the file lock is the
+// cross-instance gate. Overrun semantics: a held lock skips the tick.
+
+export type HeartbeatLock = { pid: number; acquired_ms: number; acquired_at: string }
+
+/** Unreadable/malformed is stale (steal); an old acquired_ms is stale. */
+export function isHeartbeatLockStale(
+  lock: HeartbeatLock | null,
+  nowMs: number,
+  staleMs: number = HEARTBEAT_LOCK_STALE_MS,
+): boolean {
+  if (!lock) return true
+  if (!Number.isFinite(lock.acquired_ms)) return true
+  return nowMs - lock.acquired_ms >= staleMs
+}
+
+async function readHeartbeatLock(file: string): Promise<HeartbeatLock | null> {
+  try {
+    const text = await atomicRead(file)
+    const parsed = JSON.parse(text) as HeartbeatLock
+    if (!parsed || typeof parsed.acquired_ms !== "number") return null
+    return { pid: Number(parsed.pid) || 0, acquired_ms: parsed.acquired_ms, acquired_at: String(parsed.acquired_at ?? "") }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Try to acquire the heartbeat lock. Returns the lock on success, null when a
+ * fresh lock is held by someone else (skip tick) or on an unexpected IO error.
+ * A stale lock is stolen once; if the steal races another stealer, the loser
+ * returns null (their next wake retries).
+ */
+export async function acquireHeartbeatLock(file: string, nowMs: number = Date.now()): Promise<HeartbeatLock | null> {
+  const lock: HeartbeatLock = {
+    pid: process.pid,
+    acquired_ms: nowMs,
+    acquired_at: new Date(nowMs).toISOString(),
+  }
+  // The state dir may not exist yet (first run on a fresh project).
+  await mkdir(dirname(file), { recursive: true }).catch(() => {})
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(file, "wx")
+      try {
+        await fh.writeFile(JSON.stringify(lock))
+      } finally {
+        await fh.close()
+      }
+      return lock
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null
+      const held = await readHeartbeatLock(file)
+      if (!isHeartbeatLockStale(held, nowMs)) return null // fresh → overrun skip
+      await unlink(file).catch(() => {})
+    }
+  }
+  return null
+}
+
+/** Release the lock; a missing file is already released (never throws). */
+export async function releaseHeartbeatLock(file: string): Promise<void> {
+  await unlink(file).catch(() => {})
+}
+
+// ---------------------------------------------------------------------------
+// `heartbeat:` config block (kanban card E, missions-plan §7): the per-tick
+// ledger's log keys live in their own top-level section — same shape as
+// `knowledge:`, `retrieval:`, `profile:` — plus the scheduler's kill switch.
+// This is NOT the nested `autonomy.heartbeat:` dial block: `extractBlock`
+// anchors at column 0, so the indented autonomy block never matches here.
+
+export type HeartbeatConfig = {
+  /** Kill switch: false → the loop sleeps on the wake cap (hot, no restart). */
+  enabled: boolean
+  /** A tick whose gap since the previous tick is ≥ factor × frequency feeds the
+   *  `long_silence` mood event (§7); 0 disables the feed. */
+  long_silence_factor: number
+  // Per-tick NDJSON ledger, one line per tick; leaf under <log>.
+  log: string
+  log_rotate_bytes: number
+  log_keep_generations: number
+  log_retention_days: number
+  log_compress: boolean
+  log_compress_after: number
+  log_compress_level: number
+  log_rotate_by: string
+}
+
+export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
+  enabled: true,
+  long_silence_factor: 3,
+  log: "heartbeat.log",
+  log_rotate_bytes: 1048576,
+  log_keep_generations: 5,
+  log_retention_days: 90,
+  log_compress: true,
+  log_compress_after: 1,
+  log_compress_level: 6,
+  log_rotate_by: "size",
+}
+
+const HEARTBEAT_KEYS = new Set(Object.keys(DEFAULT_HEARTBEAT_CONFIG))
+
+const HEARTBEAT_COERCE = sectionCoercer({ valueTyped: true, intPattern: /^-?\d+$/ })
+
+/** Parse a top-level `heartbeat:` block out of sysop-config.yaml text. */
+export function parseHeartbeatConfig(yamlText: string): Partial<HeartbeatConfig> {
+  return parseFlatBlock(yamlText, "heartbeat", {
+    knownKeys: HEARTBEAT_KEYS,
+    coerce: HEARTBEAT_COERCE,
+  }) as Partial<HeartbeatConfig>
+}
+
+/** Effective `heartbeat:` config (file overlay on the defaults). Never throws. */
+export async function readHeartbeatConfig(directory: string): Promise<HeartbeatConfig> {
+  return readSection(directory, "heartbeat", DEFAULT_HEARTBEAT_CONFIG, {
+    coerce: HEARTBEAT_COERCE,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Error fields for the per-tick ledger (shared error-logging pass 2026-10-14):
+// a failing tick records WHERE it failed and the full error, so the ledger is
+// a troubleshooting surface, not just an outcome counter.
+
+export const HEARTBEAT_PHASES = ["pre-gate", "digest", "dispatch", "mission", "post"] as const
+export type HeartbeatPhase = (typeof HEARTBEAT_PHASES)[number]
+
+export type HeartbeatError = {
+  /** Which stage of the tick failed. */
+  phase: HeartbeatPhase
+  name: string
+  message: string
+  stack?: string
+  code?: string | number
+}
+
+const STACK_MAX_CHARS = 2048
+
+function truncate(text: string): string {
+  return text.length > STACK_MAX_CHARS ? text.slice(0, STACK_MAX_CHARS) + "…[truncated]" : text
+}
+
+/** Build the persisted error record for a thrown value at a given phase. */
+export function heartbeatErrorFields(phase: HeartbeatPhase, err: unknown): HeartbeatError {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code
+    const fields: HeartbeatError = { phase, name: err.name, message: err.message }
+    if (err.stack) fields.stack = truncate(err.stack)
+    if (typeof code === "string" || typeof code === "number") fields.code = code
+    return fields
+  }
+  return { phase, name: "NonError", message: errText(err) }
+}

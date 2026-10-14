@@ -12,6 +12,7 @@ import {
   buildMoodLine,
   clampArousal,
   clampValence,
+  createMoodFeed,
   decay,
   defaultMoodState,
   describe,
@@ -159,7 +160,11 @@ test("buildMoodLine renders a compact [mood] directive", () => {
 test("readMoodState falls back to a default on a missing file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mood-"))
   const s = await readMoodState(join(dir, "nope.json"))
-  assert.deepEqual(s, defaultMoodState())
+  const d = defaultMoodState()
+  // `since` is stamped from the clock per call — compare it for shape, not
+  // equality, so a 1ms tick between the two `nowIso()` calls can't flake.
+  assert.deepEqual({ ...s, since: "(clock)" }, { ...d, since: "(clock)" })
+  assert.match(s.since, /^\d{4}-\d{2}-\d{2}T/)
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -184,5 +189,95 @@ test("readMoodState clamps out-of-range persisted values", async () => {
   const read = await readMoodState(file)
   assert.equal(read.valence, 1)
   assert.equal(read.arousal, 0)
+  await rm(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// createMoodFeed — the shared apply entry point (card E, missions-plan §7)
+
+test("createMoodFeed: apply decays, applies, persists and journals before/after", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "moodfeed-"))
+  const file = join(dir, "mood.json")
+  const entries: any[] = []
+  const feed = await createMoodFeed({
+    file,
+    halfLife: "6h",
+    logger: { append: async (e) => void entries.push(e) },
+  })
+
+  await feed.apply("mission_failure")
+  const onDisk = JSON.parse(await readFile(file, "utf8"))
+  assert.ok(onDisk.valence < 0) // 0 → -0.08
+  assert.equal(feed.get().valence, onDisk.valence)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].event, "mission_failure")
+  assert.equal(entries[0].valence_before, 0)
+  assert.ok(entries[0].valence_after < 0)
+  assert.equal(typeof entries[0].ts, "string")
+  assert.equal(typeof entries[0].label_after, "string")
+
+  await feed.apply("engaged")
+  assert.equal(entries.length, 2)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("createMoodFeed: realizeDecay persists without journaling; get/view never mutate", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "moodfeed-"))
+  const file = join(dir, "mood.json")
+  const entries: any[] = []
+  const feed = await createMoodFeed({
+    file,
+    halfLife: "6h",
+    logger: { append: async (e) => void entries.push(e) },
+  })
+
+  const before = feed.get().arousal
+  const view = feed.view()
+  assert.equal(feed.get().arousal, before) // view is read-only
+  assert.equal(entries.length, 0)
+
+  await feed.realizeDecay()
+  assert.equal(entries.length, 0) // no event, no journal line
+  const onDisk = JSON.parse(await readFile(file, "utf8"))
+  assert.equal(typeof onDisk.arousal, "number")
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("createMoodFeed: a journal failure reaches onError and never throws", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "moodfeed-"))
+  const file = join(dir, "mood.json")
+  const errors: unknown[] = []
+  const feed = await createMoodFeed({
+    file,
+    halfLife: "6h",
+    logger: {
+      append: async () => {
+        throw new Error("journal down")
+      },
+    },
+    onError: (err) => void errors.push(err),
+  })
+  await feed.apply("engaged") // resolves despite the journal throw
+  assert.equal(errors.length, 1)
+  assert.match(String((errors[0] as Error).message), /journal down/)
+  // The state write happened before the journal — the mood still landed.
+  const onDisk = JSON.parse(await readFile(file, "utf8"))
+  assert.ok(onDisk.valence > 0)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("createMoodFeed: concurrent applies serialize through the queue", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "moodfeed-"))
+  const file = join(dir, "mood.json")
+  const entries: any[] = []
+  const feed = await createMoodFeed({
+    file,
+    halfLife: "6h",
+    logger: { append: async (e) => void entries.push(e) },
+  })
+  await Promise.all([feed.apply("engaged"), feed.apply("engaged"), feed.apply("engaged")])
+  assert.equal(entries.length, 3) // no lost update, no interleaving
+  const onDisk = JSON.parse(await readFile(file, "utf8"))
+  assert.ok(onDisk.valence > 0)
   await rm(dir, { recursive: true, force: true })
 })

@@ -42,7 +42,7 @@ import { readAutonomyConfig } from "./lib/autonomy.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
 import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
-import { LOG_DEFAULTS, getLogger } from "./lib/logging.ts"
+import { LOG_DEFAULTS, createDiagnostics, getLogger } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 
@@ -86,6 +86,7 @@ export default (async (ctx) => {
     { ...LOG_DEFAULTS, file: "autonomy-gate.log" },
     { logDir, home: homedir(), channel: "autonomy-gate" },
   )
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "autonomy-gate", hook: "autonomy-gate" })
 
   // Cached child lookup (lib/sessions.ts). No client (tests) = no child
   // detection = fail closed: every session is gated like a human session.
@@ -144,7 +145,10 @@ export default (async (ctx) => {
         class_overrides: cfg.class_overrides,
         root_classes: cfg.root_classes,
       }
-    } catch {
+    } catch (err) {
+      // Fail-closed to L0 — but never silently: a broken config read that
+      // downgrades the dial is exactly the kind of failure ops needs to see.
+      void diag.warn("[autonomy-gate] config hot-read failed, failing closed to L0:", err)
       return { level: 0, gate_mode: "gate", gate_scope: "main", batch_max_actions: 0, session_grant: "off", session_grant_ttl: 0, enforcement: "per-command", class_overrides: [], root_classes: [] }
     }
   }
@@ -165,8 +169,10 @@ export default (async (ctx) => {
           const t = taskBySession.get((input as { sessionID?: string })?.sessionID ?? "")
           if (t) output.system.push(taskDirective(t, cfg.level))
         }
-      } catch {
-        // A missing/broken transform output must never break the session.
+      } catch (err) {
+        // A missing/broken transform output must never break the session —
+        // logged so a silently missing autonomy directive is diagnosable.
+        void diag.warn("[autonomy-gate] system transform failed:", err)
       }
     },
 
@@ -183,8 +189,9 @@ export default (async (ctx) => {
         clearSessionGrant(sessionGrants, input.sessionID)
         try {
           await logger.append({ ts: new Date(now).toISOString(), event: "session-grant-revoke" })
-        } catch {
+        } catch (err) {
           // Logging must never break the turn.
+          void diag.warn("[autonomy-gate] log append failed (session-grant-revoke):", err)
         }
         return
       }
@@ -205,8 +212,9 @@ export default (async (ctx) => {
                 target: rec.target,
                 grant_mode: cfg.session_grant,
               })
-            } catch {
+            } catch (err) {
               // Logging must never break the turn.
+              void diag.warn("[autonomy-gate] log append failed (session-grant-mint):", err)
             }
           }
         }
@@ -230,8 +238,9 @@ export default (async (ctx) => {
                 budget: Math.min(cfg.batch_max_actions, entries.length),
               })
             }
-          } catch {
+          } catch (err) {
             // A manifest read failure never breaks the confirm path.
+            void diag.warn("[autonomy-gate] batch manifest read failed:", err)
           }
         }
       } else {
@@ -322,7 +331,9 @@ export default (async (ctx) => {
         })
       } catch (err) {
         // Instrumentation failure: shadow passes (never blocks), gate fails
-        // closed to an ask.
+        // closed to an ask. Persist the failure — gate-mode embeds it in the
+        // thrown message, but shadow mode would otherwise lose it entirely.
+        void diag.error("[autonomy-gate] instrumentation failure:", err)
         if (mode !== "gate") return
         throw new Error(
           askMessage({ reason: `instrumentation failure (${err instanceof Error ? err.message : String(err)})`, cls: "borderline" }, level),
@@ -406,8 +417,10 @@ export default (async (ctx) => {
               mode,
             })
             if (approved) return
-          } catch {
-            // closed polarity never throws; fall through fail-closed anyway.
+          } catch (err) {
+            // closed polarity never throws; fall through fail-closed anyway —
+            // but a decision-gate fault must still leave a trail.
+            void diag.warn("[autonomy-gate] JEV escalation failed, falling through to ask:", err)
           }
         }
         // 5. Ask: record latest-only (with its class + target), then block

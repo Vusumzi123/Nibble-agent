@@ -4,6 +4,149 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-14
+
+### Added
+
+- **Heartbeat engine (kanban card 4, `docs/heartbeat-missions-plan.md`)** — the
+  in-process mission scheduler (settled D-M9, §12): one self-rescheduling
+  `setTimeout` loop in `heartbeat-hook.ts` that lives and dies with the opencode
+  server plugin — no systemd unit, no separate process; the delay is recomputed
+  each wake so config applies hot (wake capped 60s while a dial changes).
+  - **Deterministic digest, zero LLM** — `lib/heartbeat.ts` `computeDigest`
+    (backlog `pendingCount`, unconsumed turns, audit failures, staleness ages,
+    `isQuietNow()`), candidate build (`enabled ∧ menus ∧ min_level ∧
+    candidacy`), frequency × mood bias with the `dispatch_influence` kill
+    switch, and an hour-bucketed `digest_hash` (B7 groundwork).
+  - **Missions as files (card A)** — `lib/missions.ts` frontmatter parser +
+    never-throws loader; built-ins ship as `.opencode/missions/*.md` (dropping
+    a new `.md` in needs no code change and applies on the next tick; deleting
+    one removes it from the candidate set). `autonomy.missions` config overlay
+    is restrict-only (disable always, `min_level` raise, `frequency` toward
+    low, `menus` narrow — widen attempts rejected, logged once to
+    `autonomy-config.log`, file value stands); `quiet.dream_missions` +
+    `NIGHT_MENU` removed — per-mission `menus:` is the only night-menu source.
+    `.opencode/missions/**` is self-improve: writes ask at L1–L3, JEV at L4,
+    never session-grantable.
+  - **JEV digest decision (card C)** — `decisions.digest` section in
+    `decision-prompts.yaml` → typed verdict `no_reply | mission:<id>`
+    (fail-closed to `no_reply`), brief = fixed prompt + verdict + mission body
+    with `agent:` passthrough.
+  - **Scheduler + lock (card D)** — hot-read of level/frequency/kill switch;
+    L0/`off` sleep on the cap; all-quiet ∧ ≤L2 pre-gate ends the tick as
+    `NO_REPLY` with zero LLM calls; single-flight flag + file lock at
+    `<state>/heartbeat.lock` (stale steal, overrun skip) so only one mission
+    runs at a time even under parallel instances; a tick runs as a child
+    session (`session.create` + `promptAsync`, resolved on `session.idle`,
+    15 min abandon).
+  - **Outcome ledger (card E)** — every tick journaled to `<log>/heartbeat.log`
+    (ts, tick, digest_hash, level, quiet, candidates, bias, verdict, mission,
+    outcome, token_cost, mood_event) through the shared logging engine
+    (`heartbeat:` block); a completed mission appends to `backlog.ndjson` with
+    `source: "heartbeat"` and a populated `result.token_cost`, then a one-way
+    view refresh; mood events (`mission_failure`, `long_silence`) feed a shared
+    `createMoodFeed` entry point.
+  - Tests: 618/618 green (`lib/missions.test.ts`, `lib/heartbeat.test.ts`,
+    `lib/heartbeat-hook.test.ts` + gate/prompt cases); all nine §10 acceptance
+    criteria verified (kanban card F).
+
+- **Quiet-hours dream system (kanban card G, `docs/autonomy-harness-plan.md`
+  §17)** — sleep state + in-process dream timer on the D-M9/§13 pattern
+  (systemd retired 2026-10-13):
+  - **Sleep state machine** — `lib/sleep.ts` + `<state>/sleep.json`
+    (`awake ↔ dreaming → woken → resume_cooldown → dreaming`) with disjoint
+    writers per §17.1: `dream-hook.ts` owns window/cooldown transitions
+    (`fell_asleep` on window start; `well_rested` only when the window ends
+    from `dreaming`; nightly count and backoff reset on window start);
+    `sleep-hook.ts` owns user-turn transitions only.
+  - **`sleep-hook.ts`** — a top-level `chat.message` while `isQuietNow()`
+    flips `dreaming → woken` (stamps `woken_at`, resets the backoff streak,
+    feeds the `woken` mood event) and injects the `[wake]` block (dream-since
+    + mood snapshot) through `experimental.chat.system.transform`; later turns
+    refresh the activity timestamp so `resume_cooldown` measures from the LAST
+    message. Child sessions and turns outside the window never wake.
+  - **`dream-hook.ts`** — self-rescheduling `setTimeout` loop (60 s wake cap,
+    hot config) sharing `.opencode/state/heartbeat.lock` with the heartbeat
+    (D5: one autonomous item at a time) and journaling to
+    `<log>/heartbeat.log` as `event: "dream-tick"`, `source: "dream"` (§17.8:
+    dream token costs ride the heartbeat ledger). Cheapest-first pipeline:
+    reconcile → window/status gate (zero cost) → due check with the §17.8
+    backoff → lock → deterministic pre-gate → one mission.
+  - **Night pre-gate, zero LLM (§17.3)** — two new D-M8 candidacy predicates
+    in `lib/heartbeat.ts`/`lib/missions.ts`: `turns-pending` (drain offered
+    iff unconsumed turns exist — shipped `drain.md` switched to it) and
+    `dream-gate` (`status == dreaming` ∧ `quiet.dream_chance` roll ∧
+    `quiet.nightly_dream_cap`, roll outcome journaled through the new
+    `onDreamGate` seam). No candidates ⇒ `NO_REPLY` with **no JEV call**; one
+    survivor ⇒ deterministic dispatch (the §17.10 sole-candidate short-circuit
+    — a failed roll with pending turns still runs drain); two or more ⇒ JEV
+    digest choice. The heartbeat itself ends ticks at the new `sleep` gate
+    (`quiet ∧ status == dreaming` → `NO_REPLY`, zero LLM, §17.2).
+  - **Tool-free dreamer** — `.opencode/agents/dreamer.md` + `agent.dreamer`
+    in `opencode.json` denying every execution tool (read/write/edit/bash/
+    task/glob/grep/webfetch/websearch/temporal_search — permission-matrix
+    test); `.opencode/missions/dream.md` ships `menus: [night]`,
+    `candidacy: dream-gate`, `agent: dreamer` (the shipped night set is now
+    `drain` + `dream`).
+  - **Outcome disposal (§17.5–17.6)** — the hook parses the dreamer's typed
+    JSON (tolerant; a model-invented `mood_delta` is ignored), appends
+    `<vault>/Kael Dreams.md` with a parseable one-line `<!-- dream: … -->`
+    metadata comment (id/created/tone/mood before-after/seeds/hash), and
+    applies the §17.7 tone→delta through the shared mood feed — the LLM never
+    writes mood. Malformed outcomes are skipped with a logged valence wobble
+    and nothing half-written. Hybrid seeds (recent turn + one random vault
+    note) are gathered hook-side and injected into the fixed dream prompt.
+  - **Brakes (§17.8 + B7)** — pre-JEV roll (a failed roll costs zero LLM),
+    `nightly_dream_cap` (counts dispatched dreams), adaptive backoff
+    30m → 60m → 120m at 2 consecutive no-ops (`quiet.backoff`), reset by any
+    executed mission, a wake, or window start; and the **B7 day twin**
+    (missions-plan §7): identical-digest `NO_REPLY` streaks stretch the
+    heartbeat day cadence ×2/×4 (`effectiveFrequencyMs`, `noop_hash`/
+    `noop_streak` in `heartbeat.json`), reset on mission execution — the
+    first behavioural use of the recorded `digest_hash`.
+  - Tests: 662/662 green (`lib/sleep.test.ts`, `lib/dream.test.ts`,
+    `lib/sleep-hook.test.ts`, `lib/dream-hook.test.ts` + predicate/B7/wake
+    cases in `lib/heartbeat.test.ts`, `lib/heartbeat-hook.test.ts`,
+    `lib/missions.test.ts`); §17.12 acceptance verified — the `idea-express`
+    criterion is N/A (idea-hook still unported to Nibble).
+- **Troubleshooting-grade error logging** — errors and exceptions now persist
+  with enough context to debug, end to end:
+  - `diagnostics.log` lines are structured: `hook`, `errName`, truncated
+    `stack` (~2KB), `code`, and a flattened `cause` chain are recorded per
+    `error`/`warn` (was: concatenated message string, no stack, no hook).
+  - A once-only, log-only `uncaughtException`/`unhandledRejection` handler is
+    installed with the first `createDiagnostics()` call (skipped under
+    `node:test`), so a plugin crash leaves a durable trail.
+  - Log-write failures are no longer console-only: the default `onError`
+    persists to `<log>/logging-fallback.log` (rate-limited ≤5/min) in
+    addition to the console.
+  - Shared engine (`lib/logfile.ts`): rotation/compression/retention/marker
+    failures were 100% silent — they now reach the channel's `onError`
+    phase-tagged (`append`, `rotate`, `compress`, `retention`, `marker`,
+    `unlink`, `rename`), and a throwing `onError` handler is surfaced as a
+    double fault instead of swallowed.
+  - Formerly silent catches now log (all fail-open, never block a turn):
+    `autonomy-gate.ts` (config hot-read → L0, system transform, grant/batch
+    log appends, instrumentation failure, JEV escalation), `state.ts` (corrupt
+    state file → `[state]` warn via `onError`; missing file stays silent),
+    `backlog.ts` (first malformed NDJSON line reported with line number),
+    `audit-hook.ts` (autonomy level read failure), `wikilink-guard.ts`
+    (repair/verify/sweep/snapshot I/O failures; `ENOENT` stays silent).
+- **Heartbeat ledger error fields** (`lib/heartbeat.ts`,
+  `heartbeat-hook.ts`) — the per-tick ledger is now a troubleshooting
+  surface: `heartbeatErrorFields()` + `HeartbeatPhase`
+  (pre-gate/digest/dispatch/mission/post) record *where* a tick failed as
+  `error: {phase, name, message, stack, code}` on the tick line — mission
+  provider failures (synthesized from the response), digest decision faults,
+  and a previously **silent** outer tick failure (now one
+  `outcome: "error"`, `reason: "tick-error"` ledger line, best-effort).
+
+### Fixed
+
+- **Flaky mood test** — `readMoodState falls back to a default` compared two
+  independently clock-stamped `since` values (1ms race); it now compares
+  shape and validates the timestamp format instead.
+
 ## 2026-10-12
 
 ### Added

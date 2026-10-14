@@ -26,13 +26,14 @@ config warn-once behaviour).
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
 | `knowledge:` | `knowledge-hook.ts` → `lib/knowledge.ts` |
 | `backlog:` | `knowledge-hook.ts` (drain fallback) → `lib/backlog.ts` |
-| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the knowledge / retrieval / profile hooks and by `autonomy-gate.ts` |
+| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the knowledge / retrieval / profile hooks, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
 | `retrieval:` | `retrieval-hook.ts` → `lib/retrieval.ts` |
 | `browser:` | `web-scan-hook.ts` → `lib/browser.ts` (scanner: `lib/injection.ts`) |
 | `profile:` | `profile-hook.ts` (spawns `profile-writer`) |
 | `telemetry:` | `telemetry-hook.ts` → `lib/telemetry.ts`; also `web-scan-hook.ts` for inner fetches |
 | `autonomy:` | `lib/autonomy.ts` + `autonomy-gate.ts` |
 | `mood:` | `mood-hook.ts` → `lib/mood.ts` |
+| `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process scheduler + per-tick ledger) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
 | `dashboard:` | `lib/autonomy.ts` (config plumbing only) |
@@ -171,8 +172,16 @@ Typed-decision "System 1" provider (JEV).
 
 **Backend.** `.opencode/scripts/openjevserver.py` + `decisions_bridge.py`, a
 stateless stdin/stdout subprocess. The TypeScript side (`lib/decisions.ts`,
-loaded by knowledge-hook, retrieval-hook, profile-hook and the autonomy-gate
-plugin through `lib/decision-gate.ts`) reads this block live.
+loaded by knowledge-hook, retrieval-hook, profile-hook, `heartbeat-hook.ts`
+and the autonomy-gate plugin through `lib/decision-gate.ts`) reads this block
+live.
+
+> **Disclaimer — the heartbeat mission system is directly dependent on this
+> module.** The JEV digest choice is the only path that can dispatch a mission;
+> with `enabled: false` the heartbeat keeps ticking and journaling
+> (`reason: decisions-disabled`, `token_cost: 0`) but never runs one. A
+> `rules` provider still counts as enabled — it is the model-backed
+> `openjev` that is optional, not the gate itself.
 
 **Modes.**
 
@@ -423,7 +432,48 @@ Nested under `autonomy:`, **not** top-level.
 | `dream_token_budget` | hard per-tick cap (K tokens). |
 | `nightly_dream_cap` | max dreams per night. |
 | `backoff` | 30 → 60 → 120 m on consecutive no-ops. |
-| `dream_missions` | strict night whitelist (§17.4). |
+
+The night menu is **per-mission `menus:` frontmatter** (`.opencode/missions/*.md`)
+only — `dream_missions` was removed with the mission loader (missions-plan §5,
+D-M4). Shipped set after dark: `drain` + `dream` (card 6).
+
+### `missions:` — restrict-only mission overlay (missions-plan §6)
+
+Nested under `autonomy:`, one block per mission id (`.opencode/missions/<id>.md`).
+Config may only RESTRICT what the mission file declares (D-M5):
+
+| Key | Rule |
+| --- | ---- |
+| `enabled` | `false` always honoured; `true` can never re-enable a file-disabled mission. |
+| `min_level` | may only be **raised** above the file's value; lower → rejected + logged, file stands. |
+| `frequency` | may only move toward `low` (rarer); higher → rejected + logged, file stands. |
+| `menus` | may only be **narrowed**; adding a window → rejected + logged, file stands. |
+
+Rejected keys are logged once per process to `<log>/autonomy-config.log`.
+
+---
+
+## `heartbeat:`
+
+In-process scheduler + per-tick outcome ledger (`heartbeat-hook.ts`,
+missions-plan §7/§12 — cards D+E). Distinct from the nested
+`autonomy.heartbeat:` dial (frequency / in-progress lock) — `extractBlock`
+anchors at column 0, so the two never collide.
+
+| Key | Meaning |
+| --- | ------- |
+| `enabled` | kill switch. `false` → the loop sleeps on the 60 s wake cap (hot; no restart). Also parks the dream timer — one lock, one engine (card G shares `heartbeat.lock` and this switch). |
+| `long_silence_factor` | a tick whose gap since the previous tick is ≥ factor × frequency feeds the `long_silence` mood event; `0` disables the feed. |
+| `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
+| `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `knowledge:`. Read once at plugin init. |
+
+Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every
+tick. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`
+with `result.token_cost` filled and refreshes the derived view one-way.
+B7 day-side backoff (missions-plan §7): consecutive `no_reply` ticks on an
+identical `digest_hash` stretch the day cadence ×2 at streak 2 and ×4 at 3+
+(`noop_hash`/`noop_streak` in `<state>/heartbeat.json`); a mission execution or
+a changed digest resets it — the day twin of the `quiet.backoff` ladder.
 
 ---
 

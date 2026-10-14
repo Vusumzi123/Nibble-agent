@@ -8,6 +8,7 @@
 // map onto one `LogSettings`. New criteria (compression, time rotation) are read
 // with the same naming convention in every section, so no section invents its
 // own rotation code.
+import { appendFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { expandHome } from "./paths.ts"
@@ -90,10 +91,40 @@ export function resolveLogPath(logDir: string, leaf: string, home: string = home
   return isAbsolute(expanded) ? expanded : join(logDir, expanded)
 }
 
+// Rate limiter for the log-write fallback path: a dead disk must not turn
+// into an append storm. Sliding one-minute window, max 5 persisted lines;
+// further failures still hit the console but the file write is skipped.
+const FALLBACK_WINDOW_MS = 60_000
+const FALLBACK_MAX_PER_WINDOW = 5
+let fallbackWindowStart = 0
+let fallbackCount = 0
+
+// Persist a log-write failure to a dedicated fallback file (next to the other
+// logs) so errors survive the TUI scrollback. Best-effort, never throws, and
+// rate-limited — a failing volume degrades to console-only after the cap.
+function fallbackAppend(logDir: string, channel: string, err: unknown): void {
+  const now = Date.now()
+  if (now - fallbackWindowStart > FALLBACK_WINDOW_MS) {
+    fallbackWindowStart = now
+    fallbackCount = 0
+  }
+  if (fallbackCount >= FALLBACK_MAX_PER_WINDOW) return
+  fallbackCount++
+  const line = JSON.stringify({
+    ts: new Date(now).toISOString(),
+    event: "log-write-failed",
+    channel,
+    error: err instanceof Error ? err.message : String(err),
+  })
+  void appendFile(join(logDir, "logging-fallback.log"), line + "\n", "utf8").catch(() => {})
+}
+
 export type LoggerOptions = {
   logDir: string
   home?: string
   channel?: string
+  /** Hook/owner label written into diagnostics lines for correlation. */
+  hook?: string
   rotationEntry?: (ts: string) => Record<string, unknown>
   onError?: (err: unknown) => void
 }
@@ -117,8 +148,10 @@ export function createLogger(settings: LogSettings, opts: LoggerOptions): Channe
     onError:
       opts.onError ??
       ((err) => {
-        // A logger must never take the pipeline down; surface to the TUI only.
+        // A logger must never take the pipeline down; surface to the TUI and
+        // persist (rate-limited) so the failure survives the scrollback.
         console.error(`[${channel}] log write failed:`, err)
+        fallbackAppend(opts.logDir, channel, err)
       }),
   })
 }
@@ -152,10 +185,63 @@ function stringifyArg(value: unknown): string {
   }
 }
 
+const STACK_MAX_CHARS = 2048
+
+function truncate(text: string): string {
+  return text.length > STACK_MAX_CHARS ? text.slice(0, STACK_MAX_CHARS) + "…[truncated]" : text
+}
+
+function causeChain(err: Error): string | undefined {
+  const parts: string[] = []
+  let cause: unknown = err.cause
+  let depth = 0
+  while (cause !== undefined && cause !== null && depth < 5) {
+    parts.push(cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause))
+    cause = cause instanceof Error ? cause.cause : undefined
+    depth++
+  }
+  return parts.length ? parts.join(" <- ") : undefined
+}
+
+// Structured fields for the first Error (or Error-like) argument, so a
+// diagnostics line carries the stack, code, and cause chain — not just the
+// bare message. Undefined when no Error is present.
+function errorFields(args: unknown[]): Record<string, unknown> {
+  const err = args.find((a): a is Error => a instanceof Error)
+  if (!err) return {}
+  const code = (err as { code?: unknown }).code
+  const fields: Record<string, unknown> = {
+    errName: err.name,
+    stack: truncate(err.stack ?? ""),
+  }
+  if (typeof code === "string" || typeof code === "number") fields.code = code
+  const cause = causeChain(err)
+  if (cause) fields.cause = cause
+  return fields
+}
+
 export type Diagnostics = {
   error: (...args: unknown[]) => Promise<void>
   warn: (...args: unknown[]) => Promise<void>
   info: (...args: unknown[]) => Promise<void>
+}
+
+// Once-only process-level safety net: log-only (no exit-behavior change), so
+// an uncaught exception in any hook leaves a durable trail in
+// diagnostics.log instead of vanishing with the crash. Skipped under the
+// node:test runner, which installs its own handlers.
+let processHandlersInstalled = false
+
+function installProcessHandlers(diag: Diagnostics): void {
+  if (processHandlersInstalled) return
+  if (process.env.NODE_TEST_CONTEXT) return
+  processHandlersInstalled = true
+  process.on("uncaughtException", (err) => {
+    void diag.error("[process] uncaughtException", err)
+  })
+  process.on("unhandledRejection", (reason) => {
+    void diag.error("[process] unhandledRejection", reason)
+  })
 }
 
 // Bridge hook diagnostics to both destinations: the original console output
@@ -170,12 +256,17 @@ export function createDiagnostics(opts: LoggerOptions): Diagnostics {
     else if (level === "warn") console.warn(...args)
     else console.log(...args)
     const msg = args.map(stringifyArg).join(" ")
-    await logger.append({ ts: new Date().toISOString(), event: "diagnostic", level, msg })
+    const entry: Record<string, unknown> = { ts: new Date().toISOString(), event: "diagnostic", level, msg }
+    if (opts.hook) entry.hook = opts.hook
+    Object.assign(entry, errorFields(args))
+    await logger.append(entry)
   }
 
-  return {
+  const diag: Diagnostics = {
     error: (...args) => emit("error", args),
     warn: (...args) => emit("warn", args),
     info: (...args) => emit("info", args),
   }
+  installProcessHandlers(diag)
+  return diag
 }

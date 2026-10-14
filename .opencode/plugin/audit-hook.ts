@@ -67,7 +67,7 @@ export default (async ({ directory }) => {
   if (!audit.enabled) return {}
 
   const STATE_FILE = join(stateDir, "audit-hook.json")
-  const diag = createDiagnostics({ logDir, home: homedir(), channel: "audit-hook" })
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "audit-hook", hook: "audit-hook" })
   // sessionID -> agent name, populated from `chat.message` (input.agent).
   const sessionAgent = new Map<string, string>()
 
@@ -108,8 +108,9 @@ export default (async ({ directory }) => {
       let autonomy_level: number | null = null
       try {
         autonomy_level = (await readAutonomyConfig(dir)).level
-      } catch {
+      } catch (err) {
         autonomy_level = null
+        void diag.warn("[audit-hook] autonomy config read failed, stamping null:", err)
       }
 
       let entry

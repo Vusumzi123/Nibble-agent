@@ -7,6 +7,7 @@
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
 // never loaded as a plugin itself.
 import { atomicRead, atomicWrite } from "./fsx.ts"
+import { errText, isEnoent } from "./util.ts"
 
 export type StateStore<T> = {
   read(): Promise<T>
@@ -19,11 +20,31 @@ export function createStateStore<T extends object>(
   defaults: T,
   opts?: { onError?: (err: unknown) => void },
 ): StateStore<T> {
+  const warnRead = (err: unknown): void => {
+    // A missing/empty file is the normal first-run case; a parse or I/O
+    // failure is silent data loss and must be surfaced (still fail-open
+    // to defaults so the hook turn never breaks).
+    const wrapped = new Error(`[state] failed to read ${file}, using defaults: ${errText(err)}`, {
+      cause: err,
+    })
+    if (opts?.onError) opts.onError(wrapped)
+    else console.warn(wrapped.message)
+  }
+
   const read = async (): Promise<T> => {
+    let raw: string
     try {
-      const parsed = JSON.parse(await atomicRead(file))
+      raw = await atomicRead(file)
+    } catch (err) {
+      if (!isEnoent(err)) warnRead(err)
+      return { ...defaults }
+    }
+    if (raw.trim() === "") return { ...defaults }
+    try {
+      const parsed = JSON.parse(raw)
       return { ...defaults, ...parsed }
-    } catch {
+    } catch (err) {
+      warnRead(err)
       return { ...defaults }
     }
   }

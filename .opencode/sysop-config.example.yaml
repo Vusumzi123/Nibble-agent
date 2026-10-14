@@ -1,84 +1,37 @@
-# EXAMPLE configuration — tracked safe-to-share template.
-# Copy to `sysop-config.yaml` (setup.sh does this for you) and adjust to
-# your setup. The real sysop-config.yaml is gitignored: it holds your local
-# settings.
-#
-# Knowledge-agent settings — shared by the hooks and sub-agents.
-# Readers: knowledge-hook / lib/knowledge.ts (knowledge: + paths:),
-# retrieval-hook / lib/retrieval.ts (retrieval: + decisions: + paths:),
-# profile-hook / lib/profile.ts (profile: + decisions: + paths:),
-# lib/decisions.ts via all three hooks (decisions: + paths:),
-# lib/decision-gate.ts via all three hooks (decisions: + paths:),
-# audit-hook / lib/audit.ts (audit: + paths:),
-# telemetry-hook / lib/telemetry.ts (telemetry: + paths:); web-scan-hook also
-# reads telemetry: for its inner-fetch usage record,
-# web-scan-hook / lib/browser.ts (browser: + paths:),
-# lib/autonomy.ts (autonomy: + mood: + comms: + dashboard: + paths:),
-# autonomy-gate plugin (autonomy: + decisions: + paths: + decision-prompts),
-# scoped-permissions.ts (paths:), vault-readonly-guard.ts + wikilink-guard.ts
-# (vault: + paths:). Other sections are ignored by each reader.
-#
-# Every structured hook log is written through the shared engine
-# (lib/logfile.ts + lib/logging.ts). Per-section `log_*` keys (bare `*` keys
-# under a block) configure one normalized shape:
-#   rotate_bytes          size trigger (bytes); <= 0 disables
-#   keep_generations      rotated generations kept (`log.1` .. `log.N`)
-#   retention_days        delete rotated files older than this; <= 0 disables
-#   compress              gzip rotated generations
-#   compress_after        newest N rotated gens stay plain
-#   compress_level        zlib level 1-9
-#   rotate_by             size | daily | weekly (UTC)
-#
-# Canonical path roots — the ONLY place the vault and log directory names
-# live. Every section below stores a LEAF path relative to one of these roots
-# (absolute or ~ paths are honored as overrides).
-#
-#   vault:    resolved against the repo root  (e.g. <repo>/Brain)
-#   diagrams: resolved against the repo root  (diagram-developer write scope)
-#   log:      resolved against the repo root  (every NDJSON channel log:
-#             audit, telemetry, hook ledgers; gitignored)
-#   state:    resolved against the repo root  (project-local transient state:
-#             the knowledge memory buffer + tag index + hook state JSON;
-#             gitignored)
-#
-# Everything is project-scoped — no home-wide directory — so two projects on
-# one machine never share an audit trail or a state file.
+# EXAMPLE configuration — tracked safe-to-share template. Copy to
+# `sysop-config.yaml` (setup.sh does this) and adjust. Key semantics, optional
+# keys, reader map: docs/sysop-config-reference.md. Keep blocks <= 3 lines.
+
 paths:
+  # Canonical path roots — the ONLY place vault/log/state/diagrams names live.
+  # Every other path is a LEAF relative to these roots (absolute/~ honored).
   vault: Brain
   diagrams: diagrams
   log: .opencode/logs
   state: .opencode/state
 
 vault:
-  # Agent-forbidden, user-write-only folders under <vault>. The agent may READ
-  # them but must NEVER create/update/delete inside them — the user owns the
-  # content and edits it in Obsidian. Enforced deterministically at the tool
-  # boundary by vault-readonly-guard.ts (native edit/write/apply_patch + the
-  # markdown-vault MCP vault tool), and honored by wikilink-guard.ts, whose
-  # repair/idle sweeps skip these folders. Comma-separated, vault-relative.
+  # Agent-forbidden, user-write-only folders (comma-separated, vault-relative).
+  # The agent reads but never writes; enforced by vault-readonly-guard.ts.
   readonly: Journal
 
 audit:
-  # L5 audit trail (audit-hook.ts + lib/audit.ts). Every `bash` command the
-  # agents execute is appended on `tool.execute.after` — deterministic, no LLM —
-  # after secret redaction (lib/audit.ts `redact`). Rotation/compression/
-  # retention use the BARE keys below (no `log_` prefix).
+  # L5 audit trail: every bash command appended on tool.execute.after, redacted,
+  # deterministic, no LLM (audit-hook.ts + lib/audit.ts). BARE rotation keys.
   enabled: true
   log: audit.log              # under <log> -> .opencode/logs/audit.log
-  rotate_bytes: 10485760     # 10 MB — rotate when active log reaches this
-  keep_generations: 5        # keep audit.log.1 .. audit.log.5 (shift-and-rename)
-  retention_days: 90         # delete any rotated file older than this
-  compress: true             # gzip rotated generations (bare keys, no log_ prefix)
+  rotate_bytes: 10485760     # 10 MB
+  keep_generations: 5        # audit.log.1 .. audit.log.5 (shift-and-rename)
+  retention_days: 90         # delete rotated files older than this
+  compress: true             # gzip rotated generations
   compress_after: 1          # keep audit.log.1 plain, gzip older
   compress_level: 6
   rotate_by: size            # size | daily | weekly
 
 knowledge:
   enabled: true
-  # Single project-local JSON Lines buffer of un-consumed conversation turns.
-  # Owned by knowledge-hook (the only writer); rag-search reads it via the
-  # temporal_search tool. `memory_file` / `tag_index_file` are LEAVES under
-  # <state> -> .opencode/state/.
+  # Turn buffer: one JSON Lines file of unconsumed turns, written only by
+  # knowledge-hook; rag-search reads it via temporal_search. Leaves under <state>.
   memory_file: memory.json
   tag_index_file: tag-index.json
   min_ready_turns: 3         # start an ingestion cycle at this many unconsumed turns
@@ -87,9 +40,8 @@ knowledge:
   max_attempts: 3            # quarantine a turn after N failed drains; 0 = never
   drain_max_tokens: 150000   # aggregate token cap per cycle (chars/4)
   drain_cooldown_ms: 60000   # min gap between ingestion cycles
-  # Conservative deterministic per-turn prefilter: only unambiguously trivial
-  # turns (small, no code/command/config/URL/path, no question, both sides
-  # filler) are auto-pruned without an LLM. Anything borderline ingests.
+  # Deterministic prefilter: only unambiguously trivial turns are auto-pruned
+  # without an LLM; anything borderline ingests.
   skip_triage: true
   skip_triage_max_bytes: 800
   # Keyword-prefetched candidate notes handed to the ingestion child per cycle.
@@ -97,24 +49,16 @@ knowledge:
   # Capture-time decision tagging (tag choice + salience score).
   tag_gate: true
   tag_candidates: 8
-  # Deterministic changelog guard (docs/log-split-plan.md): a consolidation
-  # child that consolidates anything MUST append to this vault-relative
-  # changelog (`## [YYYY-MM-DD] op | title`, newest last). The hook proves it
-  # via write receipts, re-asks once on a miss, then appends a mechanical
-  # fallback entry so the log is never incomplete. log.md is the ONLY vault
-  # file the hook may write (append-only).
+  # Changelog guard: a consolidating child MUST append to meta/log.md
+  # (`## [YYYY-MM-DD] op | title`); proven via write receipts + fallback append.
   log_file: meta/log.md
   log_guard: true
-  # Deterministic drain-prompt digest: compress turns older than the last
-  # `digest_verbatim_tail` ones to extracted atoms (questions, decision
-  # sentences, wikilinks, URLs, paths, flags), capped at `digest_max_chars`
-  # per side. Set digest: false to revert to fully verbatim prompts.
+  # Drain-prompt digest: older turns compress to extracted atoms; the last
+  # digest_verbatim_tail turns stay verbatim. false = fully verbatim prompts.
   digest: true
   digest_verbatim_tail: 2
   digest_max_chars: 1200
-  # Per-cycle NDJSON ledger (tokens/cost/steps/outcome). `log` is a LEAF under
-  # <log> -> .opencode/logs/. Written through the shared logging engine (see
-  # the header).
+  # Per-cycle NDJSON ledger (tokens/cost/steps/outcome); leaf under <log>.
   log: knowledge-hook.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5
@@ -125,10 +69,8 @@ knowledge:
   log_rotate_by: size
 
 backlog:
-  # Machine-readable action queue (card 3, plan §5). Canonical store at
-  # <state>/backlog.ndjson (one JSON object per line); the derived human view
-  # at <vault>/Backlog.md is regenerated one-way from it — never hand-edited.
-  # Owned by lib/backlog.ts; the only Phase-2 producer is the knowledge drain.
+  # Action queue: canonical store <state>/backlog.ndjson; the human view
+  # <vault>/Backlog.md is regenerated one-way from it — never hand-edit.
   enabled: true
   file: backlog.ndjson        # LEAF under <state> -> .opencode/state/
   view_file: Backlog.md       # LEAF under <vault> -> Brain/Backlog.md
@@ -136,60 +78,20 @@ backlog:
   max_view: 200               # max entries rendered per status section in the view
 
 decisions:
-  # Typed-decision "System 1" provider. Backend is
-  # .opencode/scripts/openjevserver.py + decisions_bridge.py (a stateless
-  # stdin/stdout subprocess). The TS side (lib/decisions.ts, loaded by
-  # knowledge-hook, retrieval-hook and profile-hook through
-  # lib/decision-gate.ts) reads this block live.
-  #   mode: shadow — verdicts are recorded to the ledger, never gate.
-  #   mode: gate   — knowledge-hook lets the model skip (delete) confidently-
-  #                  trivial sessions during drain triage; retrieval-hook
-  #                  suppresses a turn's Brain-First search when judged
-  #                  self-contained. Fail-open / fail-closed semantics are
-  #                  per-hook (see the retrieval: block).
-  #
-  # Default: provider `rules` — deterministic TypeScript heuristics, no
-  # external process, works out of the box. To use the model-backed provider,
-  # set provider: openjev and pick a model from `opencode models`: its endpoint
-  # and API key are resolved from opencode's own models.json / auth.json, so no
-  # base_url/api_key_file is needed (setup.sh prompts for the model).
+  # Typed-decision JEV provider (openjevserver.py + decisions_bridge.py),
+  # read live via lib/decisions.ts + lib/decision-gate.ts. Providers, local
+  # backends and optional keys: docs/sysop-config-reference.md#decisions
   enabled: true               # master on/off — gates only when true
-  mode: gate                   # shadow | gate  (live gating — see header comment)
+  mode: gate                   # shadow | gate
   provider: rules              # rules | openjev
-  # `model` is the ONLY provider setting for backend:"" — the provider id is
-  # the prefix before the first "/". Advanced overrides (custom/local/SDK-only
-  # providers):
-  # model: deepseek/deepseek-chat   # opencode spec: <provider>/<model>
-  # api_provider: ""           # provider id when `model` has no <provider>/ prefix
-  # Local backends (setup.sh options 3/4; model = the bare Ollama tag):
-  #   backend: ollama  — Ollama native /api/chat first-token logprobs; a small
-  #                      instruct model (e.g. qwen2.5:3b). `think: false`
-  #                      (default) is required — a thinking model burns the
-  #                      only sampled token on its reasoning trace.
-  #   backend: clef    — Ollama's System One decision API (/v1/systemone) with
-  #                      a Clef decision model (setup.sh creates the lean
-  #                      clef-flash-2k variant). Answers arrive as native
-  #                      per-option probabilities — the calibrated choice;
-  #                      ~0.2-0.6s local.
-  #   base_url:        — endpoint for either (default http://127.0.0.1:11434)
-  # backend: llamacpp          # force the local llama.cpp backend
-  # base_url: ""               # pin an endpoint (no /v1 suffix)
-  # transport: chat            # chat | completion (llama.cpp only)
-  # api_key_file: ""           # chmod-600 key file instead of opencode auth.json
-  # auth_file: ""              # override path to opencode auth.json
-  # models_file: ""            # override path to opencode models.json
-  temperature_scaling: 1.00    # identity for clef (native probabilities); must stay
-                               # 1.0 for the self-reported tiers (uncalibrated)
+  temperature_scaling: 1.00    # identity for clef; must stay 1.0 for self-reported tiers
   abstain_threshold: 0.45
   noul_threshold: 0.80         # gates skip only when model p >= this
   timeout_ms: 30000            # per-call subprocess timeout
   n_probs: 20                  # candidate token depth (unused by the structured tier)
-  structured_max_tokens: 512   # JSON-mode output budget for openjev — must cover
-                               # the reasoning trace + the answer; a smaller cap
-                               # starves reasoning models (empty content -> abstain)
+  structured_max_tokens: 512   # JSON-mode budget — must cover reasoning + answer
   fallback: rules              # on error/abstain/timeout -> deterministic rules
-  # Shadow ledger — one NDJSON line per decision. `ledger` is a LEAF
-  # under <log>. Written through the shared logging engine (see the header).
+  # Shadow ledger, one NDJSON line per decision; leaf under <log>.
   ledger: decisions.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5
@@ -200,29 +102,18 @@ decisions:
   log_rotate_by: size
 
 retrieval:
-  # Per-turn "self-RAG" retrieval gate (retrieval-hook.ts). On EVERY user turn
-  # a `noul` decision asks whether the message is self-contained and needs no
-  # vault search. Unlike the drain gate this one is FAIL-CLOSED: an error, a
-  # timeout, or an abstain means NO retrieval (economy-first). The prose prior
-  # (the assertion in prompts_file) is deliberately weighted toward "do not
-  # retrieve" unless the message clearly refers to stored knowledge.
-  #   gate: true  — a confident skip suppresses the Brain-First rag-search for
-  #                 that turn and injects an authoritative [brain-first] block.
-  #   gate: false — shadow mode: verdicts are logged, but every turn retrieves.
-  # Explicit retrieval intent ("search my notes", "do you remember…") always wins
-  # over the model when force_intent is true, protecting accuracy where it counts.
+  # Per-turn self-RAG gate (retrieval-hook.ts). FAIL-CLOSED: an error, timeout
+  # or abstain means no retrieval. gate: false = shadow (logged, always retrieves).
   enabled: true
   gate: true
   noul_threshold: 0.80         # skip only when model p("no retrieval needed") >= this
   timeout_ms: 30000            # per-turn decision subprocess timeout
   max_bytes: 4000              # only the head of the user message is judged
-  summary_words: 400           # target length of the rag-search CONTENT synthesis (answer-first)
+  summary_words: 400           # target length of the rag-search synthesis (answer-first)
   force_intent: true           # deterministic explicit-intent override -> retrieve
   inject: true                 # push the [brain-first] directive into the system prompt
-  prompts_file: .opencode/decision-prompts.yaml  # JEV question texts (retrieval.assertion); ~/absolute honored
-  # Per-turn NDJSON ledger. `log` is a LEAF under <log>; written through the
-  # shared logging engine (see the header). One line per decision, with the
-  # eventual gate action.
+  prompts_file: .opencode/decision-prompts.yaml  # JEV question texts; ~/absolute honored
+  # Per-turn NDJSON ledger, one line per decision; leaf under <log>.
   log: retrieval.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5
@@ -234,15 +125,11 @@ retrieval:
 
 browser:
   # Deterministic web injection scan for webfetch/websearch (web-scan-hook).
-  # Read once at plugin startup; changing values takes effect on restart.
-  # The scanner itself is lib/injection.ts (shared with the future mail hook);
-  # lib/browser.ts owns this block + the web-specific policy transform.
+  # Read once at startup — restart to apply. Scanner: lib/injection.ts.
   enabled: true              # master on/off — false disables the web scan
-  injection_policy: flag     # flag = annotate+fence; block = additionally withhold instruction-family hits
-  max_scan_bytes: 200000     # cap on bytes scanned per tool result (larger output is scanned only up to this head)
-  # Full scan findings (family/severity/snippet) go here, not into the agent's
-  # context. `scan_log` is a LEAF under <log>; written through the shared
-  # logging engine (see the header).
+  injection_policy: flag     # flag = annotate+fence; block = also withhold instruction-family hits
+  max_scan_bytes: 200000     # cap on bytes scanned per tool result (head only)
+  # Full scan findings go here, not into the agent's context; leaf under <log>.
   scan_log: web-scan.log
   log_rotate_bytes: 1048576  # 1 MB
   log_keep_generations: 5
@@ -253,42 +140,15 @@ browser:
   log_rotate_by: size
 
 profile:
-  # Persona + user context as prompt-style instructions (profile-hook.ts). Two
-  # jobs, both gated by `enabled`:
-  #   1. inject — on the first turn of each top-level session, the two vault
-  #      instruction notes are appended to the system prompt as directives
-  #      (agent persona/behavior + user working context). Injected throughout
-  #      the first turn, then cached/disabled until the session ends. Reads use
-  #      <vault> + the leaf paths below.
-  #   2. decide — at session.idle, a JEV `choice` decision (profile-hook ->
-  #      lib/decision-gate.ts -> lib/decisions.ts) asks whether the latest turn
-  #      carries durable new info for either profile note. Only a confident,
-  #      non-fallback verdict that names a note triggers an update; the update
-  #      body is drafted by a short-lived `profile-writer` child (small model)
-  #      and written directly by the plugin (atomic rename). Fail-open: a
-  #      fallback/abstain never writes. `log` is a
-  #      LEAF under <log>; rotation mirrors the other hooks.
-  #
-  #      Visibility: an NDJSON log, one line per event. Below-threshold turns
-  #      log `profile-cooldown`; a pass that clears the gate emits one terminal
-  #      `profile-pass` line whose `result` answers "did it update?" (updated /
-  #      no-op / no-update / update-failed / prefilter-skip / no-transcript /
-  #      decision-fallback / decision-abstain). Every event from one pass shares
-  #      a `pass` id (p<N>), so a full pass can be grouped. Human view:
-  #        jq -c 'select(.event=="profile-pass")' .opencode/logs/profile-hook.log
-  #
-  #      Reviewer: after the writer drafts a note, a second JEV `noul` gate
-  #      (`review`) checks the additions are durable and globally applicable,
-  #      rejecting session-specific or one-off task decisions before any write;
-  #      a date-only draft is a `no-op`. Its assertion, plus the choice
-  #      instructions/criteria, live in `prompts_file` (JSON) so update
-  #      frequency + precision are tunable without touching the TypeScript.
+  # Persona + user context (profile-hook.ts): first-turn prompt injection, plus
+  # an idle JEV decision that may update the two notes via a profile-writer
+  # child (fail-open) behind a reviewer gate. Log vocabulary: reference doc.
   enabled: true
   agent_file: Agent.md         # under <vault> (absolute paths honored)
   user_file: User.md           # under <vault>
   inject: true                 # first-turn system-prompt injection
-  inject_max_bytes: 4000       # per-note cap on injected content (frontmatter/Related already stripped)
-  refresh_every_turns: 5       # re-inject the full profile block every N turns (persona fade); rebuilt from disk; 0 disables
+  inject_max_bytes: 4000       # per-note cap (frontmatter/Related already stripped)
+  refresh_every_turns: 5       # re-inject the block every N turns (persona fade); 0 disables
   decide: true                 # idle JEV decision + conditional update
   cooldown_turns: 3            # min top-level idle turns between profile decisions
   decision_turns: 3            # last N session turns handed to the decision + writer
@@ -296,11 +156,9 @@ profile:
   skip_triage: true            # skip the decision on trivial-chatter turns
   skip_triage_max_bytes: 800   # mirrors knowledge.skip_triage_max_bytes
   writer_agent: profile-writer # generation child (see .opencode/agents/profile-writer.md)
-  # writer_model: provider/model  # profile-writer child model; when omitted the
-  #                               # writer agent's own default model applies
   child_timeout_ms: 90000      # max wait for the writer child to reply
-  note_max_bytes: 6000         # writer hard budget; draft rejected above this (note is injected, must stay lean)
-  prompts_file: .opencode/profile-prompts.json  # choice instructions/criteria + reviewer assertion (project-relative; ~ or absolute honored)
+  note_max_bytes: 6000         # writer hard budget; draft rejected above this
+  prompts_file: .opencode/profile-prompts.json  # choice criteria + reviewer assertion
   review: true                 # post-draft durability/globalness gate before write
   review_threshold: 0.60       # noul pTrue needed to accept a drafted update
   log: profile-hook.log        # under <log>
@@ -313,15 +171,8 @@ profile:
   log_rotate_by: size
 
 telemetry:
-  # Retrieval/comms usage telemetry (telemetry-hook.ts + lib/telemetry.ts; also
-  # read by web-scan-hook.ts). Deterministic NDJSON usage records for the
-  # expensive delegation paths. Contract: logging only, zero behavior change,
-  # no LLM, no prompt text or full URLs in the ledger.
-  #   rag-search delegations    -> brain_log  (one line per Brain-First turn)
-  #   browser delegations       -> web_log    (`web-task`)
-  #      inner webfetch/websearch -> web_log  (`web-fetch`)
-  # Both channels share one rotation policy via the BARE keys below (the audit:
-  # pattern). Leaves are relative to <log>; absolute or ~ paths are honored.
+  # NDJSON usage ledgers for expensive delegations (telemetry-hook.ts).
+  # Logging only — zero behavior change, no LLM, no prompt text or full URLs.
   enabled: true                # master on/off — false disables both ledgers
   watch_agents: rag-search,safe-browser,deep-browser  # measured `task` delegates
   brain_log: rag-search.log
@@ -334,37 +185,26 @@ telemetry:
   compress_level: 6
   rotate_by: size
 
-# ---------------------------------------------------------------------------
-# Autonomy harness (docs/autonomy-harness-plan.md §11). The autonomy gate
-# (kanban card 2 — plugin/autonomy-gate.ts) reads `level` + `gate_mode` +
-# `gate_scope` hot every turn and enforces the level matrix at
-# tool.execute.before; the JEV borderline escalation also reads `decisions:`
-# and `.opencode/decision-prompts.yaml`.
-# lib/mood.ts (card 5), the dashboard backend (cards 8/11), and the comms
-# bridges (card 10) are the future readers of their blocks. Every value is
-# hot-read per call — flipping one takes effect immediately, no restart. An
-# invalid value falls back to its code default and warns once per process in
-# <log>/autonomy-config.log (NDJSON).
+# Autonomy harness config plumbing (docs/autonomy-harness-plan.md §11). Values
+# are hot-read per call — no restart; invalid values fall back to code defaults
+# and warn once in <log>/autonomy-config.log. Details: docs reference.
 autonomy:
   level: 3                     # 0..4 capability dial (§4.1); code default 1
-  gate_mode: gate              # shadow | gate — kill switch: shadow logs without blocking, gate enforces
-  gate_scope: main             # main | all — main: Task sub-agents face only the floor; all: gate everyone
+  gate_mode: gate              # shadow | gate — kill switch: logs only vs enforces
+  gate_scope: main             # main | all — main: sub-agents face only the floor
   heartbeat:
     frequency: 12h             # off | <n>m | <n>h — manual only (§4.2)
     in_progress_lock: true
   mission_token_budget: 32000  # K-tokens per mission turn, or `unlimited` (§6.4)
   root_classes: []             # L4 root allowlist; irreversibility floor applies first
   # `kind:name:class` triples mapping external tools/sub-agents into the level
-  # matrix. `tool:` names may end in `*` (prefix glob). Classes:
-  #   pure-read, readonly-bash, vault-write, project-write, subagent-read,
-  #   subagent-web, subagent-web-deep, subagent-write, destructive, root,
-  #   self-improve, borderline. Anything NOT listed stays outside the schema.
+  # matrix; `tool:` names may end in `*`. Class list: reference doc.
   class_overrides: []          # e.g. [tool:my-mcp_*:vault-write, subagent:my-agent:subagent-write]
   batch:                       # per-turn manifest approval
-    max_actions: 8             # grant budget per confirmed ```autonomy-batch; 0 = one-shot approvals only
-  session_grant: off           # off | target | class — session-wide approval on "allow session" (floor/root/self-improve never covered)
-  session_grant_ttl: 0         # minutes until a session grant expires; 0 = session lifetime (cleared on restart)
-  enforcement: per-task        # per-command | per-task — per-task (default): ONE JEV task classification per user turn, the agent asks to proceed, opencode natively governs the commands (floor still applies)
+    max_actions: 8             # grant budget per confirmed autonomy-batch; 0 = one-shot only
+  session_grant: off           # off | target | class — floor/root/self-improve never covered
+  session_grant_ttl: 0         # minutes until a session grant expires; 0 = session lifetime
+  enforcement: per-task        # per-command | per-task — one JEV classification per turn
   chatter:                     # idle chatter mission (§16) — off until card 7b
     enabled: false
     max_pokes: 3
@@ -379,13 +219,35 @@ autonomy:
     dream_token_budget: 8000   # hard per-tick cap (K tokens)
     nightly_dream_cap: 3
     backoff: true              # 30->60->120m on consecutive no-ops
-    dream_missions: [drain, dream]   # strict night whitelist (§17.4)
+    # night menu: per-mission `menus:` frontmatter only (missions-plan §5) —
+    # `dream_missions` removed with the mission loader (card A)
+  missions:                    # restrict-only overlay (missions-plan §6)
+    # staleness:                # one block per mission id
+    #   enabled: false          # disable is always honoured
+    #   min_level: 3            # may only be raised above the file's value
+    #   frequency: low          # may only move toward low (rarer)
+    #   menus: [day]            # may only be narrowed, never widened
+
+heartbeat:                      # in-process scheduler + per-tick ledger (§12, cards D+E)
+  enabled: true                 # kill switch: false = the loop sleeps (hot, ≤60s)
+  long_silence_factor: 3        # tick gap ≥ factor × frequency -> long_silence mood
+                                # event (§7); 0 disables the feed
+  # Per-tick NDJSON ledger, one line per tick (verdict/outcome/token_cost/…);
+  # leaf under <log>, shared rotation engine keys below.
+  log: heartbeat.log
+  log_rotate_bytes: 1048576
+  log_keep_generations: 5
+  log_retention_days: 90
+  log_compress: true
+  log_compress_after: 1
+  log_compress_level: 6
+  log_rotate_by: size
 
 mood:                          # feeling system (§15) — card 5 reads this
   dispatch_influence: true     # bounded + ledger-journaled; false = expression only
   decay_half_life: 6h
 
-soul:                          # first-person identity + journal (soul-hook) — self-model card reads this
+soul:                          # first-person identity + journal (soul-hook)
   enabled: true
   soul_file: Soul.md           # under <vault> (absolute paths honored)
   journal_file: Agent Journal.md

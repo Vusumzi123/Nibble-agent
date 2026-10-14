@@ -108,6 +108,22 @@
         "webfetch": "allow"
       }
     },
+    "dreamer": {
+      "mode": "subagent",
+      "color": "#B39DDB",
+      "permission": {
+        "read": "deny",
+        "write": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "temporal_search": "deny"
+      }
+    },
     "deep-browser": {
       "mode": "subagent",
       "color": "#26C6DA",

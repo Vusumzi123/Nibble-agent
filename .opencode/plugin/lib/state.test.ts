@@ -27,6 +27,29 @@ test("read returns defaults when the file is corrupt", async () => {
   assert.deepEqual(await store.read(), DEFAULTS)
 })
 
+test("a corrupt state file surfaces the failure through onError (never silent)", async () => {
+  const dir = await tempDir()
+  const file = join(dir, "bad.json")
+  await writeFile(file, "{ not json")
+  const errors: unknown[] = []
+  const store = createStateStore<Demo>(file, DEFAULTS, { onError: (err) => errors.push(err) })
+  assert.deepEqual(await store.read(), DEFAULTS)
+  assert.equal(errors.length, 1)
+  const err = errors[0] as Error
+  assert.match(err.message, /\[state\] failed to read/)
+  assert.match(err.message, /bad\.json/)
+})
+
+test("a missing state file does NOT warn through onError (normal first run)", async () => {
+  const dir = await tempDir()
+  const errors: unknown[] = []
+  const store = createStateStore<Demo>(join(dir, "missing.json"), DEFAULTS, {
+    onError: (err) => errors.push(err),
+  })
+  assert.deepEqual(await store.read(), DEFAULTS)
+  assert.equal(errors.length, 0)
+})
+
 test("read merges persisted fields over defaults", async () => {
   const dir = await tempDir()
   const file = join(dir, "s.json")

@@ -11,11 +11,12 @@ import {
   DEFAULT_COMMS,
   DEFAULT_DASHBOARD,
   DEFAULT_MOOD,
-  NIGHT_MENU,
   clearRejectWarnCache,
+  parseMissionOverlay,
   readAutonomyConfig,
   readCommsConfig,
   readDashboardConfig,
+  readMissionOverlay,
   readMoodConfig,
 } from "./autonomy.ts"
 import { clearLoggerCache } from "./logging.ts"
@@ -63,7 +64,6 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     "    dream_token_budget: 4000",
     "    nightly_dream_cap: 1",
     "    backoff: false",
-    "    dream_missions: [dream]",
   ])
   const cfg = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
   assert.equal(cfg.level, 3)
@@ -87,7 +87,6 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     dream_token_budget: 4000,
     nightly_dream_cap: 1,
     backoff: false,
-    dream_missions: ["dream"],
   })
 })
 
@@ -156,7 +155,6 @@ test("invalid autonomy values fall back to defaults and report rejects", async (
     "  quiet:",
     "    window: 25:00-09:00",
     "    dream_chance: 1.5",
-    "    dream_missions: [drain, chatter]",
     "    backoff: maybe",
     "  heartbeat:",
     "    frequency: sometimes",
@@ -168,12 +166,11 @@ test("invalid autonomy values fall back to defaults and report rejects", async (
   assert.equal(cfg.mission_token_budget, DEFAULT_AUTONOMY.mission_token_budget)
   assert.equal(cfg.quiet.window, DEFAULT_AUTONOMY.quiet.window)
   assert.equal(cfg.quiet.dream_chance, DEFAULT_AUTONOMY.quiet.dream_chance)
-  assert.deepEqual(cfg.quiet.dream_missions, DEFAULT_AUTONOMY.quiet.dream_missions)
   assert.equal(cfg.quiet.backoff, DEFAULT_AUTONOMY.quiet.backoff)
   assert.equal(cfg.heartbeat.frequency, DEFAULT_AUTONOMY.heartbeat.frequency)
   assert.deepEqual(
     events.map((e) => e.path).sort(),
-    ["heartbeat.frequency", "level", "mission_token_budget", "quiet.backoff", "quiet.dream_chance", "quiet.dream_missions", "quiet.window", "typo_key"],
+    ["heartbeat.frequency", "level", "mission_token_budget", "quiet.backoff", "quiet.dream_chance", "quiet.window", "typo_key"],
   )
   assert.ok(events.every((e) => e.section === "autonomy"))
   // Absent keys are never rejected — only present-but-invalid ones.
@@ -257,13 +254,12 @@ test("a valid value after a fix stops generating rejects", async () => {
 
 test("readAutonomyConfig overlays the real sysop-config.yaml on defaults", async () => {
   const cfg = await readAutonomyConfig(PROJECT_ROOT, { onReject: () => assert.fail("live config rejects") })
-  assert.equal(cfg.level, 2)
+  assert.equal(cfg.level, 3)
   assert.equal(cfg.heartbeat.frequency, "12h")
   assert.equal(cfg.mission_token_budget, 32000)
   assert.deepEqual(cfg.root_classes, [])
   assert.equal(cfg.chatter.enabled, false)
   assert.equal(cfg.quiet.window, "23:00-08:00")
-  assert.deepEqual(cfg.quiet.dream_missions, ["drain", "dream"])
 
   const comms = await readCommsConfig(PROJECT_ROOT, { onReject: () => assert.fail("live config rejects") })
   assert.equal(comms.default_channel, "telegram")
@@ -275,10 +271,8 @@ test("readAutonomyConfig overlays the real sysop-config.yaml on defaults", async
 })
 
 test("defaults match the plan §11 / §17.11 tables", () => {
-  assert.equal(DEFAULT_AUTONOMY.level, 1) // safe code default; live config ships 2
+  assert.equal(DEFAULT_AUTONOMY.level, 1) // safe code default; live config ships 3
   assert.deepEqual(DEFAULT_AUTONOMY.quiet.window, "23:00-08:00")
-  assert.deepEqual(DEFAULT_AUTONOMY.quiet.dream_missions, [...NIGHT_MENU])
-  assert.deepEqual(NIGHT_MENU, ["drain", "dream"]) // §17.4 strict night whitelist
   assert.deepEqual([...AUTH_MODES], ["off", "login", "login+2fa"]) // §10
   assert.equal(DEFAULT_MOOD.decay_half_life, "6h")
   assert.equal(DEFAULT_DASHBOARD.bind_address, "127.0.0.1")
@@ -398,4 +392,99 @@ test("enforcement defaults to per-task, parses per-command, and fails closed on 
   const cfgInvalid = await readAutonomyConfig(invalid, { onReject: (e) => events.push(e.path) })
   assert.equal(cfgInvalid.enforcement, "per-task") // fail-closed to the default
   assert.deepEqual(events, ["enforcement"])
+})
+
+// ---------------------------------------------------------------------------
+// missions overlay — autonomy.missions.<id>.* (missions-plan §6, card A)
+
+test("readAutonomyConfig skips the two-level missions block without rejects", async () => {
+  const dir = await configDir([
+    "autonomy:",
+    "  level: 3",
+    "  missions:",
+    "    staleness:",
+    "      enabled: false",
+    "      min_level: 4",
+    "      bogus: hello",
+    "    drain:",
+    "      frequency: low",
+    "  quiet:",
+    '    window: "07:00-09:00"',
+  ])
+  const cfg = await readAutonomyConfig(dir, { onReject: () => assert.fail("missions block must be skipped") })
+  assert.equal(cfg.level, 3)
+  assert.equal(cfg.quiet.window, "07:00-09:00")
+})
+
+test("parseMissionOverlay parses per-id blocks and reports bad lines", () => {
+  const yaml = [
+    "autonomy:",
+    "  level: 3",
+    "  missions:",
+    "    staleness:",
+    "      enabled: false",
+    "      min_level: 3          # raise only",
+    "      frequency: low",
+    "      menus: [day]",
+    "    drain:",
+    "      enabled: true",
+    "    bad:",
+    "      level: 99             # not an overlay key",
+    "    strung: nope            # not a block",
+    "",
+  ].join("\n")
+  const { overlay, rejects } = parseMissionOverlay(yaml)
+  assert.deepEqual(overlay.staleness, { enabled: false, min_level: 3, frequency: "low", menus: ["day"] })
+  assert.deepEqual(overlay.drain, { enabled: true })
+  assert.deepEqual(overlay.bad, {})
+  assert.equal(overlay.strung, undefined)
+  assert.deepEqual(
+    rejects.map((r) => r.path).sort(),
+    ["missions.bad.level", "missions.strung"],
+  )
+})
+
+test("parseMissionOverlay rejects invalid values but keeps valid ones", () => {
+  const yaml = [
+    "autonomy:",
+    "  missions:",
+    "    staleness:",
+    "      min_level: 9",
+    "      frequency: sometimes",
+    "      menus: [weekend]",
+    "      enabled: maybe",
+    "      min_level_ok: nope    # unknown",
+    "",
+  ].join("\n")
+  const { overlay, rejects } = parseMissionOverlay(yaml)
+  assert.deepEqual(overlay.staleness, {})
+  assert.deepEqual(
+    rejects.map((r) => r.path).sort(),
+    [
+      "missions.staleness.enabled",
+      "missions.staleness.frequency",
+      "missions.staleness.menus",
+      "missions.staleness.min_level",
+      "missions.staleness.min_level_ok",
+    ],
+  )
+})
+
+test("parseMissionOverlay yields an empty overlay when missions is absent", () => {
+  assert.deepEqual(parseMissionOverlay("autonomy:\n  level: 3\n").overlay, {})
+  assert.deepEqual(parseMissionOverlay("").overlay, {})
+})
+
+test("readMissionOverlay hot-reads the overlay from a config dir", async () => {
+  const dir = await configDir([
+    "autonomy:",
+    "  missions:",
+    "    staleness:",
+    "      enabled: false",
+  ])
+  const ov = await readMissionOverlay(dir, { onReject: () => assert.fail("unexpected reject") })
+  assert.deepEqual(ov, { staleness: { enabled: false } })
+
+  const missing = join(await tmpDir(), "nope")
+  assert.deepEqual(await readMissionOverlay(missing), {})
 })

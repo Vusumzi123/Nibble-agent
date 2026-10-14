@@ -201,20 +201,20 @@ test("parseNestedSection splits scalars from one-level sub-blocks", () => {
     "    in_progress_lock: false  # comment",
     "  quiet:",
     '    window: "23:00-08:00"',
-    "    dream_missions: [drain, dream]",
+    "    extras: [one, two]",
     "",
   ].join("\n")
   const got = parseNestedSection(yaml, "autonomy", {
     scalarKeys: new Set(["level", "root_classes"]),
-    blockKeys: { heartbeat: new Set(["frequency", "in_progress_lock"]), quiet: new Set(["window", "dream_missions"]) },
+    blockKeys: { heartbeat: new Set(["frequency", "in_progress_lock"]), quiet: new Set(["window", "extras"]) },
     listKeys: new Set(["root_classes"]),
-    blockListKeys: new Set(["quiet.dream_missions"]),
+    blockListKeys: new Set(["quiet.extras"]),
     coerce: (path, raw) => ({ ok: true, value: `${path}=${raw}` }),
   })
   assert.deepEqual(got.scalars, { level: "level=2", root_classes: "root_classes=[]" })
   assert.deepEqual(got.blocks, {
     heartbeat: { frequency: "heartbeat.frequency=12h", in_progress_lock: "heartbeat.in_progress_lock=false" },
-    quiet: { window: 'quiet.window="23:00-08:00"', dream_missions: "quiet.dream_missions=[drain, dream]" },
+    quiet: { window: 'quiet.window="23:00-08:00"', extras: "quiet.extras=[one, two]" },
   })
   assert.deepEqual(got.rejects, [])
 })

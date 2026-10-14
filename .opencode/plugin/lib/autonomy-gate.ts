@@ -637,17 +637,25 @@ function classifyVault(tool: string, args: Record<string, unknown>): CallClass {
   return tool === VAULT_PREFIX + "view" ? "pure-read" : "vault-write"
 }
 
-// Self-improve paths: writes to .opencode/plugin/**, opencode.json, or
-// sysop-config.yaml (the sanctioned self-improve surfaces — plan §4.1; shell
-// mutation of opencode.json / sysop-config.yaml is the floor instead, see
-// floorDetail). sysop-config.yaml holds the autonomy dial, so editing it is
-// self-improve — otherwise the agent could raise its own level.
+// Self-improve paths: writes to .opencode/plugin/**, .opencode/missions/**,
+// opencode.json, or sysop-config.yaml (the sanctioned self-improve surfaces —
+// plan §4.1; shell mutation of opencode.json / sysop-config.yaml is the floor
+// instead, see floorDetail). sysop-config.yaml holds the autonomy dial, so
+// editing it is self-improve — otherwise the agent could raise its own level.
+// Mission files are self-improve too (missions-plan §8): without this a user
+// mission drop would be plain project-write — free at L3 — and the agent
+// could install its own autonomous missions without approval.
+// Session-grant exclusion follows automatically: mission writes classify as
+// `self-improve`, and SESSION_GRANT_EXCLUDED (below) never grants that class.
 function isSelfImprovePath(path: string): boolean {
   if (!path) return false
   const n = path.replace(/\\/g, "/")
   return (
     n.includes(".opencode/plugin/") ||
     n === ".opencode/plugin" ||
+    n.includes(".opencode/missions/") ||
+    n === ".opencode/missions" ||
+    n.endsWith("/.opencode/missions") ||
     n === "opencode.json" ||
     n.endsWith("/opencode.json") ||
     n === ".opencode/sysop-config.yaml" ||

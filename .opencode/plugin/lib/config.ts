@@ -13,6 +13,8 @@
 // autonomy-harness sections (autonomy:, mood:, comms:, dashboard:) — flat
 // scalars plus one level of sub-blocks, inline/block lists, and reject
 // reporting so invalid values can warn before falling back to defaults.
+// `skipBlocks` silences a known block whose subtree is parsed elsewhere
+// (autonomy.missions — the per-id overlay, read by lib/missions.ts).
 //
 // Loaded via relative import only. The plugin auto-discovery glob
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
@@ -203,7 +205,7 @@ export function parseFlatBlock(
 //
 // The harness sections (`autonomy:`, `mood:`, `comms:`, `dashboard:`) mix flat
 // scalars with one level of sub-blocks (`autonomy.quiet.window`), inline lists
-// (`root_classes: []`, `dream_missions: [drain, dream]`), and int-or-string
+// (`root_classes: []`, mission-overlay `menus: [day]`), and int-or-string
 // unions (`mission_token_budget: 32000 | unlimited`) — shapes `parseFlatBlock`
 // cannot represent. Same conventions as the flat parser (comment stripping,
 // known-keys filtering, never throws) but a coercion failure is RETURNED as a
@@ -244,6 +246,9 @@ export type NestedSectionOptions = {
   listKeys?: Set<string>
   /** `<block>.<key>` entries whose value is a YAML list. */
   blockListKeys?: Set<string>
+  /** Blocks whose entire subtree is ignored (parsed by a dedicated reader,
+   *  e.g. autonomy.missions.<id>.* — deeper than this parser supports). */
+  skipBlocks?: Set<string>
   /** Per-path coercion. Unknown keys are rejected before this is called. */
   coerce?: NestedCoerce
 }
@@ -316,6 +321,7 @@ export function parseNestedSection(
 
   let currentBlock: string | null = null
   let pendingList: { path: string; container: Record<string, unknown>; key: string; items: string[] } | null = null
+  let skipping: string | null = null
 
   const flushList = () => {
     if (pendingList === null) return
@@ -329,6 +335,10 @@ export function parseNestedSection(
     if (trimmed === "" || trimmed.startsWith("#")) continue
     const indent = line.length - line.trimStart().length
     if (indent < baseIndent) break
+    if (skipping !== null) {
+      if (indent > baseIndent) continue
+      skipping = null
+    }
 
     // List item under a pending `key:` list opener.
     const item = trimmed.match(LIST_ITEM_RE)
@@ -349,7 +359,10 @@ export function parseNestedSection(
       flushList()
       if (raw === "") {
         // Block or list opener, unknown key, or an empty non-list scalar.
-        if (opts.blockKeys && key in opts.blockKeys) {
+        if (opts.skipBlocks?.has(key)) {
+          currentBlock = null
+          skipping = key
+        } else if (opts.blockKeys && key in opts.blockKeys) {
           currentBlock = key
           out.blocks[key] = out.blocks[key] ?? {}
         } else if (opts.listKeys?.has(key)) {

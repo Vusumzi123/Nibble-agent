@@ -10,6 +10,9 @@ docs/*
 !docs/autonomy-integration.md
 !docs/sysop-config-reference.md
 
+# Kanban board (personal project management, local only)
+Boards/
+
 # Local config with personal values (generated from example, setup.sh)
 .opencode/sysop-config.yaml
 
