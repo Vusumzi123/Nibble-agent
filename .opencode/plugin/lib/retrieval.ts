@@ -1,5 +1,5 @@
 // Per-turn Self-RAG-style retrieval gate (docs/jev-decision-provider-plan.md
-// adjacent; Brain-first protocol, AGENTS.md §0).
+// adjacent; Brain-first protocol, AGENTS.md "Hard rules" — vault reads).
 //
 // Every user turn is asked one `noul` question — "this message is self-contained
 // and needs no vault search" — through the same typed-decision provider the
