@@ -3,7 +3,7 @@
   "instructions": ["AGENTS.md", "SETUP.md"],
   "subagent_depth": 2,
   "permission": {
-    "edit": "allow",
+    "edit": "ask",
     "bash": {
       "*": "allow"
     },
