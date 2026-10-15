@@ -62,6 +62,13 @@ export type KnowledgeConfig = {
   // Enforced by knowledge-hook (re-ask, then a mechanical fallback entry).
   log_file: string
   log_guard: boolean
+  // Deterministic changelog writer: the child reports a ```log summary and the
+  // hook appends it, rolling the oldest entries past `log_max_entries` into
+  // `log_archive` (a <state> leaf). `log_write: child` restores the legacy
+  // receipt + re-ask path.
+  log_write: string
+  log_max_entries: number
+  log_archive: string
   // Deterministic drain-prompt digest: compress turns older than the last
   // `digest_verbatim_tail` ones to extracted atoms (questions, decisions,
   // wikilinks, paths, URLs), capped at `digest_max_chars` per side.
@@ -96,6 +103,9 @@ export const DEFAULT_CONFIG: KnowledgeConfig = {
   tag_candidates: 8,
   log_file: "meta/log.md",
   log_guard: true,
+  log_write: "deterministic",
+  log_max_entries: 50,
+  log_archive: "changelog-archive.ndjson",
   digest: true,
   digest_verbatim_tail: 2,
   digest_max_chars: 1200,
@@ -142,6 +152,10 @@ export function resolveMemoryFile(stateDir: string, config: KnowledgeConfig): st
 
 export function resolveTagIndexFile(stateDir: string, config: KnowledgeConfig): string {
   return resolveStateLeaf(stateDir, config.tag_index_file)
+}
+
+export function resolveArchiveFile(stateDir: string, config: KnowledgeConfig): string {
+  return resolveStateLeaf(stateDir, config.log_archive)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +444,14 @@ export function buildDrainPrompt(
   sections.push(
     "`kind` is one of `task | idea | approval | notify | self-improve | mail-reply` (default `task`); `level_required` is the minimum autonomy level to run it solo (0–4, default 1); `links` are optional vault wikilinks. A turn belongs in EITHER `consolidated` OR `backlog`, never both.",
   )
+  sections.push("")
+  sections.push(
+    "If you consolidated AT LEAST ONE turn, also report the changelog summary using EXACTLY this block — do NOT write `meta/log.md` yourself; the hook appends it deterministically with today's date:",
+  )
+  sections.push("")
+  sections.push("```log")
+  sections.push('{"title": "Consolidation — Short Title", "body": "One or two sentences naming the notes you created or updated and why."}')
+  sections.push("```")
   sections.push("")
   sections.push(
     "List a turn in `consolidated` only if you wrote AND verified a durable note for it. List it in `backlog` only if it is a deferred action. List it in `skipped` if it held nothing worth saving. If you FAILED to process a turn, list it in NONE of the blocks and briefly explain the failure above. The plugin prunes every turn listed in any block and routes backlog items to the queue.",

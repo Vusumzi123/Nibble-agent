@@ -211,24 +211,31 @@ test("re-asks once when the child omits its outcome blocks, then prunes", async 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
   assert.deepEqual(await readMem(dir), [])
-  // The spawn prompt + the outcome re-ask + the log-guard re-ask (the mocked
-  // child never produces a meta/log.md write receipt).
-  assert.equal(client.calls.prompts.length, 3)
+  // The spawn prompt + the outcome re-ask. The deterministic changelog writer
+  // never re-asks: the re-reply omitted the ```log fence, so the hook appended
+  // a mechanical (auto) entry instead.
+  assert.equal(client.calls.prompts.length, 2)
   const events = await readLog(dir)
   assert.ok(events.some((e) => e.event === "ingest-reask"))
   const logGuard = events.find((e) => e.event === "log-guard")
   assert.ok(logGuard, "expected a log-guard ledger event")
-  assert.equal(logGuard.reasked, true)
+  assert.equal(logGuard.appended, true)
   assert.equal(logGuard.fallback, true)
   const ingest = events.find((e) => e.event === "ingest")
   assert.ok(ingest, "expected an ingest ledger event")
   assert.equal(ingest.outcome.failed, 0)
   assert.equal(ingest.reasked, true)
-  assert.deepEqual(ingest.logGuard, { reasked: true, fallback: true })
+  assert.deepEqual(ingest.logGuard, {
+    reasked: false,
+    appended: true,
+    fallback: true,
+    rotated: false,
+    archived: 0,
+  })
   assert.ok(typeof ingest.notes === "number")
 })
 
-test("log guard: child forgets the changelog -> re-ask, then a mechanical fallback entry", async () => {
+test("log: a child that reports no summary gets a mechanical fallback entry", async () => {
   automationChildSessions.clear()
   resetVerification()
   const dir = await freshProject()
@@ -243,28 +250,31 @@ test("log guard: child forgets the changelog -> re-ask, then a mechanical fallba
 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
-  // Spawn + one log-guard re-ask (outcome fences came back on the first reply).
-  assert.equal(client.calls.prompts.length, 2)
-  const reask = client.calls.prompts[1]
-  assert.match(String(reask?.body?.parts?.[0]?.text ?? ""), /meta\/log\.md/)
+  // Spawn prompt only — the deterministic writer never re-asks.
+  assert.equal(client.calls.prompts.length, 1)
 
   const logPath = join(dir, "Brain", "meta", "log.md")
   const logText = await readFile(logPath, "utf8")
   const today = new Date().toISOString().slice(0, 10)
   assert.match(logText, new RegExp(`^## \\[${today}\\] consolidation \\| batch #1, #2, #3 \\(auto\\)$`, "m"))
+  // A fresh file gets the default frontmatter head.
+  assert.match(logText, /^---\ntitle: Vault Changelog/m)
 
   const events = await readLog(dir)
   const guard = events.find((e) => e.event === "log-guard")
   assert.ok(guard)
-  assert.equal(guard.reasked, true)
+  assert.equal(guard.appended, true)
   assert.equal(guard.fallback, true)
+  assert.equal(guard.rotated, false)
 })
 
-test("log guard: child with a meta/log.md write receipt is not re-asked", async () => {
+test("log: the child's ```log summary is appended deterministically", async () => {
   automationChildSessions.clear()
   resetVerification()
   const dir = await freshProject()
-  const client = makeClient({ childReply: "done\n\n```consolidated\n#1\n#2\n#3\n```" })
+  const reply =
+    'done\n\n```consolidated\n#1\n#2\n#3\n```\n```log\n{"title":"Consolidation — Htop install","body":"Created the Htop note."}\n```'
+  const client = makeClient({ childReply: reply })
   const hooks = await createHook({ client, directory: dir } as any)
   await delay(20)
   await seedMemory(dir, [
@@ -272,23 +282,31 @@ test("log guard: child with a meta/log.md write receipt is not re-asked", async 
     memEntry(2, DURABLE_USER, DURABLE_ASSISTANT),
     memEntry(3, DURABLE_USER, DURABLE_ASSISTANT),
   ])
-  // Simulate the child having appended to the changelog during the drain.
-  recordWrite("ses_drain_child", join(dir, "Brain", "meta", "log.md"))
 
   await runIngest(hooks, "ses_parent", "ses_drain_child")
 
-  // Spawn prompt only — no log re-ask, no fallback file.
+  // Spawn prompt only — the summary came back with the outcome blocks.
   assert.equal(client.calls.prompts.length, 1)
-  assert.equal(existsSync(join(dir, "Brain", "meta", "log.md")), false)
+
+  const logPath = join(dir, "Brain", "meta", "log.md")
+  const logText = await readFile(logPath, "utf8")
+  const today = new Date().toISOString().slice(0, 10)
+  assert.match(logText, new RegExp(`^## \\[${today}\\] consolidation \\| Consolidation — Htop install$`, "m"))
+  assert.match(logText, /Created the Htop note\./)
 
   const events = await readLog(dir)
   const guard = events.find((e) => e.event === "log-guard")
   assert.ok(guard)
-  assert.equal(guard.reasked, false)
+  assert.equal(guard.appended, true)
   assert.equal(guard.fallback, false)
-  assert.ok(typeof guard.notes === "number")
   const ingest = events.find((e) => e.event === "ingest")
-  assert.deepEqual(ingest?.logGuard, { reasked: false, fallback: false })
+  assert.deepEqual(ingest?.logGuard, {
+    reasked: false,
+    appended: true,
+    fallback: false,
+    rotated: false,
+    archived: 0,
+  })
 })
 
 test("ingests a batch, prunes consumed turns, and logs the cycle", async () => {

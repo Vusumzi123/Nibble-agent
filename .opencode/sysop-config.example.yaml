@@ -49,10 +49,14 @@ knowledge:
   # Capture-time decision tagging (tag choice + salience score).
   tag_gate: true
   tag_candidates: 8
-  # Changelog guard: a consolidating child MUST append to meta/log.md
-  # (`## [YYYY-MM-DD] op | title`); proven via write receipts + fallback append.
+  # Changelog: the drain child reports a ```log summary; the hook writes
+  # meta/log.md deterministically and rolls old entries (past log_max_entries)
+  # into log_archive (a <state> leaf). log_write: child = legacy receipt path.
   log_file: meta/log.md
   log_guard: true
+  log_write: deterministic
+  log_max_entries: 50
+  log_archive: changelog-archive.ndjson
   # Drain-prompt digest: older turns compress to extracted atoms; the last
   # digest_verbatim_tail turns stay verbatim. false = fully verbatim prompts.
   digest: true

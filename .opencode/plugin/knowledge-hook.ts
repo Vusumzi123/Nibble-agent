@@ -35,6 +35,7 @@ import {
   parseSkipped,
   readKnowledgeConfig,
   recoverMislabeledConsolidated,
+  resolveArchiveFile,
   resolveMemoryFile,
   resolveTagIndexFile,
   selectDrainBatch,
@@ -44,6 +45,7 @@ import {
   type CandidateNote,
   type TagIndexEntry,
 } from "./lib/knowledge.ts"
+import { appendChangelog, parseLogSummary, type LogEntry } from "./lib/changelog.ts"
 import {
   appendMemoryEntry,
   normalizeMemoryFile,
@@ -90,15 +92,18 @@ const DRAIN_REASK =
   "do NOT read or write anything — the work is already done. Reply with ONLY these " +
   "blocks, listing each turn id exactly once (consolidated = you wrote or " +
   "updated a durable note for it; skipped = it held no durable knowledge; " +
-  "backlog = it was a deferred action, one JSON object per line):\n" +
+  "backlog = it was a deferred action, one JSON object per line; log = the " +
+  "changelog summary, present only when you consolidated at least one turn):\n" +
   "```consolidated\n#<seq>\n```\n```skipped\n#<seq>\n```\n" +
-  '```backlog\n{"seq": 3, "title": "…"}\n```'
+  '```backlog\n{"seq": 3, "title": "…"}\n```\n' +
+  '```log\n{"title": "Consolidation — Short Title", "body": "…"}\n```'
 
 // One-shot re-ask when a consolidation child wrote notes but never appended
-// the mandatory changelog entry (meta/log.md). The deterministic log guard
-// proves the miss via per-session write receipts; this re-ask is the only LLM
-// cost of the guard, and a second miss falls through to a mechanical fallback
-// entry so the log is never incomplete.
+// the mandatory changelog entry (meta/log.md). Used only by the legacy
+// `log_write: child` path: the guard proves the miss via per-session write
+// receipts; this re-ask is the only LLM cost of that path, and a second miss
+// falls through to a mechanical fallback entry so the log is never incomplete.
+// The default deterministic writer never re-asks.
 const logReaskPrompt = (logFile: string): string =>
   `You consolidated notes for the batch but did not append the mandatory changelog entry. ` +
   `Append exactly ONE entry to \`${logFile}\` (the vault changelog, append-only, newest entries last) ` +
@@ -149,6 +154,7 @@ export default (async ({ client, directory }) => {
   const backlogConfig = await readBacklogConfig(directory)
   const backlogFile = resolveBacklogFile(stateDir, backlogConfig)
   const backlogViewFile = resolveViewFile(vaultDir, backlogConfig)
+  const changelogArchiveFile = resolveArchiveFile(stateDir, config)
   const STATE_FILE = join(stateDir, "knowledge-hook.json")
   const logger = getLogger(logSettingsFrom(config, "log", "log_"), {
     logDir,
@@ -719,6 +725,7 @@ export default (async ({ client, directory }) => {
       // mislabeled ones, and re-ask ONCE if the child reported nothing for
       // this batch.
       const logPath = join(vaultDir, config.log_file)
+      let logReply = reply
       let ok = parseConsolidated(reply)
       let skipped = parseSkipped(reply)
       let backlogDrafts = parseBacklogDrafts(reply)
@@ -734,6 +741,7 @@ export default (async ({ client, directory }) => {
         reasked = true
         const reReply = await reaskForOutcome(spawned.sessionID)
         if (reReply) {
+          logReply = reReply
           ok = parseConsolidated(reReply)
           skipped = parseSkipped(reReply)
           backlogDrafts = parseBacklogDrafts(reReply)
@@ -767,36 +775,71 @@ export default (async ({ client, directory }) => {
         })
       }
 
-      // Changelog guard (deterministic): whenever the child consolidated at
-      // least one turn it must have appended to meta/log.md. Proven via the
-      // per-session write receipts recorded by the wikilink-guard. One re-ask
-      // on a miss; a second miss gets a mechanical fallback entry so the log
-      // is never incomplete. (log.md is the only vault file the hook may
-      // write, append-only.) Backlog-only drains append no notes → no entry.
+      // Changelog (deterministic by default): whenever the child consolidated at
+      // least one turn it reports its summary as a ```log fence and NEVER writes
+      // meta/log.md itself. The hook appends the entry with its own date and
+      // rolls the oldest entries past `log_max_entries` into the out-of-vault
+      // archive so log.md stays bounded. No re-ask; a missing fence gets the
+      // mechanical fallback entry. `log_write: child` restores the legacy
+      // receipt-proof + one re-ask path. (log.md is the only vault file the hook
+      // may write.) Backlog-only drains append no notes → no entry.
       let logReasked = false
+      let logAppended = false
       let logFallback = false
+      let logRotated = false
+      let logArchived = 0
       let noteCount: number | null = null
       if (config.log_guard && ok.size > 0) {
-        const wroteLog = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
-        if (!wroteLog) {
-          logReasked = true
-          await promptChildReply(spawned.sessionID, logReaskPrompt(config.log_file))
-          const nowWrote = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
-          if (!nowWrote) {
-            logFallback = true
-            try {
-              await appendFallbackLogEntry(logPath, [...ok].sort((a, b) => a - b))
-            } catch (err) {
-              void diag.error("[knowledge-hook] fallback log append failed:", err)
+        if (config.log_write === "child") {
+          const wroteLog = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
+          if (!wroteLog) {
+            logReasked = true
+            await promptChildReply(spawned.sessionID, logReaskPrompt(config.log_file))
+            const nowWrote = (await takeWrites(spawned.sessionID)).some((p) => p === logPath)
+            if (!nowWrote) {
+              logFallback = true
+              try {
+                await appendFallbackLogEntry(logPath, [...ok].sort((a, b) => a - b))
+              } catch (err) {
+                void diag.error("[knowledge-hook] fallback log append failed:", err)
+              }
             }
+          }
+        } else {
+          const summary = parseLogSummary(logReply)
+          logFallback = summary === null
+          const seqs = [...ok].sort((a, b) => a - b)
+          const today = new Date().toISOString().slice(0, 10)
+          const entry: LogEntry = summary
+            ? { date: today, op: "consolidation", title: summary.title, body: summary.body }
+            : {
+                date: today,
+                op: "consolidation",
+                title: `batch ${seqs.map((s) => `#${s}`).join(", ")} (auto)`,
+                body: "Deterministic fallback entry — the consolidation child did not report a changelog summary.",
+              }
+          try {
+            const res = await appendChangelog(logPath, entry, {
+              maxEntries: config.log_max_entries,
+              archiveFile: changelogArchiveFile,
+            })
+            logAppended = res.appended
+            logRotated = res.rotated
+            logArchived = res.archived
+          } catch (err) {
+            void diag.error("[knowledge-hook] changelog append failed:", err)
           }
         }
         noteCount = await countVaultNotes()
         await logger.append({
           ts: nowIso(),
           event: "log-guard",
+          mode: config.log_write === "child" ? "child" : "deterministic",
           reasked: logReasked,
+          appended: logAppended,
           fallback: logFallback,
+          rotated: logRotated,
+          archived: logArchived,
           notes: noteCount,
         })
       }
@@ -889,7 +932,16 @@ export default (async ({ client, directory }) => {
         backlog: [...backlogSeqs].filter((s) => batchSeqs.has(s)),
         recovered: [...recovered],
         reasked,
-        logGuard: config.log_guard && ok.size > 0 ? { reasked: logReasked, fallback: logFallback } : null,
+        logGuard:
+          config.log_guard && ok.size > 0
+            ? {
+                reasked: logReasked,
+                appended: logAppended,
+                fallback: logFallback,
+                rotated: logRotated,
+                archived: logArchived,
+              }
+            : null,
         notes: noteCount,
         pruned,
         child: acct,

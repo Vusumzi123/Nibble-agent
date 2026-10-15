@@ -168,7 +168,9 @@ Routing rules for every note you create or move:
   is one of `consolidation` | `reclassification` | `hygiene` | `change`, then
   1–3 sentences of body. Newest entries go LAST. Do NOT write note-count
   reconciliation prose — the knowledge-hook tracks counts deterministically in
-  its ledger.
+  its ledger. **During a consolidation drain the hook writes `meta/log.md`
+  itself** — you only report the ` ```log ` summary (see §8); for interactive
+  structural changes you still append the entry yourself.
 
 ### Frontmatter Schema (required on every note)
 
@@ -585,16 +587,16 @@ turn text (not a live question) as the source of truth:
 6. The deterministic write guard verifies and repairs escaped `\[\[`
    wikilinks, frontmatter dates, and serializer bullet rewrites after every
    write. Do NOT spend tool calls re-reading notes to check for those.
-7. **Append the changelog entry** (MANDATORY whenever you consolidated at least
-   one turn): exactly ONE entry to `meta/log.md`, header
-   `## [YYYY-MM-DD] consolidation | Short Title`, newest entries last, body of
-   1–3 sentences naming the notes you created/updated. A deterministic guard
-   enforces this — forgetting costs a re-ask. Never write note-count prose; the
-   hook tracks counts.
+7. **Report the changelog summary** (MANDATORY whenever you consolidated at
+   least one turn): emit exactly ONE ` ```log ` block (see Reporting) — a short
+   title plus a 1–3 sentence body naming the notes you created/updated and why.
+   Do NOT write `meta/log.md` yourself: the knowledge-hook appends the entry
+   deterministically with today's date and rolls old entries into an archive.
+   Never write note-count prose; the hook tracks counts.
 
 ### Reporting (MANDATORY)
 
-End your reply with EXACTLY these two fenced blocks. Each line MUST be a turn id
+End your reply with the outcome fenced blocks. Each line MUST be a turn id
 — a `#<seq>` token copied verbatim from the `### Turn #<seq>` header. **Never
 report a note title, file path, or session id**: the plugin uses these ids to
 prune the consumed turns.
@@ -606,6 +608,9 @@ prune the consumed turns.
 ```skipped
 #1043
 ```
+```log
+{"title": "Consolidation — Short Title", "body": "One or two sentences naming the notes you created or updated."}
+```
 ````
 
 - **`consolidated`** — list a turn id here ONLY if you actually wrote or updated
@@ -613,6 +618,9 @@ prune the consumed turns.
 - **`skipped`** — list a turn id here when the turn held no durable, findable
   knowledge (trivial chatter, or already documented elsewhere in the vault).
   This is a successful "nothing to save" outcome, not a failure.
+- **`log`** — ONE JSON object: the changelog summary for this batch, present
+  whenever you consolidated at least one turn. Do NOT write `meta/log.md`
+  yourself; the knowledge-hook appends this entry deterministically.
 - **Neither block** — a turn you failed to process (read/write error, or you
   could not verify the note). Briefly explain the failure above the blocks.
 - The plugin prunes every turn listed in EITHER block; a turn in neither block

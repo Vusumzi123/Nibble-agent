@@ -306,6 +306,9 @@ test("parseKnowledgeConfig reads log guard and digest keys", () => {
       "knowledge:",
       "  log_file: meta/log.md",
       "  log_guard: false",
+      "  log_write: child",
+      "  log_max_entries: 25",
+      "  log_archive: changelog-archive.ndjson",
       "  digest: true",
       "  digest_verbatim_tail: 3",
       "  digest_max_chars: 800",
@@ -313,6 +316,9 @@ test("parseKnowledgeConfig reads log guard and digest keys", () => {
   )
   assert.equal(cfg.log_file, "meta/log.md")
   assert.equal(cfg.log_guard, false)
+  assert.equal(cfg.log_write, "child")
+  assert.equal(cfg.log_max_entries, 25)
+  assert.equal(cfg.log_archive, "changelog-archive.ndjson")
   assert.equal(cfg.digest, true)
   assert.equal(cfg.digest_verbatim_tail, 3)
   assert.equal(cfg.digest_max_chars, 800)

@@ -4,6 +4,27 @@ Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
 
+## 2026-10-15
+
+### Changed
+
+- **Deterministic changelog writer (knowledge-hook drain)** — the consolidation
+  child no longer writes `Brain/meta/log.md` itself. It reports its summary as a
+  `log` fenced block, and the new `lib/changelog.ts` appends the entry with the
+  hook's own date, rolling the oldest entries past `knowledge.log_max_entries`
+  into an out-of-vault NDJSON archive (`knowledge.log_archive`, default
+  `.opencode/state/changelog-archive.ndjson`). This removes the drain-time
+  changelog re-ask round-trip (one fewer full-context LLM turn on a drain that
+  forgot the entry) and the write-receipt retain path on the log step.
+  - New `knowledge:` keys: `log_write` (`deterministic` default; `child`
+    restores the legacy receipt → re-ask → fallback path), `log_max_entries`
+    (default 50; `0` disables rollover), `log_archive`.
+  - A missing summary fence still gets the mechanical `(auto)` fallback entry;
+    `log.md` remains the only vault file the hook writes.
+  - Files: `lib/changelog.ts` (+`changelog.test.ts`), `knowledge-hook.ts`,
+    `lib/knowledge.ts`, `agents/rag-brain.md`, `sysop-config.example.yaml`,
+    `docs/sysop-config-reference.md`, `scripts/setup.sh`. Tests 742/742.
+
 ## 2026-10-14
 
 ### Added

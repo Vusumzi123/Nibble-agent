@@ -129,19 +129,24 @@ Turn capture and consolidation.
 | `prefetch_candidates` | keyword-prefetched candidate notes handed to the ingestion child per cycle. |
 | `tag_gate` | capture-time decision tagging (tag choice + salience score). |
 | `tag_candidates` | number of tag candidates scored. |
-| `log_file` | the vault changelog (`docs/log-split-plan.md`). |
-| `log_guard` | deterministic changelog guard, see below. |
+| `log_file` | the vault changelog (`## [YYYY-MM-DD] op | title`, newest last). |
+| `log_guard` | deterministic changelog, see below. |
+| `log_write` | `deterministic` (default) — the hook writes the changelog; `child` restores the legacy receipt + re-ask path. |
+| `log_max_entries` | entries kept in `log.md`; older ones roll into `log_archive` (`0` disables rollover). |
+| `log_archive` | leaf under `<state>` → `.opencode/state/changelog-archive.ndjson`. |
 | `digest` | deterministic drain-prompt digest, see below. |
 | `digest_verbatim_tail` | the last N turns stay fully verbatim. |
 | `digest_max_chars` | per-side cap on the compressed digest. |
 | `log` | per-cycle NDJSON ledger (tokens/cost/steps/outcome), leaf under `<log>`. |
 
-**Changelog guard (`log_guard`).** A consolidation child that consolidates
-anything MUST append to the vault-relative changelog in the format
-`## [YYYY-MM-DD] op | title`, newest last. The hook proves the append via write
-receipts, re-asks once on a miss, then appends a mechanical fallback entry so
-the log is never incomplete. `log.md` is the **only** vault file the hook may
-write (append-only).
+**Changelog (`log_guard`, `log_write`).** A consolidation child that
+consolidates anything MUST report its summary as a ` ```log ` fence. In the
+default `deterministic` mode the hook appends the entry itself (with its own
+date) and rolls the oldest entries past `log_max_entries` into the out-of-vault
+`log_archive`, so the changelog stays readable and no child round-trip is spent
+on it; a missing fence gets a mechanical fallback entry. `log_write: child`
+restores the legacy path (write receipts → one re-ask → fallback). `log.md` is
+the **only** vault file the hook may write.
 
 **Drain-prompt digest (`digest`).** Compresses turns older than the last
 `digest_verbatim_tail` ones into extracted atoms (questions, decision
