@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nibble — autonomy dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: #101216; color: #d7dae0; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }
+  h1 { font-size: 1.1rem; letter-spacing: .04em; }
+  h1 span { color: #6c7481; font-weight: normal; }
+  section { border: 1px solid #262b33; border-radius: 6px; padding: .75rem 1rem; margin: 1rem 0; }
+  pre { white-space: pre-wrap; word-break: break-word; color: #9ec3a0; margin: .5rem 0 0; }
+  button { background: #1d2530; color: #d7dae0; border: 1px solid #333c49;
+           border-radius: 4px; padding: .3rem .8rem; cursor: pointer; }
+  button:hover { border-color: #4a5667; }
+  .muted { color: #6c7481; }
+</style>
+</head>
+<body>
+<h1>Nibble autonomy dashboard <span>— placeholder UI (card 9 builds the real panels)</span></h1>
+
+<section>
+  Health <button data-get="/api/health">GET</button>
+  <pre id="health">–</pre>
+</section>
+
+<section>
+  Config snapshot <button data-get="/api/config">GET</button>
+  <pre id="config">–</pre>
+</section>
+
+<section>
+  Metrics <button data-get="/api/metrics">GET</button>
+  <pre id="metrics">–</pre>
+</section>
+
+<script>
+(async () => {
+  const show = (id, data) => {
+    document.getElementById(id).textContent =
+      typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  };
+  for (const btn of document.querySelectorAll("button[data-get]")) {
+    btn.addEventListener("click", async () => {
+      const target = btn.dataset.get.slice(5).replace(/^\/(health|config|metrics)$/, "$1");
+      try {
+        const res = await fetch(btn.dataset.get);
+        show(target, await res.json());
+      } catch (e) {
+        show(target, String(e));
+      }
+    });
+  }
+  // Warm the health panel on load; mutations need GET /api/csrf first (card 9).
+  try {
+    const res = await fetch("/api/health");
+    show("health", await res.json());
+  } catch (e) {
+    show("health", String(e));
+  }
+})();
+</script>
+</body>
+</html>

@@ -43,16 +43,18 @@ export type MissionApproval = "n/a" | "per-item" | "writes-follow-dial" | "alway
 export const MISSION_APPROVALS = ["n/a", "per-item", "writes-follow-dial", "always"] as const
 
 /** D-M8 named candidacy predicates (cards 6/G added `turns-pending` and
- *  `dream-gate` for the night pre-gate, plan §17.3). */
+ *  `dream-gate` for the night pre-gate, plan §17.3; card 7a added `idea-roll`
+ *  for the day-rollover draw, §17.10). */
 export type MissionCandidacy =
   | "digest"
   | "always"
   | "backlog-pending"
   | "turns-pending"
   | "dream-gate"
+  | "idea-roll"
   | `min-gap:${string}`
   | `roll:${string}`
-const CANDIDACY_BASE = new Set(["digest", "always", "backlog-pending", "turns-pending", "dream-gate"])
+const CANDIDACY_BASE = new Set(["digest", "always", "backlog-pending", "turns-pending", "dream-gate", "idea-roll"])
 
 export type Mission = {
   id: string

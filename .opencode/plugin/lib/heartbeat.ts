@@ -27,7 +27,7 @@ import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
 import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
 import type { DecisionRequest, DecisionResult } from "./decisions.ts"
-import { atomicRead } from "./fsx.ts"
+import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
 import { readKnowledgeConfig, resolveMemoryFile } from "./knowledge.ts"
 import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
@@ -172,6 +172,8 @@ export type CandidacyContext = {
   gaps?: Record<string, number>
   /** state-key → required gap ms; a missing key means 0 (any elapsed time passes). */
   minGapMs?: Record<string, number>
+  /** Day-rollover draw for `idea-roll` (§17.10 card 7a); absent = fail closed. */
+  ideaDay?: { target: number; generated: number }
   /** Injectable for tests; default Math.random (`roll:` predicates). */
   random?: () => number
   /** Fires for the stochastic `dream-gate` evaluation only — the roll must be
@@ -185,6 +187,11 @@ export function candidacyPasses(mission: Mission, ctx: CandidacyContext): boolea
   if (c === "digest" || c === "always") return true
   if (c === "backlog-pending") return ctx.backlogPending > 0
   if (c === "turns-pending") return (ctx.unconsumedTurns ?? 0) > 0
+  if (c === "idea-roll") {
+    const d = ctx.ideaDay
+    if (!d) return false // idea pipeline off (or state unreadable) — fail closed
+    return d.generated < d.target
+  }
   if (c === "dream-gate") {
     const s = ctx.sleep
     const report = (passed: boolean, reason: "roll" | "status" | "nightly-cap"): void =>
@@ -321,6 +328,8 @@ export type ComputeDigestOpts = {
   /** min-gap store for `min-gap:` candidacy (cards 6/7a pass theirs). */
   gaps?: Record<string, number>
   minGapMs?: Record<string, number>
+  /** Day-rollover draw for `idea-roll` candidacy (card 7a). */
+  ideaDay?: { target: number; generated: number }
   /** Dream-hook's roll journal seam (§17.3); heartbeat passes none. */
   onDreamGate?: CandidacyContext["onDreamGate"]
 }
@@ -410,6 +419,7 @@ export async function computeDigest(
       nowMs,
       gaps: opts.gaps,
       minGapMs: opts.minGapMs,
+      ideaDay: opts.ideaDay,
       random: opts.random,
       onDreamGate: opts.onDreamGate,
     },
@@ -470,6 +480,17 @@ export function digestVerdictFromResult(
 ): DigestVerdict {
   if (!result || result.error || result.abstained) return { kind: "no_reply" }
   return digestVerdictFromValue(result.value, candidateIds)
+}
+
+/** §17.10 express short-circuit (D-M8): exactly ONE candidate whose
+ *  candidacy is a deterministic `min-gap:` gate dispatches without a JEV
+ *  call — a time gate offers it, the sole-candidate case needs no tie-break.
+ *  Anything else returns null and the normal digest decision runs. */
+export function soleDeterministicVerdict(candidates: readonly DigestCandidate[]): DigestVerdict | null {
+  if (candidates.length !== 1) return null
+  const only = candidates[0]
+  if (only.candidacy.startsWith("min-gap:")) return { kind: "mission", id: only.id }
+  return null
 }
 
 /** Compact one-block digest state for the JEV `choice` (mirrors
@@ -684,6 +705,71 @@ export async function acquireHeartbeatLock(file: string, nowMs: number = Date.no
 /** Release the lock; a missing file is already released (never throws). */
 export async function releaseHeartbeatLock(file: string): Promise<void> {
   await unlink(file).catch(() => {})
+}
+
+// ---------------------------------------------------------------------------
+// Live status marker (kanban card 16, plan §12 / §9): `.opencode/state/
+// heartbeat.current.json`. The heartbeat-hook writes it on every phase
+// transition so the dashboard can render idle | in-flight and the in-flight
+// mission without reading in-process state. Single writer = heartbeat-hook;
+// the dashboard is a read-only consumer. Best-effort: a marker write failure
+// must never fail a tick (mirrors the lock's `.catch(() => {})` discipline).
+
+export const HEARTBEAT_CURRENT_FILE = "heartbeat.current.json"
+
+export type HeartbeatCurrent = {
+  /** "in-flight" between tick start and tick end; "idle" once the tick closes. */
+  state: "idle" | "in-flight"
+  /** Tick counter (1-based); null before the first tick. */
+  tick: number | null
+  phase: HeartbeatPhase | null
+  /** Mission id running this tick, or null. */
+  mission: string | null
+  mission_title: string | null
+  /** Child session id the mission runs in, or null. */
+  session: string | null
+  /** ISO timestamp the tick transitioned to in-flight; null when idle. */
+  started_at: string | null
+  /** ISO timestamp of the last marker write. */
+  updated_at: string
+  /** Effective autonomy.level for this tick. */
+  level: number | null
+}
+
+export function idleHeartbeatCurrent(now: string = nowIso()): HeartbeatCurrent {
+  return {
+    state: "idle",
+    tick: null,
+    phase: null,
+    mission: null,
+    mission_title: null,
+    session: null,
+    started_at: null,
+    updated_at: now,
+    level: null,
+  }
+}
+
+/** Persist the marker (atomic rename); never throws. */
+export async function writeHeartbeatCurrent(file: string, current: HeartbeatCurrent): Promise<void> {
+  try {
+    await atomicWrite(file, JSON.stringify(current))
+  } catch {
+    // best-effort — a marker write must never fail a tick
+  }
+}
+
+/** Read the marker; a missing/corrupt file yields null (the caller renders idle). */
+export async function readHeartbeatCurrent(file: string): Promise<HeartbeatCurrent | null> {
+  const text = await atomicRead(file)
+  if (!text) return null
+  try {
+    const parsed = JSON.parse(text) as HeartbeatCurrent
+    if (!parsed || typeof parsed !== "object" || typeof parsed.state !== "string") return null
+    return parsed
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------

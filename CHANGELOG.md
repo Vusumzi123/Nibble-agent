@@ -8,6 +8,67 @@ Notable changes to Nibble, newest first. Sections follow
 
 ### Added
 
+- **Heartbeat live status + dashboard-UI support (observability card 16,
+  extensions to the card 8 backend)** — backend surface a separately-hosted
+  dashboard UI (an Angular/Phosphorstrap app) consumes:
+  - **Live marker** — `heartbeat-hook.ts` writes
+    `.opencode/state/heartbeat.current.json` on every tick phase transition
+    (`idle | in-flight` + `tick`/`phase`/`mission`/`mission_title`/`session`/
+    `started_at`/`level`), through helpers in `lib/heartbeat.ts`
+    (`HEARTBEAT_CURRENT_FILE`, `readHeartbeatCurrent`, `writeHeartbeatCurrent`);
+    each tick line now also carries `duration_ms` (exec time).
+  - **`GET /api/heartbeat`** — `heartbeatSnapshot()` returns the marker plus the
+    lock/stale state.
+  - **`heartbeat:` is now a writable dashboard section** — the top-level
+    scheduler block joins `NESTED_WRITABLE_SECTIONS` (schema in `lib/autonomy.ts`),
+    so the settings page can flip the kill switch (`enabled`) and
+    `long_silence_factor`; `configSnapshot()` now exposes `heartbeat`.
+  - **Static SPA serving** — `dashboard-server.ts` serves an arbitrary static UI
+    via `DASHBOARD_STATIC_DIR` (traversal-guarded, `index.html` SPA fallback), so
+    the separately-built UI shares the backend origin (Host/Origin/CSRF guards
+    intact).
+  - Tests: 735/735 (marker round-trip, `heartbeatSnapshot`, heartbeat-section
+    writeConfig, `/api/heartbeat`, static assets + SPA fallback + traversal
+    refusal).
+
+- **Dashboard backend (kanban card 8, `docs/autonomy-harness-plan.md` §9.2)** —
+  the local `autonomy-dashboard-api`: a dependency-free Node/TS HTTP server
+  (`lib/dashboard-server.ts` + `lib/dashboard.ts`, launcher
+  `scripts/dashboard.sh`, default port 4097) behind a placeholder UI at
+  `dashboard/static/index.html` (the real panels are card 9).
+  - **Schema-validated config writes** — `PUT /api/config {section, values}`
+    for the four nested Rule-backed sections (`autonomy`, `mood`, `comms`,
+    `dashboard`); every other section is refused `section_readonly`. Writes
+    are comment-preserving line surgery on `sysop-config.yaml` and
+    **round-trip-validated through the exact parse options the hot readers
+    use** (`nestedSectionOpts()` export from `lib/autonomy.ts` — one schema,
+    no copy), all-or-nothing. Writable sections take effect on the next turn
+    (hot config, acceptance criterion verified).
+  - **Server-side dial semantics (Phase-4 subset)** — `autonomy.level` raise
+    is refused `2fa_required` unless `dashboard.auth.mode: login+2fa`
+    (§9.2 acceptance: "level raise at L1 without 2FA — tested"; full login/2FA
+    is card 11); `dashboard.auth.*` refused (`auth_card_11`); non-loopback
+    `bind_address` refused (`bind_requires_auth`, §10); floor-class key
+    patterns refused unconditionally (the floor itself is hard-coded in
+    `autonomy-gate.ts` — no config key disables it). Every accepted write is
+    journaled to `<log>/dashboard.log` (NDJSON, shared logging engine) with
+    origin/IP before returning.
+  - **Reads** — `GET /api/config` (effective snapshot), `GET /api/metrics`
+    (config + mood state + backlog counts + per-ledger byte/line counts +
+    heartbeat lock), `GET /api/ledgers[/:name?limit=]` (whitelisted
+    `.log`/`.ndjson` tail, no traversal), `GET /api/backlog` (read-only —
+    the plugin stays the single writer per §14; mutations are card 15).
+  - **Single-origin proxy** — `/api/serve/*` streams to `opencode serve`
+    (`OPENCODE_SERVE_URL`, default `127.0.0.1:4096`) with dashboard cookies/
+    origin stripped; SSE flushes incrementally (chat round-trip path);
+    unreachable serve → 502, never a hang.
+  - **Request guards (CSRF only — auth is card 11)** — loopback `Host` on
+    every request (DNS-rebinding defense), same-origin `Origin` + double-
+    submit `X-CSRF-Token` (HttpOnly cookie, 30-min TTL) on every mutation,
+    startup refusal of non-loopback binds.
+  - Tests: 40 new (`lib/dashboard.test.ts`, `lib/dashboard-server.test.ts`);
+    suite 729/729.
+
 - **Heartbeat engine (kanban card 4, `docs/heartbeat-missions-plan.md`)** — the
   in-process mission scheduler (settled D-M9, §12): one self-rescheduling
   `setTimeout` loop in `heartbeat-hook.ts` that lives and dies with the opencode
@@ -140,6 +201,41 @@ Notable changes to Nibble, newest first. Sections follow
   provider failures (synthesized from the response), digest decision faults,
   and a previously **silent** outer tick failure (now one
   `outcome: "error"`, `reason: "tick-error"` ledger line, best-effort).
+- **Idea missions (kanban card 7a, `docs/autonomy-harness-plan.md` §17.10 /
+  D18)** — generation and expression become heartbeat missions; idea-hook's
+  scheduler does not exist in Nibble (M7 lands in mission form):
+  - **`lib/idea.ts` + 18 tests** — `idea:` config block, the day-rollover
+    draw (`daily_weights: "25,55,20"` → count 0/1/2), the category draw
+    (`category_weights`), the tolerant `<vault>/Kael Ideas.md` bucket
+    (parse/render/append + `updated:` bump), keyword-Jaccard dedupe, the JEV
+    `noul` reviewer request + fail-closed acceptance, and the
+    `.opencode/state/idea.json` day/gap state (`ideaDayContext` rollover,
+    `recordGenerated`, `recordExpressed`).
+  - **New D-M8 candidacy** — `idea-roll` (day budget: `generated < target`,
+    absent context fails closed) in `lib/missions.ts`/`lib/heartbeat.ts`, fed
+    by the hook's per-tick rollover; `min-gap:express` uses the existing
+    generic predicate with the hook-owned gap store. §17.10's sole-candidate
+    rule ships as `soleDeterministicVerdict` — exactly one `min-gap:`
+    candidate dispatches without a JEV call.
+  - **Missions + agent** — `.opencode/missions/idea-generate.md`
+    (day-only, `candidacy: idea-roll`, `agent: idea-generator`) and
+    `express.md` (day-only, `candidacy: min-gap:express`, **shipped disabled**
+    until comms card 10 — the `notify` precedent); tool-free
+    `.opencode/agents/idea-generator.md` returns the typed `<<<IDEA …>>>`
+    block, and the hook injects the `=== REQUESTED CATEGORY ===` draw
+    (dream-fragment pattern).
+  - **Hook wiring** (`heartbeat-hook.ts`) — day rollover persists only on a
+    real day change; a completed idea-generate runs extract → dedupe → JEV
+    review (fail-closed: no gate/fallback/abstain/sub-threshold all reject)
+    → atomic bucket append, logged to `<log>/idea.log`
+    (`idea-generated`/`idea-review`/`idea-skipped`) with an `idea:` tag
+    (`stored`/`duplicate`/`review-reject`/`no-block`/`expressed`/`error`) on
+    the tick ledger line; a completed express stamps `lastExpressedAt`.
+  - `idea:` block in both sysop-config yamls + readers-map/reference docs.
+  - Tests: 689/689 green (`lib/idea.test.ts`, updated built-in set +
+    `idea-roll`/sole-candidate/computeDigest pass-through cases).
+    Express delivery + the `idea-express.py` closed-opencode fallback timer
+    remain with card 10 (M7 delivery half).
 
 ### Fixed
 

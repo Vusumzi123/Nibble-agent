@@ -243,6 +243,24 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   log_compress_level: 6
   log_rotate_by: size
 
+idea:                          # idea missions (§17.10) — card 7a reads this
+  enabled: true                # day draw + post-run dedupe/review/append gate
+  bucket_file: Kael Ideas.md   # leaf under <vault>
+  daily_weights: "25,55,20"    # day draw: index = ideas that day (0/1/2)
+  category_weights: "1,1,1"    # improve-self, thought, business
+  dedupe_threshold: 0.6        # keyword-Jaccard reject (0..1)
+  review: true                 # JEV noul review before the write (fail-closed)
+  review_threshold: 0.6
+  express_min_gap_hours: 48    # min-gap:express candidacy gap
+  log: idea.log                # under <log>, shared rotation keys (init-once)
+  log_rotate_bytes: 1048576
+  log_keep_generations: 5
+  log_retention_days: 90
+  log_compress: true
+  log_compress_after: 1
+  log_compress_level: 6
+  log_rotate_by: size
+
 mood:                          # feeling system (§15) — card 5 reads this
   dispatch_influence: true     # bounded + ledger-journaled; false = expression only
   decay_half_life: 6h

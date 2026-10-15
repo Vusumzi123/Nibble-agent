@@ -488,6 +488,60 @@ const DASHBOARD_OPTS: NestedSectionOptions = {
   coerce: makeCoerce(DASHBOARD_SCALAR_RULES, DASHBOARD_BLOCK_RULES),
 }
 
+// Top-level `heartbeat:` block — the in-process scheduler + per-tick ledger
+// (lib/heartbeat.ts DEFAULT_HEARTBEAT_CONFIG). Flat scalars only. Included so
+// the dashboard settings page can flip the scheduler kill switch
+// (`enabled`) and tune its dials through the same schema-validated write path
+// (card 9 → backend card 8); the value types mirror the runtime reader's
+// value-typed coercion (`enabled` bool, `long_silence_factor` int, `log*`
+// scalars) so a written value reads back identically.
+const HEARTBEAT_SCALAR_RULES: Record<string, Rule> = {
+  enabled: { t: "bool" },
+  long_silence_factor: { t: "int", min: 0 },
+  log: { t: "string" },
+  log_rotate_bytes: { t: "int", min: 0 },
+  log_keep_generations: { t: "int", min: 0 },
+  log_retention_days: { t: "int", min: 0 },
+  log_compress: { t: "bool" },
+  log_compress_after: { t: "int", min: 0 },
+  log_compress_level: { t: "int", min: 1, max: 9 },
+  log_rotate_by: { t: "enum", values: ["size", "daily", "weekly"] },
+}
+
+const HEARTBEAT_OPTS: NestedSectionOptions = {
+  scalarKeys: keysOf(HEARTBEAT_SCALAR_RULES),
+  coerce: makeCoerce(HEARTBEAT_SCALAR_RULES, {}),
+}
+
+// ---------------------------------------------------------------------------
+// Section specs for the dashboard backend (card 8, plan §9.2)
+//
+// The backend round-trip-validates a candidate sysop-config.yaml text through
+// the exact same parse options the hot readers use — one schema, no copy.
+export const NESTED_WRITABLE_SECTIONS = ["autonomy", "mood", "comms", "dashboard", "heartbeat"] as const
+export type NestedWritableSection = (typeof NESTED_WRITABLE_SECTIONS)[number]
+
+export function isNestedWritableSection(section: string): section is NestedWritableSection {
+  return (NESTED_WRITABLE_SECTIONS as readonly string[]).includes(section)
+}
+
+export function nestedSectionOpts(section: string): NestedSectionOptions | null {
+  switch (section) {
+    case "autonomy":
+      return AUTONOMY_OPTS
+    case "mood":
+      return MOOD_OPTS
+    case "comms":
+      return COMMS_OPTS
+    case "dashboard":
+      return DASHBOARD_OPTS
+    case "heartbeat":
+      return HEARTBEAT_OPTS
+    default:
+      return null
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Reject reporting — fallback + warning (once per process per path)
 

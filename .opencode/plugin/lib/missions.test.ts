@@ -294,12 +294,15 @@ test("loadMissions with no config overlay leaves missions untouched", async () =
 // ---------------------------------------------------------------------------
 // Shipped built-ins (the real .opencode/missions/ in this repo)
 
-test("shipped built-ins parse clean: drain/dream/staleness/research/notify", async () => {
+test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-generate/express", async () => {
   const missions = await loadMissions(PROJECT_ROOT, {
     onReject: (e) => assert.fail(`unexpected reject: ${e.path} ${e.reason}`),
   })
   const byId = new Map(missions.map((m) => [m.id, m]))
-  assert.deepEqual([...byId.keys()].sort(), ["drain", "dream", "notify", "research", "staleness"])
+  assert.deepEqual(
+    [...byId.keys()].sort(),
+    ["drain", "dream", "express", "idea-generate", "notify", "research", "staleness"],
+  )
 
   const drain = byId.get("drain")!
   assert.equal(drain.enabled, true)
@@ -319,6 +322,22 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify", asy
 
   const notify = byId.get("notify")!
   assert.equal(notify.enabled, false) // comms = card 10
+
+  // Card 7a: the §17.10 idea pair.
+  const gen = byId.get("idea-generate")!
+  assert.equal(gen.enabled, true)
+  assert.deepEqual(gen.menus, ["day"]) // day-only — never in the night menu
+  assert.equal(gen.candidacy, "idea-roll") // day-rollover budget gate
+  assert.equal(gen.agent, "idea-generator")
+  assert.equal(gen.min_level, 1) // §6.3: L1
+  assert.ok(gen.body.length > 0)
+
+  const express = byId.get("express")!
+  assert.equal(express.enabled, false) // comms = card 10 (the notify precedent)
+  assert.deepEqual(express.menus, ["day"])
+  assert.equal(express.candidacy, "min-gap:express") // §17.10 deterministic gate
+  assert.equal(express.min_level, 1)
+  assert.ok(express.body.length > 0)
 
   for (const id of ["staleness", "research"]) {
     const m = byId.get(id)!

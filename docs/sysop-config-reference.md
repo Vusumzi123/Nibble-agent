@@ -34,6 +34,7 @@ config warn-once behaviour).
 | `autonomy:` | `lib/autonomy.ts` + `autonomy-gate.ts` |
 | `mood:` | `mood-hook.ts` → `lib/mood.ts` |
 | `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process scheduler + per-tick ledger) |
+| `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
 | `dashboard:` | `lib/autonomy.ts` (config plumbing only) |
@@ -474,6 +475,32 @@ B7 day-side backoff (missions-plan §7): consecutive `no_reply` ticks on an
 identical `digest_hash` stretch the day cadence ×2 at streak 2 and ×4 at 3+
 (`noop_hash`/`noop_streak` in `<state>/heartbeat.json`); a mission execution or
 a changed digest resets it — the day twin of the `quiet.backoff` ladder.
+
+---
+
+## `idea:`
+
+Idea generation/expression pipeline (`heartbeat-hook.ts` → `lib/idea.ts`,
+plan §17.10 / D18 — card 7a). The old idea-hook scheduler does not exist in
+Nibble: generation and expression are heartbeat missions, and this hook owns
+the deterministic half (day draw, bucket write, gap store).
+
+| Key | Meaning |
+| --- | ------- |
+| `enabled` | pipeline kill switch. `false` → no day draw (`idea-roll` fails closed), no post-run processing; the express gap store stays empty. |
+| `bucket_file` | bucket note leaf under `<vault>` (absolute honored). Default `Kael Ideas.md`. |
+| `daily_weights` | day-rollover draw: the index IS the day's idea count (`"25,55,20"` → 0/1/2 with 25/55/20%). Feeds the `idea-roll` candidacy target. |
+| `category_weights` | per-dispatch category draw (improve-self, thought, business); injected into the brief as `=== REQUESTED CATEGORY ===`. |
+| `dedupe_threshold` | keyword-Jaccard reject vs. existing bucket bodies (0..1). |
+| `review` | JEV `noul` review before the bucket write. Fail-closed: gate missing, fallback, abstain, or sub-threshold `pTrue` all reject. |
+| `review_threshold` | acceptance threshold on the reviewer's `pTrue` (0..1). |
+| `express_min_gap_hours` | the `min-gap:express` candidacy gap; `lastExpressedAt` lives in `<state>/idea.json` (stamped after a completed express run). |
+| `log` | NDJSON event leaf under `<log>` — `idea-generated`, `idea-review`, `idea-skipped`, `idea-review-reject`. `log_*` = shared rotation keys, read once at init. |
+
+Behavioural dials are hot-read on every tick. Day rollover persists only on a
+real day change; the mission ledger line gains an `idea:` tag
+(`stored` / `duplicate` / `review-reject` / `no-block` / `expressed` / `error`).
+The express mission ships `enabled: false` until the comms card (10) lands.
 
 ---
 

@@ -27,13 +27,19 @@ import {
   frequencyToMs,
   isAllQuiet,
   isHeartbeatLockStale,
+  HEARTBEAT_CURRENT_FILE,
+  idleHeartbeatCurrent,
   isQuietNow,
   moodDispatchBias,
   parseHeartbeatConfig,
   parseWindow,
   readHeartbeatConfig,
+  readHeartbeatCurrent,
   releaseHeartbeatLock,
+  soleDeterministicVerdict,
+  writeHeartbeatCurrent,
   type CandidacyContext,
+  type DigestCandidate,
   type HeartbeatDigest,
   type HeartbeatSignals,
 } from "./heartbeat.ts"
@@ -268,6 +274,53 @@ test("candidacy: dream-gate journals the roll outcome through onDreamGate (§17.
   assert.equal(events[1].reason, "status")
 })
 
+// Card 7a (§17.10): the idea pair's candidacy + the sole-candidate shortcut.
+
+test("candidacy: idea-roll passes only with day budget; absent context fails closed", () => {
+  const m = mission({ candidacy: "idea-roll" })
+  assert.equal(candidacyPasses(m, CAND), false, "no ideaDay (pipeline off) -> fail closed")
+  assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 0, generated: 0 } }), false, "zero-draw day")
+  assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 1, generated: 0 } }), true)
+  assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 1, generated: 1 } }), false, "budget spent")
+  assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 2, generated: 1 } }), true, "second slot left")
+  assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 2, generated: 2 } }), false)
+})
+
+test("soleDeterministicVerdict: one min-gap candidate dispatches without a JEV call (§17.10)", () => {
+  const cand = (id: string, candidacy: DigestCandidate["candidacy"]): DigestCandidate => ({
+    id,
+    title: id,
+    frequency: "low",
+    min_level: 1,
+    menus: ["day"],
+    candidacy,
+    frequency_weight: 1,
+    mood_bias: 1,
+    weight: 1,
+  })
+  assert.deepEqual(
+    soleDeterministicVerdict([cand("express", "min-gap:express")]),
+    { kind: "mission", id: "express" },
+    "sole deterministic candidate -> auto-dispatch",
+  )
+  assert.equal(soleDeterministicVerdict([]), null, "no candidates")
+  assert.equal(
+    soleDeterministicVerdict([cand("express", "min-gap:express"), cand("drain", "turns-pending")]),
+    null,
+    "two candidates -> the JEV digest decides",
+  )
+  assert.equal(
+    soleDeterministicVerdict([cand("drain", "turns-pending")]),
+    null,
+    "sole signal-gated candidate still goes through JEV",
+  )
+  assert.equal(
+    soleDeterministicVerdict([cand("idea-generate", "idea-roll")]),
+    null,
+    "the stochastic idea-roll is not a time gate",
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Candidate-list filter matrix
 
@@ -492,6 +545,57 @@ test("computeDigest: a pending entry above the level does not count", async () =
   const digest = await computeDigest(dir, { now: at(12, 0) })
   assert.equal(digest.signals.backlog_pending, 0, "L3 entry invisible at L1")
   assert.equal(digest.all_quiet, true)
+})
+
+test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (card 7a)", async () => {
+  const dir = await tmpProject({
+    ".opencode/missions/idea-generate.md": [
+      "---",
+      "id: idea-generate",
+      "title: Idea",
+      "frequency: low",
+      "menus: [day]",
+      "min_level: 1",
+      "candidacy: idea-roll",
+      "enabled: true",
+      "---",
+      "Body.",
+      "",
+    ].join("\n"),
+    ".opencode/missions/express.md": [
+      "---",
+      "id: express",
+      "title: Express",
+      "frequency: low",
+      "menus: [day]",
+      "min_level: 1",
+      "candidacy: min-gap:express",
+      "enabled: true",
+      "---",
+      "Body.",
+      "",
+    ].join("\n"),
+  })
+  const base = { now: at(12, 0) }
+  // idea pipeline off (no ideaDay) -> idea-roll fails closed, express free.
+  const off = await computeDigest(dir, base)
+  assert.deepEqual(off.candidates.map((c) => c.id), ["express"])
+  // Day budget open (no gap recorded yet) -> both offered.
+  const on = await computeDigest(dir, {
+    ...base,
+    ideaDay: { target: 1, generated: 0 },
+    minGapMs: { express: 3_600_000 },
+  })
+  assert.deepEqual(on.candidates.map((c) => c.id).sort(), ["express", "idea-generate"])
+  const spent = await computeDigest(dir, { ...base, ideaDay: { target: 1, generated: 1 } })
+  assert.deepEqual(spent.candidates.map((c) => c.id), ["express"], "budget spent -> idea-roll gated out")
+  const gapFresh = await computeDigest(dir, {
+    ...base,
+    ideaDay: { target: 1, generated: 0 },
+    gaps: { express: Date.now() },
+    minGapMs: { express: 86_400_000 },
+  })
+  assert.deepEqual(gapFresh.candidates.map((c) => c.id), ["idea-generate"], "gap active -> express held")
 })
 
 // ---------------------------------------------------------------------------
@@ -803,4 +907,35 @@ test("effectiveFrequencyMs: B7 stretches the day cadence ×2/×4; off stays off"
   assert.equal(effectiveFrequencyMs(12 * H, 2), 24 * H, "streak 2 → ×2")
   assert.equal(effectiveFrequencyMs(12 * H, 3), 48 * H, "streak 3+ → ×4")
   assert.equal(effectiveFrequencyMs(null, 5), null, "frequency: off ignores the streak")
+})
+
+// Live status marker (card 16 §9.2): round-trips through
+// state/heartbeat.current.json; a missing/corrupt file reads as null so the
+// dashboard renders idle instead of throwing.
+test("heartbeat.current marker: write/read round-trip; missing/corrupt → null", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hb-current-"))
+  const file = join(dir, HEARTBEAT_CURRENT_FILE)
+  assert.equal(await readHeartbeatCurrent(file), null, "missing → null")
+
+  const marker = {
+    ...idleHeartbeatCurrent("2026-10-15T00:00:00.000Z"),
+    state: "in-flight" as const,
+    tick: 7,
+    phase: "mission" as const,
+    mission: "drain",
+    mission_title: "Drain the turn buffer",
+    session: "ses_abc",
+    started_at: "2026-10-15T00:00:00.000Z",
+    level: 3,
+  }
+  await writeHeartbeatCurrent(file, marker)
+  const read = await readHeartbeatCurrent(file)
+  assert.equal(read?.state, "in-flight")
+  assert.equal(read?.tick, 7)
+  assert.equal(read?.mission, "drain")
+  assert.equal(read?.session, "ses_abc")
+
+  await writeFile(file, "{ not json", "utf8")
+  assert.equal(await readHeartbeatCurrent(file), null, "corrupt → null")
+  await rm(dir, { recursive: true, force: true })
 })

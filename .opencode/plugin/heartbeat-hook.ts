@@ -15,6 +15,7 @@ import { openDecisionGate } from "./lib/decision-gate.ts"
 import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import {
+  HEARTBEAT_CURRENT_FILE,
   HEARTBEAT_WAKE_CAP_MS,
   acquireHeartbeatLock,
   assembleMissionBrief,
@@ -24,12 +25,37 @@ import {
   digestVerdictFromResult,
   effectiveFrequencyMs,
   frequencyToMs,
+  idleHeartbeatCurrent,
   readHeartbeatConfig,
   releaseHeartbeatLock,
   heartbeatErrorFields,
+  writeHeartbeatCurrent,
+  soleDeterministicVerdict,
   type DigestVerdict,
+  type HeartbeatCurrent,
   type HeartbeatPhase,
 } from "./lib/heartbeat.ts"
+import {
+  DEFAULT_IDEA_STATE,
+  buildIdeaReviewRequest,
+  drawCategory,
+  extractIdea,
+  ideaDayContext,
+  ideaHash,
+  ideaId,
+  isDuplicate,
+  localDayKey,
+  parseBucket,
+  readBucket,
+  readIdeaConfig,
+  recordExpressed,
+  recordGenerated,
+  resolveIdeaFile,
+  reviewAccepted,
+  writeIdeaToBucket,
+  type IdeaConfig,
+  type IdeaState,
+} from "./lib/idea.ts"
 import { drainAccounting } from "./lib/knowledge.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
@@ -101,6 +127,15 @@ export default (async ({ client, directory, ...rest }) => {
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "heartbeat-hook" })
 
   const lockFile = join(stateDir, "heartbeat.lock")
+  // Live status marker for the dashboard (§9.2, card 16): written on every
+  // phase transition so `idle | in-flight` + the in-flight mission are
+  // observable without reading in-process state. Best-effort, single writer.
+  const currentFile = join(stateDir, HEARTBEAT_CURRENT_FILE)
+  let currentMarker: HeartbeatCurrent = idleHeartbeatCurrent()
+  const setCurrent = async (patch: Partial<HeartbeatCurrent>): Promise<void> => {
+    currentMarker = { ...currentMarker, ...patch, updated_at: nowIso() }
+    await writeHeartbeatCurrent(currentFile, currentMarker)
+  }
   // `noop_hash`/`noop_streak` drive B7 day-side backoff (missions-plan §7):
   // consecutive no_reply ticks on an identical digest stretch the cadence ×2/×4.
   const stateStore = createStateStore<{
@@ -123,6 +158,22 @@ export default (async ({ client, directory, ...rest }) => {
   const recordExecution = async (): Promise<void> => {
     await stateStore.update((s) => ({ ...s, noop_hash: null, noop_streak: 0 }))
   }
+
+  // Card 7a (§17.10): the idea pipeline's deterministic half rides the
+  // heartbeat — no idea-hook scheduler. Log settings are init-once (the
+  // `knowledge:`/`profile:`/`heartbeat:` restart-to-re-rotate policy); the
+  // behavioural dials (`enabled`, weights, thresholds) are hot-read per tick.
+  const ideaInit = await readIdeaConfig(dir)
+  const ideaLogger = getLogger(
+    logSettingsFrom(ideaInit as unknown as Record<string, unknown>, "log", "log_"),
+    { logDir, home: homedir(), channel: "idea" },
+  )
+  // Day/gap state: sole writer is this hook (day rollover before the digest,
+  // generated/expressed counts after a completed mission).
+  const ideaStateStore = createStateStore<IdeaState>(
+    join(stateDir, "idea.json"),
+    DEFAULT_IDEA_STATE,
+  )
 
   // Shared mood feed (card E): same mood.ndjson journal and queue discipline
   // mood-hook uses — one in-process serialized mutation path per plugin.
@@ -177,6 +228,73 @@ export default (async ({ client, directory, ...rest }) => {
     }
   }
 
+  const logIdea = async (entry: Record<string, unknown>): Promise<void> => {
+    try {
+      await ideaLogger.append({ ts: nowIso(), ...entry })
+    } catch (err) {
+      void diag.error("[heartbeat-hook] idea log failed:", err)
+    }
+  }
+
+  // Card 7a (§17.10) — the deterministic half of `idea-generate`: extract the
+  // typed block from the child's final message, dedupe against the bucket,
+  // run the JEV reviewer (fail-closed for the write: gate missing, fallback,
+  // abstain, or sub-threshold pTrue all reject), then append. Never throws —
+  // returns a short ledger tag.
+  const storeGeneratedIdea = async (summary: string, cfg: IdeaConfig): Promise<string> => {
+    const parsed = extractIdea(summary)
+    if (!parsed) {
+      await logIdea({ event: "idea-skipped", reason: "no-block" })
+      return "no-block"
+    }
+    const bucketFile = resolveIdeaFile(vaultDir, cfg.bucket_file)
+    const current = await readBucket(bucketFile)
+    const existing = parseBucket(current)
+    if (isDuplicate(parsed.body, existing, cfg.dedupe_threshold)) {
+      await logIdea({ event: "idea-skipped", reason: "duplicate", title: parsed.title })
+      return "duplicate"
+    }
+    if (cfg.review) {
+      const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
+      if (!gate) {
+        await logIdea({ event: "idea-review-reject", reason: "no-provider", title: parsed.title })
+        return "review-reject"
+      }
+      const { result, fallback } = await gate.decide(
+        buildIdeaReviewRequest(parsed, existing.map((e) => e.title)),
+        { fallback: "open" },
+      )
+      const pTrue = typeof result.probabilities?.true === "number" ? result.probabilities.true : 0
+      const accepted = reviewAccepted(result.value, pTrue, fallback, result.abstained, cfg.review_threshold)
+      await logIdea({
+        event: "idea-review",
+        title: parsed.title,
+        category: parsed.category,
+        pTrue,
+        reviewThreshold: cfg.review_threshold,
+        accepted,
+        fallback,
+        reason: result.error ? "error" : undefined,
+      })
+      if (!accepted) return "review-reject"
+    }
+    const today = localDayKey(new Date())
+    await writeIdeaToBucket(
+      bucketFile,
+      {
+        title: parsed.title,
+        category: parsed.category,
+        id: ideaId(parsed.body),
+        created: today,
+        hash: ideaHash(parsed.body),
+        body: parsed.body,
+      },
+      today,
+    )
+    await logIdea({ event: "idea-generated", title: parsed.title, category: parsed.category })
+    return "stored"
+  }
+
   type TickStatus = "fired" | "lock-held" | "sleeping"
 
   const runTick = async (): Promise<TickStatus> => {
@@ -227,8 +345,37 @@ export default (async ({ client, directory, ...rest }) => {
         ticks: s.ticks + 1,
       }))
       const tick = nextState.ticks
+      await setCurrent({
+        state: "in-flight",
+        tick,
+        phase: "pre-gate",
+        mission: null,
+        mission_title: null,
+        session: null,
+        started_at: nowIso(),
+        level: autonomy.level,
+      })
 
-      const digest = await computeDigest(dir, { now: new Date(nowMs) })
+      // Card 7a (§17.10): hot-read the idea dials; the day-rollover draw +
+      // express gap feed the `idea-roll` / `min-gap:express` candidacy.
+      // Pipeline off → no ideaDay (idea-roll fails closed) and no gap store;
+      // the rollover persists only on a real day change, never per tick.
+      const ideaCfg = await readIdeaConfig(dir)
+      let ideaDay: { target: number; generated: number } | undefined
+      let ideaGaps: Record<string, number> | undefined
+      if (ideaCfg.enabled) {
+        const stored = await ideaStateStore.read()
+        const rolled = ideaDayContext(stored, nowMs, ideaCfg.daily_weights, Math.random)
+        if (rolled.changed) await ideaStateStore.update(() => rolled.state)
+        ideaDay = rolled.day
+        if (stored.lastExpressedAt !== null) ideaGaps = { express: stored.lastExpressedAt }
+      }
+      const digest = await computeDigest(dir, {
+        now: new Date(nowMs),
+        ideaDay,
+        gaps: ideaGaps,
+        minGapMs: { express: ideaCfg.express_min_gap_hours * 3_600_000 },
+      })
       const candidates = digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`)
       const bias = digest.bias
 
@@ -259,6 +406,9 @@ export default (async ({ client, directory, ...rest }) => {
           bias,
           ...extra,
           mood_event: moodEvent,
+          // Exec time for the dashboard's metrics widget (card 16): ms from
+          // tick start to this ledger write.
+          duration_ms: Date.now() - nowMs,
         })
       ledgerForTick = ledger
 
@@ -296,33 +446,42 @@ export default (async ({ client, directory, ...rest }) => {
 
       // 7a. JEV digest decision. Fail-open to no_reply: decisions disabled,
       // error, abstain, or unknown id all mean silence — never invent work.
+      // §17.10 short-circuit first: exactly one deterministic `min-gap:`
+      // candidate (the express case) dispatches without a JEV call.
       phase = "digest"
+      await setCurrent({ phase })
       let verdict: DigestVerdict = { kind: "no_reply" }
       let reason = "decisions-disabled"
       let digestError: ReturnType<typeof heartbeatErrorFields> | undefined
-      try {
-        const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
-        if (gate) {
-          const prompts = await readDecisionPrompts(dir)
-          const outcome = await gate.decide(
-            buildDigestChoiceRequest(digest, prompts.digest.assertion),
-            { fallback: "open" },
-          )
-          verdict = digestVerdictFromResult(
-            outcome.result,
-            digest.candidates.map((c) => c.id),
-          )
-          reason =
-            outcome.reason !== "none"
-              ? outcome.reason // "error" | "abstain" | "shape"
-              : verdict.kind === "no_reply"
-                ? "jev-no-reply"
-                : "none"
+      const sole = soleDeterministicVerdict(digest.candidates)
+      if (sole) {
+        verdict = sole
+        reason = "sole-min-gap"
+      } else {
+        try {
+          const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
+          if (gate) {
+            const prompts = await readDecisionPrompts(dir)
+            const outcome = await gate.decide(
+              buildDigestChoiceRequest(digest, prompts.digest.assertion),
+              { fallback: "open" },
+            )
+            verdict = digestVerdictFromResult(
+              outcome.result,
+              digest.candidates.map((c) => c.id),
+            )
+            reason =
+              outcome.reason !== "none"
+                ? outcome.reason // "error" | "abstain" | "shape"
+                : verdict.kind === "no_reply"
+                  ? "jev-no-reply"
+                  : "none"
+          }
+        } catch (err) {
+          void diag.error("[heartbeat-hook] digest decision failed:", err)
+          reason = "error"
+          digestError = heartbeatErrorFields("digest", err)
         }
-      } catch (err) {
-        void diag.error("[heartbeat-hook] digest decision failed:", err)
-        reason = "error"
-        digestError = heartbeatErrorFields("digest", err)
       }
 
       const missionId = verdict.kind === "mission" ? verdict.id : null
@@ -347,11 +506,19 @@ export default (async ({ client, directory, ...rest }) => {
       // mission's `agent:` pins the child when set). The child is registered
       // in automationChildSessions so the other hooks never re-process it.
       phase = "dispatch"
+      await setCurrent({ phase })
       let outcome = "error"
       let tokenCost = 0
       let summary = ""
       let runError: ReturnType<typeof heartbeatErrorFields> | undefined
       try {
+        // §17.10 category draw: the hook injects the day's requested
+        // category into the brief (the dream-fragment injection pattern) —
+        // the tool-free generator cannot roll it itself.
+        const dispatchPrompt =
+          ideaCfg.enabled && brief.mission_id === "idea-generate"
+            ? `${brief.prompt}\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
+            : brief.prompt
         const created = await (client as any).session.create({
           body: { title: `heartbeat:${brief.mission_id}` },
           query: { directory: dir },
@@ -360,12 +527,18 @@ export default (async ({ client, directory, ...rest }) => {
         if (!childID) throw new Error("session.create returned no id")
         automationChildSessions.add(childID)
         phase = "mission"
+        await setCurrent({
+          phase,
+          mission: brief.mission_id,
+          mission_title: mission?.title ?? null,
+          session: childID,
+        })
         const idled = waitForChildIdle(childID)
         const res = await (client as any).session.promptAsync({
           path: { id: childID },
           body: {
             ...(brief.agent ? { agent: brief.agent } : {}),
-            parts: [{ type: "text", text: brief.prompt }],
+            parts: [{ type: "text", text: dispatchPrompt }],
           },
           query: { directory: dir },
         })
@@ -408,6 +581,7 @@ export default (async ({ client, directory, ...rest }) => {
       }
 
       phase = "post"
+      await setCurrent({ phase })
       if (outcome !== "completed") {
         await moodFeed.apply("mission_failure")
         moodEvent = "mission_failure"
@@ -444,6 +618,26 @@ export default (async ({ client, directory, ...rest }) => {
         void diag.error("[heartbeat-hook] backlog record failed:", err)
       }
 
+      // Card 7a (§17.10): the idea pipeline's post-run half — a completed
+      // idea-generate goes through dedupe + JEV review + bucket append; a
+      // completed express stamps the `min-gap:express` store. Best-effort: a
+      // failure logs and degrades the ledger tag to "error", never the tick.
+      let ideaNote: string | null = null
+      if (mission && ideaCfg.enabled && outcome === "completed") {
+        try {
+          if (mission.id === "idea-generate") {
+            ideaNote = await storeGeneratedIdea(summary, ideaCfg)
+            if (ideaNote === "stored") await ideaStateStore.update((s) => recordGenerated(s))
+          } else if (mission.id === "express") {
+            await ideaStateStore.update((s) => recordExpressed(s, Date.now()))
+            ideaNote = "expressed"
+          }
+        } catch (err) {
+          void diag.error("[heartbeat-hook] idea post-process failed:", err)
+          ideaNote = "error"
+        }
+      }
+
       await ledger({
         verdict: `mission:${brief.mission_id}`,
         mission: brief.mission_id,
@@ -451,6 +645,7 @@ export default (async ({ client, directory, ...rest }) => {
         token_cost: tokenCost,
         gate: "digest",
         reason,
+        ...(ideaNote ? { idea: ideaNote } : {}),
         ...(runError ? { error: runError } : {}),
       })
       // An executed mission resets the B7 backoff streak (§17.8 reset rule).
@@ -475,6 +670,16 @@ export default (async ({ client, directory, ...rest }) => {
     } finally {
       ticking = false
       if (lockHeld) await releaseHeartbeatLock(lockFile).catch(() => {})
+      // Close the live marker: idle once the tick ends (success, error, or a
+      // lock-held skip) — the dashboard never shows a stale in-flight state.
+      await setCurrent({
+        state: "idle",
+        phase: null,
+        mission: null,
+        mission_title: null,
+        session: null,
+        started_at: null,
+      })
     }
   }
 
