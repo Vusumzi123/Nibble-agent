@@ -338,6 +338,46 @@ test("GET /api/heartbeat: idle (no marker) reads cleanly", async () => {
   assert.equal(hb.body.lock, false)
 })
 
+// --- missions (canvas widget backend) ---------------------------------------
+
+test("GET/PUT /api/missions: list missions and toggle one (CSRF-gated)", async () => {
+  const mdir = join(dir, ".opencode", "missions")
+  await mkdir(mdir, { recursive: true })
+  await writeFile(
+    join(mdir, "drain.md"),
+    "---\nid: drain\ntitle: Drain the turn buffer\nfrequency: mid\nmenus: [day]\n---\nbody\n",
+    "utf8",
+  )
+
+  const list = await call(dash, "GET", "/api/missions")
+  assert.equal(list.status, 200)
+  const drain = list.body.missions.find((m: { id: string }) => m.id === "drain")
+  assert.equal(drain.enabled, true)
+  assert.equal(drain.file_enabled, true)
+
+  const noCsrf = await call(dash, "PUT", "/api/missions", { body: { id: "drain", enabled: false } })
+  assert.equal(noCsrf.status, 403)
+  assert.equal(noCsrf.body.error, "csrf")
+
+  const token = await csrf(dash)
+  const off = await call(dash, "PUT", "/api/missions", {
+    body: { id: "drain", enabled: false },
+    headers: { "x-csrf-token": token },
+  })
+  assert.equal(off.status, 200)
+  assert.deepEqual(off.body, { id: "drain", enabled: false })
+
+  const after = await call(dash, "GET", "/api/missions")
+  assert.equal(after.body.missions.find((m: { id: string }) => m.id === "drain").enabled, false)
+
+  const missing = await call(dash, "PUT", "/api/missions", {
+    body: { id: "nope", enabled: false },
+    headers: { "x-csrf-token": token },
+  })
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.error, "no_mission")
+})
+
 test("static SPA: hashed assets served with the right type; unknown path falls back to index.html", async () => {
   await writeFile(join(dir, "dashboard", "static", "main-abc.js"), "console.log('ui')", "utf8")
 

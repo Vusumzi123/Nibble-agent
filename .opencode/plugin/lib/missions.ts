@@ -316,16 +316,18 @@ export type LoadMissionsOpts = {
   missionsDir?: string
 }
 
-/**
- * Load every mission under `.opencode/missions/` (sorted by filename for
- * determinism), apply the restrict-only config overlay, and return the
- * effective mission list. A missing directory yields []; a missing config
- * file leaves the overlay empty.
- */
-export async function loadMissions(
+/** A loaded mission plus whether its *own file* enabled it, before the
+ *  restrict-only overlay is applied. The dashboard missions widget needs the
+ *  distinction: an overlay may disable a mission but never re-enable one the
+ *  file disables (D-M5), so a toggle-on must know the file value. */
+export type MissionState = Mission & { file_enabled: boolean }
+
+/** Shared loader core: parse every mission file, record its file-level
+ *  `enabled`, then apply the restrict-only overlay. */
+async function loadMissionEntries(
   directory: string,
   opts: LoadMissionsOpts = {},
-): Promise<Mission[]> {
+): Promise<Array<{ mission: Mission; fileEnabled: boolean }>> {
   const dir = opts.missionsDir ?? join(directory, MISSIONS_DIR)
   let entries: string[]
   try {
@@ -341,7 +343,7 @@ export async function loadMissions(
     overlay = {}
   }
 
-  const missions: Mission[] = []
+  const out: Array<{ mission: Mission; fileEnabled: boolean }> = []
   const seen = new Set<string>()
   const rejects: Array<{ path: string; raw: string; reason: string }> = []
   const parseIssues: Array<{ path: string; reason: string }> = []
@@ -363,7 +365,7 @@ export async function loadMissions(
       continue
     }
     seen.add(mission.id)
-    missions.push(applyMissionOverlay(mission, overlay[mission.id], rejects))
+    out.push({ mission: applyMissionOverlay(mission, overlay[mission.id], rejects), fileEnabled: mission.enabled })
   }
 
   // Report overlay rejects (section "autonomy" — same ledger as the config
@@ -376,5 +378,30 @@ export async function loadMissions(
     opts.onReject,
   )
 
-  return missions
+  return out
+}
+
+/**
+ * Load every mission under `.opencode/missions/` (sorted by filename for
+ * determinism), apply the restrict-only config overlay, and return the
+ * effective mission list. A missing directory yields []; a missing config
+ * file leaves the overlay empty.
+ */
+export async function loadMissions(
+  directory: string,
+  opts: LoadMissionsOpts = {},
+): Promise<Mission[]> {
+  return (await loadMissionEntries(directory, opts)).map((e) => e.mission)
+}
+
+/** As `loadMissions`, but keeps each mission's file-level `enabled` flag
+ *  alongside the effective value — for the dashboard missions widget. */
+export async function loadMissionStates(
+  directory: string,
+  opts: LoadMissionsOpts = {},
+): Promise<MissionState[]> {
+  return (await loadMissionEntries(directory, opts)).map((e) => ({
+    ...e.mission,
+    file_enabled: e.fileEnabled,
+  }))
 }

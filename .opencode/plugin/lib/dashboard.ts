@@ -25,11 +25,15 @@ import { SYSCONFIG, parseNestedSection } from "./config.ts"
 import {
   isNestedWritableSection,
   nestedSectionOpts,
+  parseMissionOverlay,
   readAutonomyConfig,
   readCommsConfig,
   readDashboardConfig,
+  readMissionOverlay,
   readMoodConfig,
+  type MissionOverlay,
 } from "./autonomy.ts"
+import { loadMissionStates } from "./missions.ts"
 import { atomicWrite } from "./fsx.ts"
 import { readMoodState } from "./mood.ts"
 import {
@@ -568,6 +572,263 @@ export async function backlogSnapshot(directory: string): Promise<BacklogSnapsho
   } catch {
     return { total: 0, entries: [] }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Missions (read + enable/disable toggle)
+//
+// The filesystem is the mission list (`.opencode/missions/*.md`); the
+// restrict-only overlay `autonomy.missions.<id>.*` can disable a mission but
+// never re-enable one the file itself disables (missions-plan §6 / D-M5). The
+// widget therefore lists the effective missions plus each file's own
+// `enabled`, and its toggle either writes `enabled: false` into the overlay or
+// removes that key again — the generic config writer cannot be used here
+// (hyphenated ids, and the overlay is skipped by the autonomy schema).
+
+export type MissionView = {
+  id: string
+  title: string
+  frequency: string
+  menus: string[]
+  min_level: number
+  approval: string
+  candidacy: string
+  agent: string
+  /** Effective value after the overlay. */
+  enabled: boolean
+  /** The mission file's own `enabled` — false means the overlay cannot turn it on. */
+  file_enabled: boolean
+  /** The overlay block for this mission, if any. */
+  overlay: MissionOverlay | null
+}
+
+export type MissionsSnapshot = { missions: MissionView[] }
+
+export async function missionsSnapshot(directory: string): Promise<MissionsSnapshot> {
+  const states = await loadMissionStates(directory)
+  let overlay: Record<string, MissionOverlay> = {}
+  try {
+    overlay = await readMissionOverlay(directory)
+  } catch {
+    overlay = {}
+  }
+  return {
+    missions: states.map((m) => ({
+      id: m.id,
+      title: m.title,
+      frequency: m.frequency,
+      menus: m.menus,
+      min_level: m.min_level,
+      approval: m.approval,
+      candidacy: m.candidacy,
+      agent: m.agent,
+      enabled: m.enabled,
+      file_enabled: m.file_enabled,
+      overlay: overlay[m.id] ?? null,
+    })),
+  }
+}
+
+const MISSION_ID_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function indentWidth(line: string): number {
+  return line.length - line.trimStart().length
+}
+
+function isBlankOrComment(line: string): boolean {
+  const t = line.trim()
+  return t === "" || t.startsWith("#")
+}
+
+// The readers slice a section's body with the same contiguous-indent rule as
+// `extractBlock` (lib/config.ts): only the run of indented lines immediately
+// after `autonomy:` — a blank line ends it. The overlay toggle must therefore
+// insert *inside* that run, not before the next top-level key (which a blank
+// line usually separates), or `parseMissionOverlay` would never see it.
+function autonomyBodyRange(lines: string[]): { bodyStart: number; bodyEnd: number } | null {
+  const opener = lines.findIndex((l) => /^autonomy:[ \t]*(#.*)?$/.test(l))
+  if (opener === -1) return null
+  const bodyStart = opener + 1
+  let bodyEnd = bodyStart
+  while (bodyEnd < lines.length && /^[ \t]/.test(lines[bodyEnd])) bodyEnd++
+  return { bodyStart, bodyEnd }
+}
+
+function firstChildIndent(lines: string[], from: number, to: number): number {
+  for (let i = from; i < to; i++) {
+    if (isBlankOrComment(lines[i])) continue
+    return indentWidth(lines[i])
+  }
+  return -1
+}
+
+function findOpener(lines: string[], from: number, to: number, indent: number, re: RegExp): number {
+  for (let i = from; i < to; i++) {
+    if (isBlankOrComment(lines[i])) continue
+    if (indentWidth(lines[i]) === indent && re.test(lines[i].trim())) return i
+  }
+  return -1
+}
+
+// End of a block opened at `opener`, bounded by `limit`: the first deeper-or-
+// equal-indent line (blank/comment lines stay inside).
+function childBlockEnd(lines: string[], opener: number, limit: number): number {
+  const base = indentWidth(lines[opener])
+  for (let i = opener + 1; i < limit; i++) {
+    if (isBlankOrComment(lines[i])) continue
+    if (indentWidth(lines[i]) <= base) return i
+  }
+  return limit
+}
+
+/**
+ * Upsert/remove the overlay key `autonomy.missions.<id>.enabled` on raw YAML
+ * text. Disabling writes `enabled: false` (creating the missions/id block path
+ * as needed); enabling removes the key and cleans up now-empty blocks. The
+ * caller re-parses the result with `parseMissionOverlay` and refuses on any
+ * mismatch, so an imperfect edit never lands.
+ */
+function editMissionOverlayEnabled(text: string, id: string, enabled: boolean): string {
+  const lines = text.split("\n")
+  const range = autonomyBodyRange(lines)
+  if (!range) return text
+  const { bodyStart, bodyEnd } = range
+  const childIndent = firstChildIndent(lines, bodyStart, bodyEnd)
+  if (childIndent === -1) return text
+
+  const missionsRe = /^missions[ \t]*:[ \t]*(#.*)?$/
+  const missionsOpener = findOpener(lines, bodyStart, bodyEnd, childIndent, missionsRe)
+
+  if (missionsOpener === -1) {
+    if (enabled) return text // already enabled — nothing to remove
+    lines.splice(
+      bodyEnd,
+      0,
+      " ".repeat(childIndent) + "missions:",
+      " ".repeat(childIndent + 2) + `${id}:`,
+      " ".repeat(childIndent + 4) + "enabled: false",
+    )
+    return lines.join("\n")
+  }
+
+  const missionsEnd = childBlockEnd(lines, missionsOpener, bodyEnd)
+  const missionsChild = firstChildIndent(lines, missionsOpener + 1, missionsEnd)
+  if (missionsChild === -1) {
+    if (enabled) return text
+    lines.splice(
+      missionsOpener + 1,
+      0,
+      " ".repeat(childIndent + 2) + `${id}:`,
+      " ".repeat(childIndent + 4) + "enabled: false",
+    )
+    return lines.join("\n")
+  }
+
+  const idOpener = findOpener(lines, missionsOpener + 1, missionsEnd, missionsChild, new RegExp(`^${escapeRe(id)}[ \\t]*:[ \\t]*(#.*)?$`))
+  if (idOpener === -1) {
+    if (enabled) return text
+    lines.splice(
+      missionsEnd,
+      0,
+      " ".repeat(missionsChild) + `${id}:`,
+      " ".repeat(missionsChild + 2) + "enabled: false",
+    )
+    return lines.join("\n")
+  }
+
+  const idEnd = childBlockEnd(lines, idOpener, missionsEnd)
+  const idChild = firstChildIndent(lines, idOpener + 1, idEnd)
+  let enabledIdx = -1
+  if (idChild !== -1) {
+    enabledIdx = findOpener(lines, idOpener + 1, idEnd, idChild, /^enabled[ \t]*:[ \t]*/)
+  }
+
+  if (!enabled) {
+    if (enabledIdx === -1) {
+      const indent = idChild === -1 ? missionsChild + 2 : idChild
+      lines.splice(idEnd, 0, " ".repeat(indent) + "enabled: false")
+    } else {
+      const ind = indentWidth(lines[enabledIdx])
+      const comment = lines[enabledIdx].slice(ind).match(/(\s+#.*)$/)?.[1] ?? ""
+      lines[enabledIdx] = " ".repeat(ind) + "enabled: false" + comment
+    }
+    return lines.join("\n")
+  }
+
+  if (enabledIdx === -1) return text // already enabled
+
+  const out = lines.slice()
+  out.splice(enabledIdx, 1)
+  const newIdEnd = idEnd - 1
+  const idRemaining = out.slice(idOpener + 1, newIdEnd)
+  if (idRemaining.every(isBlankOrComment)) {
+    out.splice(idOpener, newIdEnd - idOpener)
+    const newMissionsEnd = missionsEnd - (newIdEnd - idOpener)
+    const missionsRemaining = out.slice(missionsOpener + 1, newMissionsEnd)
+    if (missionsRemaining.every(isBlankOrComment)) out.splice(missionsOpener, newMissionsEnd - missionsOpener)
+  }
+  return out.join("\n")
+}
+
+export type MissionToggleResult = { id: string; enabled: boolean }
+
+/**
+ * Enable or disable a mission through the restrict-only overlay. Disabling
+ * writes `autonomy.missions.<id>.enabled: false` (creating the block if
+ * needed); enabling removes that key. Refuses an unknown mission (404) or an
+ * enable of a mission the file itself disables (409). All or nothing: the
+ * candidate text is re-parsed with parseMissionOverlay and the write is
+ * refused if it does not round-trip.
+ */
+export async function setMissionEnabled(
+  directory: string,
+  id: unknown,
+  enabled: unknown,
+  opts: WriteConfigOpts = {},
+): Promise<MissionToggleResult> {
+  if (typeof id !== "string" || !MISSION_ID_RE.test(id)) {
+    throw new DashboardError(400, "invalid_id", "mission id must match [A-Za-z_][A-Za-z0-9_-]*")
+  }
+  if (typeof enabled !== "boolean") {
+    throw new DashboardError(400, "invalid_value", "enabled must be a boolean")
+  }
+
+  const target = (await loadMissionStates(directory)).find((m) => m.id === id)
+  if (!target) throw new DashboardError(404, "no_mission", `no such mission: ${id}`)
+  if (enabled && !target.file_enabled) {
+    throw new DashboardError(
+      409,
+      "mission_file_disabled",
+      `${id} is disabled by its mission file; the overlay cannot re-enable it`,
+    )
+  }
+
+  const file = join(directory, SYSCONFIG)
+  const prev = await readFile(file, "utf8")
+  const next = editMissionOverlayEnabled(prev, id, enabled)
+
+  const { overlay, rejects } = parseMissionOverlay(next)
+  const scoped = rejects.filter((r) => r.path === `missions.${id}` || r.path.startsWith(`missions.${id}.`))
+  if (scoped.length > 0) {
+    throw new DashboardError(400, "invalid_value", "mission overlay failed validation", scoped)
+  }
+  const overlayDisabled = overlay[id]?.enabled === false
+  if (overlayDisabled !== !enabled) {
+    throw new DashboardError(400, "invalid_value", "mission toggle did not round-trip", { id, enabled })
+  }
+
+  if (next !== prev) await atomicWrite(file, next)
+  await logDashboardEvent(directory, "mission-toggle", {
+    id,
+    enabled,
+    origin: opts.origin ?? null,
+    ip: opts.ip ?? null,
+  })
+  return { id, enabled }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,9 @@ import {
   isLoopback,
   listLedgers,
   metricsSnapshot,
+  missionsSnapshot,
   renderYamlScalar,
+  setMissionEnabled,
   tailLedger,
   validateRoundTrip,
   writeConfig,
@@ -369,6 +371,110 @@ test("backlogSnapshot: missing file yields empty, real file yields entries", asy
   const snap = await backlogSnapshot(dir)
   assert.equal(snap.total, 1)
   assert.equal(snap.entries[0].id, "b1")
+})
+
+// --- missions: list + toggle ------------------------------------------------
+
+function missionFile(id: string, extra = ""): string {
+  return `---\nid: ${id}\ntitle: ${id} mission\nfrequency: mid\nmenus: [day]\n${extra}---\nbody\n`
+}
+
+async function withMissions(dir: string, files: Record<string, string>): Promise<void> {
+  const mdir = join(dir, ".opencode", "missions")
+  await mkdir(mdir, { recursive: true })
+  for (const [name, content] of Object.entries(files)) {
+    await writeFile(join(mdir, `${name}.md`), content, "utf8")
+  }
+}
+
+test("missionsSnapshot: missing dir yields empty; files report effective + file enabled", async () => {
+  const empty = await project()
+  assert.deepEqual(await missionsSnapshot(empty), { missions: [] })
+
+  const dir = await project()
+  await withMissions(dir, {
+    drain: missionFile("drain"),
+    dream: missionFile("dream", "enabled: false\n"),
+  })
+  const snap = await missionsSnapshot(dir)
+  assert.deepEqual(
+    snap.missions.map((m) => m.id),
+    ["drain", "dream"],
+  )
+  const drain = snap.missions.find((m) => m.id === "drain")!
+  assert.equal(drain.enabled, true)
+  assert.equal(drain.file_enabled, true)
+  assert.equal(drain.overlay, null)
+  const dream = snap.missions.find((m) => m.id === "dream")!
+  assert.equal(dream.enabled, false)
+  assert.equal(dream.file_enabled, false)
+})
+
+test("setMissionEnabled: disable writes the overlay, enable removes it (block cleaned up)", async () => {
+  const dir = await project()
+  await withMissions(dir, { drain: missionFile("drain") })
+
+  const off = await setMissionEnabled(dir, "drain", false)
+  assert.deepEqual(off, { id: "drain", enabled: false })
+  let text = await readConfig(dir)
+  assert.match(text, /missions:\n {4}drain:\n {6}enabled: false/)
+  // hot path: the loader sees the disabled mission, file still enabled
+  let snap = await missionsSnapshot(dir)
+  assert.equal(snap.missions[0].enabled, false)
+  assert.equal(snap.missions[0].file_enabled, true)
+
+  const on = await setMissionEnabled(dir, "drain", true)
+  assert.deepEqual(on, { id: "drain", enabled: true })
+  text = await readConfig(dir)
+  assert.ok(!text.includes("missions:"))
+  snap = await missionsSnapshot(dir)
+  assert.equal(snap.missions[0].enabled, true)
+
+  // journaled
+  const log = await readFile(join(dir, ".opencode", "logs", "dashboard.log"), "utf8")
+  const entry = JSON.parse(log.trim().split("\n").pop()!)
+  assert.equal(entry.event, "mission-toggle")
+  assert.equal(entry.id, "drain")
+})
+
+test("setMissionEnabled: enable keeps other overlay keys, removing only `enabled`", async () => {
+  const dir = await project(
+    CONFIG.replace(
+      "  root_classes: []\n",
+      "  root_classes: []\n  missions:\n    drain:\n      enabled: false\n      min_level: 3\n",
+    ),
+  )
+  await withMissions(dir, { drain: missionFile("drain") })
+  assert.equal((await missionsSnapshot(dir)).missions[0].enabled, false)
+
+  await setMissionEnabled(dir, "drain", true)
+  const text = await readConfig(dir)
+  assert.match(text, /missions:\n {4}drain:\n {6}min_level: 3/)
+  const autonomy = text.split("\nmood:")[0] // comms later also has `enabled: false`
+  assert.ok(!autonomy.includes("enabled: false"))
+  assert.equal((await missionsSnapshot(dir)).missions[0].enabled, true)
+})
+
+test("setMissionEnabled: unknown mission, file-disabled enable, and bad input refused", async () => {
+  const dir = await project()
+  await withMissions(dir, { drain: missionFile("drain"), dream: missionFile("dream", "enabled: false\n") })
+
+  await assert.rejects(
+    () => setMissionEnabled(dir, "nope", false),
+    (err: DashboardError) => err.status === 404 && err.code === "no_mission",
+  )
+  await assert.rejects(
+    () => setMissionEnabled(dir, "dream", true),
+    (err: DashboardError) => err.status === 409 && err.code === "mission_file_disabled",
+  )
+  await assert.rejects(
+    () => setMissionEnabled(dir, "bad id", false),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_id",
+  )
+  await assert.rejects(
+    () => setMissionEnabled(dir, "drain", "off"),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
 })
 
 test("heartbeatSnapshot: idle (no marker) vs in-flight marker + lock", async () => {

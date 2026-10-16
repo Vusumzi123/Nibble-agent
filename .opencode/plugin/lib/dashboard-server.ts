@@ -30,6 +30,8 @@ import {
   isLoopback,
   listLedgers,
   metricsSnapshot,
+  missionsSnapshot,
+  setMissionEnabled,
   tailLedger,
   writeConfig,
   type CsrfStore,
@@ -344,6 +346,23 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
 
     if (path === "/api/backlog" && method === "GET") {
       json(res, 200, await backlogSnapshot(directory))
+      return
+    }
+
+    if (path === "/api/missions" && method === "GET") {
+      json(res, 200, await missionsSnapshot(directory))
+      return
+    }
+
+    // Toggle a mission's enabled state via the restrict-only overlay. CSRF is
+    // enforced by the mutation guard above (PUT is non-idempotent).
+    if (path === "/api/missions" && method === "PUT") {
+      const body = (await readJsonBody(req)) as { id?: unknown; enabled?: unknown }
+      const result = await setMissionEnabled(directory, body.id, body.enabled, {
+        origin: typeof req.headers.origin === "string" ? req.headers.origin : null,
+        ip: req.socket.remoteAddress ?? null,
+      })
+      json(res, 200, result)
       return
     }
 
