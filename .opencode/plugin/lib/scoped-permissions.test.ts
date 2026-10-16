@@ -90,6 +90,29 @@ test("applyVaultScope leaves the top-level edit alone; allows only rag-brain vau
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
 })
 
+test("applyVaultScope allows the vault-confined MCP write tools for rag-brain only", () => {
+  const cfg: any = {
+    agent: {
+      "rag-brain": { permission: { "markdown-vault_edit": "deny" } },
+      "rag-search": { permission: { "markdown-vault_vault": "deny" } },
+    },
+    mcp: { "markdown-vault": { environment: {} } },
+  }
+  applyVaultScope(cfg, vaultDir())
+  assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_vault"], "allow")
+  assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_system"], "allow")
+  assert.equal(
+    cfg.agent["rag-brain"].permission["markdown-vault_edit"],
+    "deny",
+    "serializer edit tool stays denied",
+  )
+  assert.equal(
+    cfg.agent["rag-search"].permission["markdown-vault_vault"],
+    "deny",
+    "other agents untouched",
+  )
+})
+
 test("applyLogScope appends anchored allows to security-locks, preserving deny", () => {
   const cfg: any = {
     agent: {
@@ -142,6 +165,8 @@ test("applyConfig wires all three scopes from resolved roots", () => {
   applyConfig(cfg, vaultDir(), logDir(), diagramsDir())
   assert.equal(cfg.permission.edit, undefined, "no vault allow injected at top level")
   assert.equal(cfg.agent["rag-brain"].permission.edit[`${strip(vaultDir())}/**`], "allow")
+  assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_vault"], "allow")
+  assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_system"], "allow")
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
   assert.equal(cfg.agent["security-locks"].permission.edit[`${strip(logDir())}/**`], "allow")
   assert.equal(cfg.agent["diagram-developer"].permission.edit[`${strip(diagramsDir())}/**`], "allow")

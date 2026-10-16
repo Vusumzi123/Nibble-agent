@@ -2,12 +2,14 @@
 // These take ALREADY-RESOLVED absolute root dirs (see lib/paths.ts) so the
 // logic is deterministic and unit-testable without file I/O.
 //
-// Vault scope  (rag-brain edits + markdown-vault MCP path):
+// Vault scope  (rag-brain edits + markdown-vault MCP path + MCP write tools):
 //               <vaultDir>   e.g. .../Nibble/Brain
 //               Granted ONLY to the rag-brain sub-agent. The main agent and
 //               every other sub-agent keep `edit: ask` on the vault — they
 //               have no legitimate silent vault-write need, so a rogue write
-//               stops at the prompt (least privilege).
+//               stops at the prompt (least privilege). The MCP write tools are
+//               vault-confined by the server (VAULT_PATH + SafePath), so their
+//               allow cannot reach outside <vaultDir> either.
 // Diagram scope (diagram-developer edits):
 //               <diagramsDir> e.g. .../Nibble/diagrams
 //               Granted ONLY to the diagram-developer sub-agent, whose sole
@@ -55,9 +57,19 @@ export function diagramEditRules(diagramsDirAbs: string): PermissionMap {
   return appendAnchoredAllows({ "*": "ask" }, diagramsDirAbs)
 }
 
-// Apply the vault scope: rag-brain edit allow + MCP VAULT_PATH. The top-level
-// `permission.edit` is deliberately left untouched — the main agent must stay
-// on `ask` for vault writes.
+// MCP tool groups that can MUTATE vault content, allowed silently for
+// rag-brain alongside native edits. The markdown-vault server confines every
+// path to VAULT_PATH via SafePath, so granting these cannot reach outside the
+// vault. `markdown-vault_edit` is deliberately EXCLUDED: its AST operations
+// re-serialize the file and escape every `[[wikilink]]` (see rag-brain.md).
+export const VAULT_MCP_WRITE_TOOLS = [
+  "markdown-vault_vault",
+  "markdown-vault_system",
+] as const
+
+// Apply the vault scope: rag-brain edit allow + MCP VAULT_PATH + MCP write
+// tools. The top-level `permission.edit` is deliberately left untouched — the
+// main agent must stay on `ask` for vault writes.
 export function applyVaultScope(cfg: any, vaultDirAbs: string): void {
   if (!vaultDirAbs) return
 
@@ -65,6 +77,7 @@ export function applyVaultScope(cfg: any, vaultDirAbs: string): void {
   if (ragBrain) {
     ragBrain.permission = ragBrain.permission ?? {}
     ragBrain.permission.edit = vaultEditRules(vaultDirAbs)
+    for (const tool of VAULT_MCP_WRITE_TOOLS) ragBrain.permission[tool] = "allow"
   }
 
   const vaultMcp = cfg.mcp?.["markdown-vault"]
