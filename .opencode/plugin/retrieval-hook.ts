@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
+import { readDrainConfig } from "./lib/drain/config.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { automationChildSessions } from "./lib/automation.ts"
@@ -51,6 +52,9 @@ export default (async ({ client, directory }) => {
     channel: "retrieval-hook",
   })
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "retrieval-hook" })
+
+  // The recency lane (memory-explorer) is opt-out via drain.explorer_gate.
+  const drainCfg = await readDrainConfig(directory ?? process.cwd())
 
   const promptsFile = resolveRetrievalPrompts(directory ?? process.cwd(), config.prompts_file)
   // Question text source: the commented decision-prompts YAML (the default
@@ -114,7 +118,16 @@ export default (async ({ client, directory }) => {
       const reason = config.gate ? gate.reason : "shadow"
 
       if (config.inject) {
-        pending.set(sid, buildRetrievalDirective({ skip, reason, pTrue, summaryWords: config.summary_words }))
+        pending.set(
+          sid,
+          buildRetrievalDirective({
+            skip,
+            reason,
+            pTrue,
+            summaryWords: config.summary_words,
+            explorerGate: drainCfg.explorer_gate,
+          }),
+        )
       } else {
         pending.delete(sid)
       }

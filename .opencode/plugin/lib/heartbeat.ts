@@ -369,17 +369,19 @@ export async function computeDigest(
   } catch {
     /* silent */
   }
-  try {
-    // Cursor-backed candidacy: the drain cursor's activity time defines the
-    // un-consolidated window (never the retired memory buffer).
-    const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
-    unconsumed_turns = await countUnconsumed({
-      projectDir: directory,
-      lastTs: cursor.last_ts,
-      dbFile: opts.dbFile,
-    })
-  } catch {
-    /* silent */
+  if (drainCfg.enabled) {
+    try {
+      // Cursor-backed candidacy: the drain cursor's activity time defines the
+      // un-consolidated window (never the retired memory buffer).
+      const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
+      unconsumed_turns = await countUnconsumed({
+        projectDir: directory,
+        lastTs: cursor.last_ts,
+        dbFile: opts.dbFile,
+      })
+    } catch {
+      /* silent */
+    }
   }
   try {
     audit_failures = await countAuditFailures(join(logDir, auditCfg.log))

@@ -275,3 +275,14 @@ test("capBytes truncates to a UTF-8 boundary without replacement characters", ()
 test("capBytes leaves a short string untouched", () => {
   assert.equal(capBytes("hello", 100), "hello")
 })
+
+test("buildRetrievalDirective omits the recency lane when explorer_gate is off", () => {
+  const retrieve = buildRetrievalDirective({
+    skip: false,
+    reason: "retrieve",
+    pTrue: null,
+    explorerGate: false,
+  })
+  assert.equal(retrieve.includes("memory-explorer"), false)
+  assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
+})

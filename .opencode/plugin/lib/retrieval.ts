@@ -255,6 +255,8 @@ export function buildRetrievalDirective(input: {
   reason: string
   pTrue: number | null
   summaryWords?: number
+  /** Emit the recency lane (memory-explorer) instructions; default true. */
+  explorerGate?: boolean
 }): string {
   const stats = `reason=${input.reason}, p=${input.pTrue === null ? "n/a" : input.pTrue.toFixed(3)}`
   if (input.skip) {
@@ -268,8 +270,12 @@ export function buildRetrievalDirective(input: {
     "[brain-first: RETRIEVE] Retrieval gate (authoritative for this turn): perform the Brain-First rag-search (rag-search sub-agent) before answering.",
     `Delegate with exactly: "rag-search: <user message verbatim>" / "Task type: relevance search" / "Budget: search once (semantic + keyword, topK <= 5), read <= 3 notes. Reply with the relevant CONTENT — the facts, values, commands, paths, and steps that answer the question — as an answer-first synthesis of about ${words} words, citing each source note inline with [[wikilink]]. Never reply with a bare link list. No re-runs."`,
     'Integrate the returned facts directly into your answer — the summary already contains the content, so do not merely re-list the links; on "No relevant vault knowledge found" proceed normally.',
-    'Recency lane: if the request names a specific date or uses recency language ("recent", "today", "last week"), also delegate memory-explorer (un-consolidated turns) in parallel with rag-search. If rag-search returns thin/empty results, delegate memory-explorer as a follow-up.',
-    "Merge the two: fuse the facts, prefer the consolidated vault note when both cover the same fact, and dedupe by content hash.",
+    ...((input.explorerGate ?? true)
+      ? [
+          'Recency lane: if the request names a specific date or uses recency language ("recent", "today", "last week"), also delegate memory-explorer (un-consolidated turns) in parallel with rag-search. If rag-search returns thin/empty results, delegate memory-explorer as a follow-up.',
+          "Merge the two: fuse the facts, prefer the consolidated vault note when both cover the same fact, and dedupe by content hash.",
+        ]
+      : []),
     `(${stats})`,
   ].join("\n")
 }
