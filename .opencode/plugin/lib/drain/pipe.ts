@@ -46,6 +46,21 @@ export type DrainPipeResult = {
   error?: string
 }
 
+/** One-line mission summary for the heartbeat/dream ledger and backlog. */
+export function formatDrainResult(result: DrainPipeResult): string {
+  const bits = [
+    `drain:${result.outcome}`,
+    `${result.sessions} session(s)`,
+    `${result.items} item(s)`,
+    `${result.consolidated} consolidated`,
+    `${result.skipped} skipped`,
+    `cursor ${result.cursorBefore}->${result.cursorAfter}`,
+  ]
+  if (result.degraded) bits.push(`degraded:${result.degraded}`)
+  if (result.error) bits.push(`error:${result.error}`)
+  return bits.join(", ")
+}
+
 export type DrainPipeClient = SummarizerClient & ConsolidationClient
 
 export type DrainPipeDeps = {

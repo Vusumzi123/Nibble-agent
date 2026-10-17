@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { mockClient, tempDir, tempHome } from "./test-utils.ts"
 import { HEARTBEAT_FIXED_PROMPT } from "./heartbeat.ts"
 
@@ -343,6 +344,130 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
       return true
     }
   })
+})
+
+// The in-process drain runner: the heartbeat must not create a default child;
+// it dispatches the pipe, which spawns its own summarizer + rag-brain, and the
+// cursor advances only after the writer reports every item.
+test("mission runner: drain-pipe bypasses child dispatch and advances the cursor", async () => {
+  const dir = await project(["autonomy:", "  level: 3", "", "decisions:", "  enabled: true", "  provider: openjev"])
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "drain.md"),
+    [
+      "---",
+      "id: drain",
+      "title: Drain conversation backlog into the vault",
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: turns-pending",
+      "runner: drain-pipe",
+      "enabled: true",
+      "---",
+      "",
+      "Runner body.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+  const dbFile = join(dir, ".opencode", "state", "turns.db")
+  const db = new DatabaseSync(dbFile)
+  db.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+  `)
+  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run("top", null, dir, 2000)
+  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run("m1", "top", 2000, JSON.stringify({ role: "user" }))
+  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run("m1-p", "m1", JSON.stringify({ type: "text", text: "remember the drain test" }))
+  db.close()
+
+  const calls = { creates: [] as any[], prompts: [] as any[] }
+  const client = {
+    ...mockClient(),
+    session: {
+      get: async () => ({ data: {} }),
+      create: async (args: any) => {
+        calls.creates.push(args)
+        const title = args.body?.title
+        const id =
+          title === "drain-summarize"
+            ? "ses_sum"
+            : title === "knowledge-consolidate"
+              ? "ses_writer"
+              : "ses_other"
+        return { data: { id } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      messages: async ({ path }: any) => {
+        if (path.id === "ses_sum") {
+          return {
+            data: [
+              {
+                info: { role: "assistant", tokens: { input: 10, output: 5 } },
+                parts: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      items: [
+                        { title: "Drain Test", summary: "Consolidated a turn.", tags: [], atoms: [] },
+                      ],
+                    }),
+                  },
+                ],
+              },
+            ],
+          }
+        }
+        if (path.id === "ses_writer") {
+          return {
+            data: [
+              {
+                info: { role: "assistant", tokens: { input: 20, output: 10 }, cost: 0.001 },
+                parts: [{ type: "text", text: "```consolidated\n#1\n```" }],
+              },
+            ],
+          }
+        }
+        return { data: [] }
+      },
+    },
+  }
+
+  const hooks = await createHook({ client, directory: dir, drainDbFile: dbFile, spawner: missionSpawner } as any)
+
+  await waitFor(() => calls.prompts.some((p) => p.body.agent === "session-summarizer"))
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_sum" } } } as any)
+
+  await waitFor(() => calls.prompts.some((p) => p.body.agent === "rag-brain"))
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_writer" } } } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const titles = calls.creates.map((c) => c.body.title)
+  assert.ok(titles.includes("drain-summarize"))
+  assert.ok(titles.includes("knowledge-consolidate"))
+  assert.equal(titles.some((t) => String(t).startsWith("heartbeat:")), false)
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.mission, "drain")
+  assert.equal(tick.outcome, "completed")
+
+  const cursor = JSON.parse(
+    await readFile(join(dir, ".opencode", "state", "drain-cursor.json"), "utf8"),
+  )
+  assert.equal(cursor.last_ts, 2000)
+
+  const entries = await readBacklog(dir)
+  assert.equal(entries[0].status, "done")
+  assert.match(entries[0].result.summary, /drain:completed/)
 })
 
 // A failed mission run: outcome error feeds `mission_failure` (shared mood

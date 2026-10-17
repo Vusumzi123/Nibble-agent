@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { mockClient, tempDir, tempHome } from "./test-utils.ts"
 
 // Isolate HOME before the hook module resolves anything home-scoped.
@@ -100,26 +101,36 @@ async function writeSleep(dir: string, over: Record<string, unknown> = {}): Prom
   )
 }
 
-async function writePendingTurn(dir: string): Promise<void> {
+async function writePendingTurn(dir: string): Promise<string> {
   const stateDir = join(dir, ".opencode", "state")
   await mkdir(stateDir, { recursive: true })
-  await writeFile(
-    join(stateDir, "memory.json"),
-    JSON.stringify([
-      {
-        seq: 1,
-        session: "s",
-        ts: "2026-10-14T20:00:00.000Z",
-        user: "remember the kanban workflow",
-        assistant: "noted",
-        tags: [],
-        salience: null,
-        newTag: null,
-        hash: "h",
-      },
-    ]),
-    "utf8",
+  const file = join(stateDir, "turns.db")
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+  `)
+  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
+    "s",
+    null,
+    dir,
+    1_000,
   )
+  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+    "m1",
+    "s",
+    1_000,
+    JSON.stringify({ role: "user" }),
+  )
+  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+    "m1-p",
+    "m1",
+    JSON.stringify({ type: "text", text: "remember the kanban workflow" }),
+  )
+  db.close()
+  return file
 }
 
 async function readDreamLog(dir: string): Promise<any[]> {
@@ -245,10 +256,10 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
   const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
   await writeNightMissions(dir)
   await writeSleep(dir)
-  await writePendingTurn(dir)
+  const dbFile = await writePendingTurn(dir)
   const client = dreamClient("drained the turns")
   const { state, spawner } = countingSpawner()
-  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1 } as any)
+  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
 
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms

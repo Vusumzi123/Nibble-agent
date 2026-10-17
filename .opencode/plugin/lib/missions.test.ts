@@ -64,9 +64,19 @@ test("parseMissionFile parses a full frontmatter mission", () => {
     approval: "per-item",
     candidacy: "min-gap:last_refresh",
     agent: "profile-writer",
+    runner: "",
     enabled: false,
     body: "Do the thing.",
   })
+})
+
+test("parseMissionFile reads the runner key", () => {
+  const { mission, issues } = parseMissionFile(
+    "---\nid: drain\nrunner: drain-pipe\n---\nBody.\n",
+    "fallback",
+  )
+  assert.deepEqual(issues, [])
+  assert.equal(mission.runner, "drain-pipe")
 })
 
 test("parseMissionFile falls back to safe defaults for missing keys", () => {
@@ -80,6 +90,7 @@ test("parseMissionFile falls back to safe defaults for missing keys", () => {
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
   assert.equal(mission.agent, DEFAULT_MISSION.agent)
+  assert.equal(mission.runner, DEFAULT_MISSION.runner)
   assert.equal(mission.enabled, true)
   assert.equal(mission.body, "Body here.")
 })

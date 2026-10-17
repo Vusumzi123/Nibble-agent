@@ -289,6 +289,34 @@ function sdkSource(
 }
 
 /**
+ * One-shot count for the heartbeat candidacy gate. Opens and closes the read
+ * source; throws when the DB is unavailable and no SDK client was supplied.
+ */
+export async function countUnconsumed(opts: {
+  projectDir: string
+  lastTs: number
+  dbFile?: string
+  client?: DrainSdkClient
+  home?: string
+  env?: NodeJS.ProcessEnv
+  onWarn?: DrainWarn
+}): Promise<number> {
+  const source = await openDrainSource({
+    projectDir: opts.projectDir,
+    client: opts.client,
+    dbFile: opts.dbFile,
+    home: opts.home,
+    env: opts.env,
+    onWarn: opts.onWarn,
+  })
+  try {
+    return await source.unconsumedCount(opts.lastTs)
+  } finally {
+    await source.close().catch(() => {})
+  }
+}
+
+/**
  * Open the read source. Prefers SQLite; degrades to the SDK when the DB is
  * missing/unreadable or the schema does not match. Throws only when neither
  * lane is available.

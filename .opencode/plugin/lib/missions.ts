@@ -69,6 +69,8 @@ export type Mission = {
   candidacy: MissionCandidacy
   /** opencode agent name; "" = the heartbeat agent (D-M7). */
   agent: string
+  /** In-process runner name; "" = normal child-session dispatch. */
+  runner: string
   enabled: boolean
   /** Workflow prose after the frontmatter — the mission brief body. */
   body: string
@@ -85,6 +87,7 @@ export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
   approval: "writes-follow-dial",
   candidacy: "digest",
   agent: "",
+  runner: "",
   enabled: true,
 }
 
@@ -119,6 +122,9 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
     }
     case "agent":
       // `agent: ""` is the spec's explicit default (empty = heartbeat agent).
+      return stripPairQuotes(raw)
+    case "runner":
+      // `runner: ""` is the explicit default (normal child dispatch).
       return stripPairQuotes(raw)
     case "frequency": {
       const v = stripPairQuotes(raw)
@@ -169,6 +175,7 @@ const MISSION_KEYS = new Set([
   "approval",
   "candidacy",
   "agent",
+  "runner",
   "enabled",
 ])
 
@@ -222,6 +229,7 @@ export function parseMissionFile(
     approval: (parsed.approval as MissionApproval) ?? DEFAULT_MISSION.approval,
     candidacy: (parsed.candidacy as MissionCandidacy) ?? DEFAULT_MISSION.candidacy,
     agent: typeof parsed.agent === "string" ? parsed.agent : DEFAULT_MISSION.agent,
+    runner: typeof parsed.runner === "string" ? parsed.runner : DEFAULT_MISSION.runner,
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_MISSION.enabled,
     body: body.trim(),
   }

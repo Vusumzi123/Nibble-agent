@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 
 import {
   DEFAULT_HEARTBEAT_CONFIG,
@@ -402,9 +403,46 @@ async function tmpProject(files: Record<string, string>): Promise<string> {
   return dir
 }
 
+/** Seed a fixture opencode DB with one top-level session and N text turns. */
+function seedTurnsDb(dir: string, times: number[]): string {
+  const file = join(dir, ".opencode/state/opencode.db")
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+  `)
+  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
+    "s1",
+    null,
+    dir,
+    Math.max(...times, 1),
+  )
+  times.forEach((time, i) => {
+    db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+      `m${i}`,
+      "s1",
+      time,
+      JSON.stringify({ role: "user" }),
+    )
+    db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+      `m${i}-p`,
+      `m${i}`,
+      JSON.stringify({ type: "text", text: `turn ${i}` }),
+    )
+  })
+  db.close()
+  return file
+}
+
+function missingDb(dir: string): string {
+  return join(dir, "missing-opencode.db")
+}
+
 test("computeDigest: no config, no state -> silent signals, all-quiet, shipped set filtered", async () => {
   const dir = await tmpProject({})
-  const digest = await computeDigest(dir, { now: at(12, 0) })
+  const digest = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
   assert.equal(digest.signals.backlog_pending, 0)
   assert.equal(digest.signals.unconsumed_turns, 0)
   assert.equal(digest.signals.audit_failures, 0)
@@ -444,19 +482,6 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
         view_ref: null,
         links: [],
       }) + "\n",
-    ".opencode/state/memory.json": JSON.stringify([
-      {
-        seq: 1,
-        session: "s",
-        ts: "2026-10-13T00:00:00.000Z",
-        user: "u",
-        assistant: "a",
-        tags: [],
-        salience: null,
-        newTag: null,
-        hash: "h",
-      },
-    ]),
     ".opencode/logs/audit.log":
       JSON.stringify({ ts: "2026-10-13T00:00:00.000Z", agent: "kael", cmd: "false", exit: 1, root: false, sandbox: "opencode", dry: false }) +
       "\n" +
@@ -503,7 +528,9 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
     ].join("\n"),
   })
 
-  const day = await computeDigest(dir, { now: at(12, 0) })
+  const dbFile = seedTurnsDb(dir, [Date.parse("2026-10-13T00:00:00.000Z")])
+
+  const day = await computeDigest(dir, { now: at(12, 0), dbFile })
   assert.equal(day.level, 2)
   assert.equal(day.signals.backlog_pending, 1)
   assert.equal(day.signals.unconsumed_turns, 1)
@@ -514,7 +541,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
   assert.equal(day.bias.dispatch_influence, false)
   assert.equal(day.bias.mood, 1, "kill switch pins the mood term")
 
-  const night = await computeDigest(dir, { now: at(1, 0) })
+  const night = await computeDigest(dir, { now: at(1, 0), dbFile })
   assert.equal(night.signals.quiet, true)
   assert.deepEqual(night.candidates.map((c) => c.id), ["drain"], "day-only missions vanish after dark")
   assert.notEqual(night.digest_hash, day.digest_hash, "quiet flips the hash")
@@ -542,7 +569,7 @@ test("computeDigest: a pending entry above the level does not count", async () =
         links: [],
       }) + "\n",
   })
-  const digest = await computeDigest(dir, { now: at(12, 0) })
+  const digest = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
   assert.equal(digest.signals.backlog_pending, 0, "L3 entry invisible at L1")
   assert.equal(digest.all_quiet, true)
 })
@@ -576,7 +603,7 @@ test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (car
       "",
     ].join("\n"),
   })
-  const base = { now: at(12, 0) }
+  const base = { now: at(12, 0), dbFile: missingDb(dir) }
   // idea pipeline off (no ideaDay) -> idea-roll fails closed, express free.
   const off = await computeDigest(dir, base)
   assert.deepEqual(off.candidates.map((c) => c.id), ["express"])

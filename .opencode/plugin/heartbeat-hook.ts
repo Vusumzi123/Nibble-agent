@@ -60,6 +60,10 @@ import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions } from "./lib/missions.ts"
+import { readDrainConfig } from "./lib/drain/config.ts"
+import { createDrainLedger } from "./lib/drain/ledger.ts"
+import { runMissionRunner } from "./lib/drain/runner.ts"
+import { formatDrainResult, type DrainPipeClient } from "./lib/drain/pipe.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
@@ -198,6 +202,9 @@ export default (async ({ client, directory, ...rest }) => {
   // several due cycles (B7 backoff) without waiting out real minutes.
   // Production input never carries it.
   const wakeCapMs = (rest as { wakeCapMs?: number }).wakeCapMs ?? HEARTBEAT_WAKE_CAP_MS
+  // Test-injection seam: point the drain pipe at a fixture SQLite store
+  // instead of the real opencode data dir. Production input never carries it.
+  const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
 
   // In-process single-flight (the file lock covers cross-instance overlap).
   let ticking = false
@@ -375,6 +382,7 @@ export default (async ({ client, directory, ...rest }) => {
         ideaDay,
         gaps: ideaGaps,
         minGapMs: { express: ideaCfg.express_min_gap_hours * 3_600_000 },
+        dbFile: drainDbFile,
       })
       const candidates = digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`)
       const bias = digest.bias
@@ -511,68 +519,110 @@ export default (async ({ client, directory, ...rest }) => {
       let tokenCost = 0
       let summary = ""
       let runError: ReturnType<typeof heartbeatErrorFields> | undefined
+      let handledByRunner = false
       try {
-        // §17.10 category draw: the hook injects the day's requested
-        // category into the brief (the dream-fragment injection pattern) —
-        // the tool-free generator cannot roll it itself.
-        const dispatchPrompt =
-          ideaCfg.enabled && brief.mission_id === "idea-generate"
-            ? `${brief.prompt}\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
-            : brief.prompt
-        const created = await (client as any).session.create({
-          body: { title: `heartbeat:${brief.mission_id}` },
-          query: { directory: dir },
-        })
-        const childID: string = created?.data?.id
-        if (!childID) throw new Error("session.create returned no id")
-        automationChildSessions.add(childID)
-        phase = "mission"
-        await setCurrent({
-          phase,
-          mission: brief.mission_id,
-          mission_title: mission?.title ?? null,
-          session: childID,
-        })
-        const idled = waitForChildIdle(childID)
-        const res = await (client as any).session.promptAsync({
-          path: { id: childID },
-          body: {
-            ...(brief.agent ? { agent: brief.agent } : {}),
-            parts: [{ type: "text", text: dispatchPrompt }],
-          },
-          query: { directory: dir },
-        })
-        if (res?.error || (res?.response && !res.response.ok)) {
-          outcome = "error"
-          // No exception was thrown here — synthesize the error record from
-          // the provider response so the ledger line is still diagnosable.
-          runError = heartbeatErrorFields(
-            "dispatch",
-            new Error(
-              (res?.error as { message?: string } | undefined)?.message ??
-                `promptAsync failed (status ${res?.response?.status ?? "unknown"})`,
-            ),
-          )
-        } else {
-          outcome = (await idled) ? "completed" : "timeout"
+        // In-process mission runners (drain-pipe) bypass the child-session
+        // path entirely. An unknown runner logs and falls through.
+        if (mission?.runner) {
+          const drainCfg = await readDrainConfig(dir)
+          const runnerResult = await runMissionRunner(mission.runner, {
+            directory: dir,
+            stateDir,
+            vaultDir,
+            config: drainCfg,
+            client: client as unknown as DrainPipeClient,
+            waitForIdle: waitForChildIdle,
+            registerChild: (sid) => automationChildSessions.add(sid),
+            dbFile: drainDbFile,
+            ledger: createDrainLedger({ logDir, home: homedir() }),
+            onWarn: (msg, err) => {
+              void diag.warn(`[heartbeat-hook] ${msg}`, err)
+            },
+          })
+          if (runnerResult) {
+            handledByRunner = true
+            outcome = runnerResult.outcome
+            summary = formatDrainResult(runnerResult)
+            phase = "mission"
+            await setCurrent({
+              phase,
+              mission: brief.mission_id,
+              mission_title: mission.title,
+              session: null,
+            })
+            if (runnerResult.error) {
+              runError = heartbeatErrorFields("mission", new Error(runnerResult.error))
+            }
+          } else {
+            void diag.warn(
+              `[heartbeat-hook] unknown mission runner "${mission.runner}" — falling through to dispatch`,
+            )
+          }
         }
 
-        // Account for the child: billable tokens + the final assistant line
-        // (the mission's outcome summary). A finished child's message store
-        // may need a short propagation window — bounded retries, never a poll
-        // loop: a missing report degrades to empty, never blocks the tick.
-        const attempts = outcome === "completed" ? 5 : 1
-        for (let i = 0; i < attempts; i++) {
-          const msgs = await (client as any).session
-            .messages({ path: { id: childID }, query: { directory: dir } })
-            .catch(() => null)
-          if (Array.isArray(msgs?.data)) {
-            const acct = sessionAccounting(msgs.data)
-            tokenCost = acct.inputTokens + acct.outputTokens
-            summary = await sessions.lastAssistantText(childID)
+        if (!handledByRunner) {
+          // §17.10 category draw: the hook injects the day's requested
+          // category into the brief (the dream-fragment injection pattern) —
+          // the tool-free generator cannot roll it itself.
+          const dispatchPrompt =
+            ideaCfg.enabled && brief.mission_id === "idea-generate"
+              ? `${brief.prompt}\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
+              : brief.prompt
+          const created = await (client as any).session.create({
+            body: { title: `heartbeat:${brief.mission_id}` },
+            query: { directory: dir },
+          })
+          const childID: string = created?.data?.id
+          if (!childID) throw new Error("session.create returned no id")
+          automationChildSessions.add(childID)
+          phase = "mission"
+          await setCurrent({
+            phase,
+            mission: brief.mission_id,
+            mission_title: mission?.title ?? null,
+            session: childID,
+          })
+          const idled = waitForChildIdle(childID)
+          const res = await (client as any).session.promptAsync({
+            path: { id: childID },
+            body: {
+              ...(brief.agent ? { agent: brief.agent } : {}),
+              parts: [{ type: "text", text: dispatchPrompt }],
+            },
+            query: { directory: dir },
+          })
+          if (res?.error || (res?.response && !res.response.ok)) {
+            outcome = "error"
+            // No exception was thrown here — synthesize the error record from
+            // the provider response so the ledger line is still diagnosable.
+            runError = heartbeatErrorFields(
+              "dispatch",
+              new Error(
+                (res?.error as { message?: string } | undefined)?.message ??
+                  `promptAsync failed (status ${res?.response?.status ?? "unknown"})`,
+              ),
+            )
+          } else {
+            outcome = (await idled) ? "completed" : "timeout"
           }
-          if (summary || tokenCost > 0 || i === attempts - 1) break
-          await sleep(250)
+
+          // Account for the child: billable tokens + the final assistant line
+          // (the mission's outcome summary). A finished child's message store
+          // may need a short propagation window — bounded retries, never a poll
+          // loop: a missing report degrades to empty, never blocks the tick.
+          const attempts = outcome === "completed" ? 5 : 1
+          for (let i = 0; i < attempts; i++) {
+            const msgs = await (client as any).session
+              .messages({ path: { id: childID }, query: { directory: dir } })
+              .catch(() => null)
+            if (Array.isArray(msgs?.data)) {
+              const acct = sessionAccounting(msgs.data)
+              tokenCost = acct.inputTokens + acct.outputTokens
+              summary = await sessions.lastAssistantText(childID)
+            }
+            if (summary || tokenCost > 0 || i === attempts - 1) break
+            await sleep(250)
+          }
         }
       } catch (err) {
         void diag.error("[heartbeat-hook] mission run failed:", err)
@@ -580,9 +630,15 @@ export default (async ({ client, directory, ...rest }) => {
         runError = heartbeatErrorFields(phase === "mission" ? "mission" : "dispatch", err)
       }
 
+      // Runner outcomes are richer than the child path: "nothing" and
+      // "degraded" are successful ticks, only "error"/"dropped" are failures.
+      const missionOk = handledByRunner
+        ? outcome === "completed" || outcome === "nothing" || outcome === "degraded"
+        : outcome === "completed"
+
       phase = "post"
       await setCurrent({ phase })
-      if (outcome !== "completed") {
+      if (!missionOk) {
         await moodFeed.apply("mission_failure")
         moodEvent = "mission_failure"
       }
@@ -602,9 +658,9 @@ export default (async ({ client, directory, ...rest }) => {
               detail: summary || `heartbeat tick ${tick}: ${outcome}`,
             },
           })
-          await setStatus(backlogFile, entry.id, outcome === "completed" ? "done" : "failed", {
+          await setStatus(backlogFile, entry.id, missionOk ? "done" : "failed", {
             result: {
-              ok: outcome === "completed",
+              ok: missionOk,
               summary,
               ts: nowIso(),
               token_cost: tokenCost,

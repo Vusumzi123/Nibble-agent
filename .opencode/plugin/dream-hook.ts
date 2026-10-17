@@ -41,6 +41,10 @@ import {
 import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
+import { readDrainConfig } from "./lib/drain/config.ts"
+import { createDrainLedger } from "./lib/drain/ledger.ts"
+import { runMissionRunner } from "./lib/drain/runner.ts"
+import { formatDrainResult, type DrainPipeClient } from "./lib/drain/pipe.ts"
 import { loadMissions } from "./lib/missions.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
@@ -128,6 +132,7 @@ export default (async ({ client, directory, ...rest }) => {
   // dream roll.
   const spawner = (rest as { spawner?: BridgeSpawner }).spawner
   const random = (rest as { random?: () => number }).random
+  const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
 
   let ticking = false
 
@@ -246,6 +251,7 @@ export default (async ({ client, directory, ...rest }) => {
       const digest = await computeDigest(dir, {
         now: new Date(nowMs),
         random,
+        dbFile: drainDbFile,
         onDreamGate: (info) => dreamGates.push(info),
       })
       const candidates = digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`)
@@ -350,52 +356,83 @@ export default (async ({ client, directory, ...rest }) => {
         await sleepStore.update((s) => ({ ...s, dreams_tonight: s.dreams_tonight + 1 }))
       }
 
-      // 6. Execute exactly one mission in a child session (D-M7: the mission's
-      //    `agent:` pins the child — `dreamer` for dreams).
+      // 6. Execute exactly one mission. In-process runners (drain-pipe) own
+      //    their own children; everything else uses the D-M7 child session
+      //    (`agent:` pins it — `dreamer` for dreams).
       let outcome = "error"
       let tokenCost = 0
       let summary = ""
+      let handledByRunner = false
       try {
-        const created = await (client as any).session.create({
-          body: { title: `dream:${brief.mission_id}` },
-          query: { directory: dir },
-        })
-        const childID: string = created?.data?.id
-        if (!childID) throw new Error("session.create returned no id")
-        automationChildSessions.add(childID)
-        const idled = waitForChildIdle(childID)
-        const res = await (client as any).session.promptAsync({
-          path: { id: childID },
-          body: {
-            ...(brief.agent ? { agent: brief.agent } : {}),
-            parts: [{ type: "text", text: brief.prompt }],
-          },
-          query: { directory: dir },
-        })
-        if (res?.error || (res?.response && !res.response.ok)) {
-          outcome = "error"
-        } else {
-          outcome = (await idled) ? "completed" : "timeout"
-        }
-        const attempts = outcome === "completed" ? 5 : 1
-        for (let i = 0; i < attempts; i++) {
-          const msgs = await (client as any).session
-            .messages({ path: { id: childID }, query: { directory: dir } })
-            .catch(() => null)
-          if (Array.isArray(msgs?.data)) {
-            const acct = sessionAccounting(msgs.data)
-            tokenCost = acct.inputTokens + acct.outputTokens
-            summary = await sessions.lastAssistantText(childID)
+        if (mission?.runner) {
+          const drainCfg = await readDrainConfig(dir)
+          const runnerResult = await runMissionRunner(mission.runner, {
+            directory: dir,
+            stateDir,
+            vaultDir,
+            config: drainCfg,
+            client: client as unknown as DrainPipeClient,
+            waitForIdle: waitForChildIdle,
+            registerChild: (sid) => automationChildSessions.add(sid),
+            dbFile: drainDbFile,
+            ledger: createDrainLedger({ logDir, home: homedir() }),
+            onWarn: (msg, err) => {
+              void diag.warn(`[dream-hook] ${msg}`, err)
+            },
+          })
+          if (runnerResult) {
+            handledByRunner = true
+            outcome = runnerResult.outcome
+            summary = formatDrainResult(runnerResult)
+          } else {
+            void diag.warn(
+              `[dream-hook] unknown mission runner "${mission.runner}" — falling through to dispatch`,
+            )
           }
-          if (summary || tokenCost > 0 || i === attempts - 1) break
-          await delay(250)
+        }
+
+        if (!handledByRunner) {
+          const created = await (client as any).session.create({
+            body: { title: `dream:${brief.mission_id}` },
+            query: { directory: dir },
+          })
+          const childID: string = created?.data?.id
+          if (!childID) throw new Error("session.create returned no id")
+          automationChildSessions.add(childID)
+          const idled = waitForChildIdle(childID)
+          const res = await (client as any).session.promptAsync({
+            path: { id: childID },
+            body: {
+              ...(brief.agent ? { agent: brief.agent } : {}),
+              parts: [{ type: "text", text: brief.prompt }],
+            },
+            query: { directory: dir },
+          })
+          if (res?.error || (res?.response && !res.response.ok)) {
+            outcome = "error"
+          } else {
+            outcome = (await idled) ? "completed" : "timeout"
+          }
+          const attempts = outcome === "completed" ? 5 : 1
+          for (let i = 0; i < attempts; i++) {
+            const msgs = await (client as any).session
+              .messages({ path: { id: childID }, query: { directory: dir } })
+              .catch(() => null)
+            if (Array.isArray(msgs?.data)) {
+              const acct = sessionAccounting(msgs.data)
+              tokenCost = acct.inputTokens + acct.outputTokens
+              summary = await sessions.lastAssistantText(childID)
+            }
+            if (summary || tokenCost > 0 || i === attempts - 1) break
+            await delay(250)
+          }
         }
       } catch (err) {
         void diag.error("[dream-hook] mission run failed:", err)
         outcome = "error"
       }
 
-      if (isDream) {
+      if (isDream && !handledByRunner) {
         // §17.5 discipline: the hook parses the typed outcome — the LLM's
         // proposed mood numbers never reach the mood system.
         const parsed = outcome === "completed" ? parseDreamOutcome(summary) : null
@@ -433,7 +470,11 @@ export default (async ({ client, directory, ...rest }) => {
         }
       } else {
         // Non-dream night missions record exactly like a heartbeat run (§7).
-        if (outcome !== "completed") {
+        // Runner outcomes: "nothing" and "degraded" are successful ticks.
+        const missionOk = handledByRunner
+          ? outcome === "completed" || outcome === "nothing" || outcome === "degraded"
+          : outcome === "completed"
+        if (!missionOk) {
           await moodFeed.apply("mission_failure")
           moodEvent = "mission_failure"
         }
@@ -449,9 +490,9 @@ export default (async ({ client, directory, ...rest }) => {
                 detail: summary || `dream tick ${tick}: ${outcome}`,
               },
             })
-            await setStatus(backlogFile, entry.id, outcome === "completed" ? "done" : "failed", {
+            await setStatus(backlogFile, entry.id, missionOk ? "done" : "failed", {
               result: {
-                ok: outcome === "completed",
+                ok: missionOk,
                 summary,
                 ts: nowIso(),
                 token_cost: tokenCost,
@@ -469,7 +510,10 @@ export default (async ({ client, directory, ...rest }) => {
       // dream_token_budget is config-validated and journaled as an overrun
       // flag (no mid-flight cap exists on the child-session path — noted as
       // an open gap; mission_token_budget is enforced nowhere either).
-      const overBudget = isDream && tokenCost > q.dream_token_budget
+      const tickOk = handledByRunner
+        ? outcome === "completed" || outcome === "nothing" || outcome === "degraded"
+        : outcome === "completed"
+      const overBudget = isDream && !handledByRunner && tokenCost > q.dream_token_budget
       await ledger({
         verdict: `mission:${brief.mission_id}`,
         mission: brief.mission_id,
@@ -479,7 +523,7 @@ export default (async ({ client, directory, ...rest }) => {
         gate: "digest",
         reason,
       })
-      await afterTick(outcome === "completed")
+      await afterTick(tickOk)
       return "fired"
     } catch (err) {
       void diag.error("[dream-hook] tick failed:", err)

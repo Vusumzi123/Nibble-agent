@@ -29,12 +29,14 @@ import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.t
 import type { DecisionRequest, DecisionResult } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
+import { readDrainConfig } from "./drain/config.ts"
+import { loadCursor, resolveCursorFile } from "./drain/cursor.ts"
+import { countUnconsumed } from "./drain/db.ts"
 import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
 import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { readProfileConfig, resolveProfileFile } from "./profile.ts"
 import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
-import { readMemory, resolveMemoryFile } from "./turn-buffer.ts"
 import { errText, nowIso } from "./util.ts"
 
 // ---------------------------------------------------------------------------
@@ -331,6 +333,8 @@ export type ComputeDigestOpts = {
   ideaDay?: { target: number; generated: number }
   /** Dream-hook's roll journal seam (§17.3); heartbeat passes none. */
   onDreamGate?: CandidacyContext["onDreamGate"]
+  /** Explicit opencode DB path (tests/E2E); defaults to the data dir. */
+  dbFile?: string
 }
 
 /**
@@ -352,6 +356,7 @@ export async function computeDigest(
   const backlogCfg = await readBacklogConfig(directory)
   const auditCfg = await readAuditConfig(directory)
   const profileCfg = await readProfileConfig(directory)
+  const drainCfg = await readDrainConfig(directory)
 
   const mood = await readMoodState(join(stateDir, "mood.json"))
   const sleep = await readSleepState(join(stateDir, "sleep.json"))
@@ -365,7 +370,14 @@ export async function computeDigest(
     /* silent */
   }
   try {
-    unconsumed_turns = (await readMemory(resolveMemoryFile(stateDir))).length
+    // Cursor-backed candidacy: the drain cursor's activity time defines the
+    // un-consolidated window (never the retired memory buffer).
+    const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
+    unconsumed_turns = await countUnconsumed({
+      projectDir: directory,
+      lastTs: cursor.last_ts,
+      dbFile: opts.dbFile,
+    })
   } catch {
     /* silent */
   }
