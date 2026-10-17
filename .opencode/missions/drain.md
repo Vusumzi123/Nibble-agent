@@ -10,4 +10,11 @@ runner: drain-pipe
 enabled: true
 ---
 
-The runner handled this mission; record its summary line.
+The in-process `drain-pipe` runner owns this mission. It selects the active
+memory provider's writer (`BrainProvider` → `rag-brain` consolidation mode,
+§8), hands it labelled `#1..N` items, and advances the cursor only when the
+writer's `WriteReport` accounts for every item.
+
+Do not consolidate manually, do not delegate to `rag-brain` yourself, and do
+not touch the cursor or the turn store. If the runner is unavailable, record a
+one-line misconfiguration entry and stop.
