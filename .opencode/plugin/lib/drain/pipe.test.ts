@@ -318,3 +318,19 @@ test("candidate prefetch is included when the vault has a matching note", async 
   assert.match(prompt, /Candidate existing notes/)
   assert.match(prompt, /Wireguard Setup/)
 })
+
+test("a completed batch is not reprocessed on the next run", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client, prompts } = fakeClient({ writerReply: report(["#1"]) })
+
+  const first = await runDrainPipe(deps(base, client))
+  assert.equal(first.outcome, "completed")
+
+  const promptsAfterFirst = prompts.length
+  const second = await runDrainPipe(deps(base, client))
+
+  assert.equal(second.outcome, "nothing")
+  assert.equal(second.items, 0)
+  assert.equal(second.cursorAfter, 1000)
+  assert.equal(prompts.length, promptsAfterFirst, "no second summarizer/writer spawn")
+})
