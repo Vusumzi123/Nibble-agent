@@ -21,7 +21,6 @@ export type DrainConfig = {
   continuity_sessions: number
   poison_attempts: number
   drain_prompt_max_bytes: number
-  explorer_gate: boolean
 }
 
 export const DEFAULT_DRAIN: DrainConfig = {
@@ -38,10 +37,9 @@ export const DEFAULT_DRAIN: DrainConfig = {
   continuity_sessions: 20,
   poison_attempts: 3,
   drain_prompt_max_bytes: 60000,
-  explorer_gate: true,
 }
 
-const BOOL_KEYS = new Set(["enabled", "explorer_gate"])
+const BOOL_KEYS = new Set(["enabled"])
 const INT_KEYS = new Set([
   "batch_sessions",
   "max_turns_per_session",

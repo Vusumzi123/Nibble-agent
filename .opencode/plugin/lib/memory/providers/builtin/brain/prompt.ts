@@ -8,7 +8,7 @@
 //
 // Loaded via relative import only.
 import { formatCandidate, type CandidateNote } from "./candidates.ts"
-import { truncateToBytes } from "./render.ts"
+import { truncateToBytes } from "../../../../drain/render.ts"
 
 export type ConsolidationItem = {
   title: string

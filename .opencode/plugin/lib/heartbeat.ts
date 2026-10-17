@@ -30,8 +30,8 @@ import type { DecisionRequest, DecisionResult } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
 import { readDrainConfig } from "./drain/config.ts"
-import { loadCursor, resolveCursorFile } from "./drain/cursor.ts"
-import { countUnconsumed } from "./drain/db.ts"
+import { readMemoryConfig } from "./memory/config.ts"
+import { resolveProvider } from "./memory/registry.ts"
 import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
 import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
@@ -371,14 +371,18 @@ export async function computeDigest(
   }
   if (drainCfg.enabled) {
     try {
-      // Cursor-backed candidacy: the drain cursor's activity time defines the
-      // un-consolidated window (never the retired memory buffer).
-      const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
-      unconsumed_turns = await countUnconsumed({
-        projectDir: directory,
-        lastTs: cursor.last_ts,
+      // Cursor-backed candidacy lives behind the active provider: `none` and a
+      // Brain-only writer expose no pending count, so the drain mission cannot
+      // fire from a provider that does not own the lane.
+      const memoryCfg = await readMemoryConfig(directory)
+      const provider = resolveProvider(memoryCfg.provider, {
+        directory,
+        stateDir,
+        vaultDir,
+        drain: drainCfg,
         dbFile: opts.dbFile,
       })
+      unconsumed_turns = (await provider.pending?.()) ?? 0
     } catch {
       /* silent */
     }

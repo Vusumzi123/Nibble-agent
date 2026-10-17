@@ -966,3 +966,33 @@ test("heartbeat.current marker: write/read round-trip; missing/corrupt → null"
   assert.equal(await readHeartbeatCurrent(file), null, "corrupt → null")
   await rm(dir, { recursive: true, force: true })
 })
+
+test("computeDigest: memory.provider none yields zero unconsumed turns", async () => {
+  const dir = await tmpProject({
+    ".opencode/sysop-config.yaml": [
+      "autonomy:",
+      "  level: 2",
+      "memory:",
+      "  provider: none",
+      "",
+    ].join("\n"),
+    ".opencode/state/.keep": "",
+    ".opencode/missions/drain.md": [
+      "---",
+      "id: drain",
+      "title: Drain",
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: turns-pending",
+      "enabled: true",
+      "---",
+      "Body.",
+      "",
+    ].join("\n"),
+  })
+  const dbFile = seedTurnsDb(dir, [Date.parse("2026-10-13T00:00:00.000Z")])
+  const digest = await computeDigest(dir, { now: at(12, 0), dbFile })
+  assert.equal(digest.signals.unconsumed_turns, 0)
+  assert.deepEqual(digest.candidates.map((c) => c.id), [])
+})

@@ -25,6 +25,7 @@ config warn-once behaviour).
 | `vault:` | `vault-readonly-guard.ts`, `wikilink-guard.ts` |
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
 | `drain:` | `heartbeat-hook.ts` / `dream-hook.ts` → `lib/drain/*` (drain-pipe); `lib/heartbeat.ts` (candidacy) |
+| `memory:` | `lib/memory/*` — `retrieval-hook.ts`, `memory-hook.ts`, `memory-guard.ts`, `heartbeat-hook.ts`, `dream-hook.ts`, `lib/heartbeat.ts`, `lib/drain/pipe.ts` |
 | `backlog:` | `heartbeat-hook.ts` / `dream-hook.ts` (mission + drain-fallback records) → `lib/backlog.ts` |
 | `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the retrieval / profile hooks and the drain config reader, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
 | `retrieval:` | `retrieval-hook.ts` → `lib/retrieval.ts` |
@@ -134,11 +135,42 @@ reported exactly once.
 | `continuity_sessions` | Prior per-session summaries kept for long-lived sessions. |
 | `poison_attempts` | Failed runs at one boundary before the batch is dropped (`0` = never). |
 | `drain_prompt_max_bytes` | Consolidation-prompt byte cap; candidates are dropped first, then summaries are shortened. |
-| `explorer_gate` | Inject the recency-lane (`memory-explorer`) directive on retrieve turns. |
 
 The cursor is **activity time**, never an id. A partial, duplicate, or unknown
 writer report blocks the advance; after `poison_attempts` the pipe advances
 past the batch and records a `dropped` run.
+
+---
+
+## `memory:`
+
+One active, toggleable memory provider (`lib/memory/*`, design:
+`docs/knowledge-memory-modularization.md`). Retrieval, drain, heartbeat
+candidacy, the `memory_search` tool, and the dynamic guard all talk to this
+provider instead of naming `rag-search` / `rag-brain` / `memory-explorer`.
+
+| Key | Meaning |
+| --- | ------- |
+| `provider` | `both` (default) \| `rag-brain` \| `memory-explorer` \| `none`. One active provider at a time. |
+
+- `both` — Brain read (`rag-search`) + drain write (`rag-brain`) + the
+  un-consolidated recency lane (`memory-explorer`).
+- `rag-brain` — Brain read + drain write; no recency lane, no `memory_search`.
+- `memory-explorer` — un-consolidated read only; no consolidation writer.
+- `none` — complete disable: the retrieval hook injects a SKIP that forbids
+  every memory agent, the drain pipe returns `nothing` before opening the DB,
+  no tool is registered, and `memory-guard` blocks manual `task` delegation to
+  `rag-search`/`rag-brain`/`memory-explorer`.
+
+An unknown value fails closed to `none` and warns once. `retrieval-hook` and
+`memory-hook` read the provider at init (restart opencode after changing it);
+the drain, heartbeat, and guard read per call. `drain.enabled` remains the
+fine-grained kill switch for consolidation only.
+
+The `staleness` and `research` missions still name `rag-search`/`rag-brain` in
+their bodies. When the active provider does not own those agents, the
+`memory-guard` hook blocks the call; skip the mission for that run rather than
+retrying.
 
 ---
 

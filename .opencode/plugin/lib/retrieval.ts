@@ -247,37 +247,34 @@ export function evaluateRetrieval(result: DecisionResult, noulThreshold: number)
 // ---------------------------------------------------------------------------
 // System-prompt directive
 
-// The per-turn block appended to the system prompt. `gate: false` (shadow)
-// never emits a SKIP block — it still records verdicts but leaves the default
-// protocol in force.
+// The per-turn block appended to the system prompt. The directive body is
+// supplied by the active memory provider (`provider.readPlan()`), so this
+// module carries no agent names. `gate: false` (shadow) never emits a SKIP
+// block — it still records verdicts but leaves the default protocol in force.
+//
+// `readPlan: null` means memory is disabled (`memory.provider: none`): the
+// block forbids every memory delegation, including explicit "search my notes".
 export function buildRetrievalDirective(input: {
   skip: boolean
   reason: string
   pTrue: number | null
-  summaryWords?: number
-  /** Emit the recency lane (memory-explorer) instructions; default true. */
-  explorerGate?: boolean
+  /** Provider-selected directive body; null/undefined → memory disabled. */
+  readPlan?: string | null
 }): string {
   const stats = `reason=${input.reason}, p=${input.pTrue === null ? "n/a" : input.pTrue.toFixed(3)}`
+  if (!input.readPlan) {
+    return [
+      "[brain-first: SKIP] Memory is disabled in config (memory.provider: none). Do NOT delegate rag-search, rag-brain, memory-explorer, or any other memory provider — including explicit \"search my notes\" requests. Answer directly from the conversation.",
+      `(${stats})`,
+    ].join("\n")
+  }
   if (input.skip) {
     return [
       "[brain-first: SKIP] Retrieval gate (authoritative for this turn): a vault search is NOT required. Do NOT delegate a Brain-First rag-search this turn — answer directly from the conversation. If the user explicitly asks you to search their notes, ignore this skip and retrieve.",
       `(${stats})`,
     ].join("\n")
   }
-  const words = input.summaryWords ?? DEFAULT_RETRIEVAL.summary_words
-  return [
-    "[brain-first: RETRIEVE] Retrieval gate (authoritative for this turn): perform the Brain-First rag-search (rag-search sub-agent) before answering.",
-    `Delegate with exactly: "rag-search: <user message verbatim>" / "Task type: relevance search" / "Budget: search once (semantic + keyword, topK <= 5), read <= 3 notes. Reply with the relevant CONTENT — the facts, values, commands, paths, and steps that answer the question — as an answer-first synthesis of about ${words} words, citing each source note inline with [[wikilink]]. Never reply with a bare link list. No re-runs."`,
-    'Integrate the returned facts directly into your answer — the summary already contains the content, so do not merely re-list the links; on "No relevant vault knowledge found" proceed normally.',
-    ...((input.explorerGate ?? true)
-      ? [
-          'Recency lane: if the request names a specific date or uses recency language ("recent", "today", "last week"), also delegate memory-explorer (un-consolidated turns) in parallel with rag-search. If rag-search returns thin/empty results, delegate memory-explorer as a follow-up.',
-          "Merge the two: fuse the facts, prefer the consolidated vault note when both cover the same fact, and dedupe by content hash.",
-        ]
-      : []),
-    `(${stats})`,
-  ].join("\n")
+  return [input.readPlan, `(${stats})`].join("\n")
 }
 
 // ---------------------------------------------------------------------------

@@ -45,7 +45,16 @@ drain:
   continuity_sessions: 20      # prior summaries kept for long-lived sessions
   poison_attempts: 3           # failed runs at one boundary before dropping
   drain_prompt_max_bytes: 60000
-  explorer_gate: true          # recency lane (memory-explorer) directive
+
+memory:
+  # One active memory provider (docs/knowledge-memory-modularization.md).
+  #   both            — Brain read+write + un-consolidated read
+  #   rag-brain       — Brain read (`rag-search`) + write (`rag-brain`/drain)
+  #   memory-explorer — un-consolidated read only; no consolidation
+  #   none            — no memory read, write, or tools
+  # Unknown values fail closed to `none`. retrieval/memory hooks read this at
+  # init (restart opencode); the drain, heartbeat, and guard read it per call.
+  provider: both
 
 backlog:
   # Action queue: canonical store <state>/backlog.ndjson; the human view

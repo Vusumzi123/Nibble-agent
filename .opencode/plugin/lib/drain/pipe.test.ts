@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite"
 import { DEFAULT_DRAIN, type DrainConfig } from "./config.ts"
 import { loadCursor, resolveCursorFile } from "./cursor.ts"
 import { createDrainLedger, DRAIN_LEDGER_FILE } from "./ledger.ts"
+import { createBrainProvider } from "../memory/providers/builtin/brain.ts"
+import { resolveProvider } from "../memory/registry.ts"
 import { runDrainPipe, type DrainPipeClient, type DrainPipeDeps } from "./pipe.ts"
 
 const PROJECT = "/work/project-a"
@@ -148,13 +150,22 @@ function deps(
     ledger?: DrainPipeDeps["ledger"]
   } = {},
 ): DrainPipeDeps {
+  const cfg = config(opts.config)
   return {
     directory: PROJECT,
     stateDir: base.stateDir,
     vaultDir: base.vaultDir,
     dbFile: base.dbFile,
-    config: config(opts.config),
+    config: cfg,
     client,
+    provider: createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: cfg,
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
     waitForIdle: opts.waitForIdle ?? (async () => true),
     registerChild: () => {},
     ledger: opts.ledger,
@@ -333,4 +344,68 @@ test("a completed batch is not reprocessed on the next run", async () => {
   assert.equal(second.items, 0)
   assert.equal(second.cursorAfter, 1000)
   assert.equal(prompts.length, promptsAfterFirst, "no second summarizer/writer spawn")
+})
+
+test("a provider without a writer is a no-op and never opens the DB", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient()
+  const result = await runDrainPipe({
+    ...deps(base, client),
+    provider: resolveProvider("none", {
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      config: DEFAULT_DRAIN,
+    } as any),
+  } as any)
+  assert.equal(result.outcome, "nothing")
+  assert.match(result.error ?? "", /no writer/)
+  assert.equal(result.cursorAfter, 0)
+})
+
+test("a transient provider error backs off without poisoning the boundary", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient()
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
+    async consolidate() {
+      return { ok: false, consumed: [], skipped: [], errorKind: "transient", detail: "backend down" }
+    },
+  }
+
+  const result = await runDrainPipe({ ...deps(base, client), provider })
+  assert.equal(result.outcome, "error")
+  assert.match(result.error ?? "", /backend down/)
+  assert.equal(result.cursorAfter, 0)
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.equal(cursor.blocked?.attempts ?? 0, 0)
+})
+
+test("an atomic provider report advances the whole batch", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ summaryReply: TWO_ITEMS })
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
+    async consolidate() {
+      return { ok: true, consumed: [], skipped: [], atomic: true }
+    },
+  }
+
+  const result = await runDrainPipe({ ...deps(base, client), provider })
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.cursorAfter, 1000)
 })

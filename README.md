@@ -78,6 +78,10 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
   un-consolidated turns and hands labelled items to `rag-brain`; the cursor
   advances only when the writer reports every item. Un-consolidated turns stay
   searchable through the read-only `memory-explorer`.
+- **Memory provider:** the read plan, writer, pending count, tools, and guarded
+  agents come from one active provider selected by `memory.provider` (`both`,
+  `rag-brain`, `memory-explorer`, `none`). See
+  `docs/knowledge-memory-modularization.md`.
 - **Persona:** `profile-hook` injects `Brain/Agent.md` + `Brain/User.md` into
   the system prompt on the first turn of each session, re-injects the full
   block every `refresh_every_turns` turns (persona-fade mitigation; rebuilt

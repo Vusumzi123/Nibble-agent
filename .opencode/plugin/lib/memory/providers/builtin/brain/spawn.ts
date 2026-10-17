@@ -7,7 +7,7 @@
 // whether to retry or poison the batch.
 //
 // Loaded via relative import only.
-import { textOf } from "../sessions.ts"
+import { textOf } from "../../../../sessions.ts"
 
 export type ConsolidationClient = {
   session: {

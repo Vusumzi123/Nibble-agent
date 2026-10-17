@@ -1,7 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
-import { readDrainConfig } from "./lib/drain/config.ts"
+import { readMemoryConfig } from "./lib/memory/config.ts"
+import { resolveProvider } from "./lib/memory/registry.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { automationChildSessions } from "./lib/automation.ts"
@@ -53,8 +54,19 @@ export default (async ({ client, directory }) => {
   })
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "retrieval-hook" })
 
-  // The recency lane (memory-explorer) is opt-out via drain.explorer_gate.
-  const drainCfg = await readDrainConfig(directory ?? process.cwd())
+  // The active memory provider owns the directive body. `none` short-circuits
+  // the JEV gate and injects a SKIP that forbids every memory delegation.
+  const memoryCfg = await readMemoryConfig(directory ?? process.cwd(), (message) => {
+    void diag.warn(`[retrieval-hook] ${message}`)
+  })
+  const provider = resolveProvider(memoryCfg.provider, {
+    directory: directory ?? process.cwd(),
+    stateDir: resolved.stateDir,
+    vaultDir: resolved.vaultDir,
+    summaryWords: config.summary_words,
+    onWarn: (message, err) => void diag.warn(`[retrieval-hook] ${message}`, err),
+  })
+  const readPlan = provider.readPlan()
 
   const promptsFile = resolveRetrievalPrompts(directory ?? process.cwd(), config.prompts_file)
   // Question text source: the commented decision-prompts YAML (the default
@@ -75,7 +87,8 @@ export default (async ({ client, directory }) => {
   const decisionGate = await openDecisionGate(directory ?? process.cwd(), {
     timeoutMs: config.timeout_ms,
   })
-  if (!decisionGate) return {}
+  // Memory-disabled turns never touch the JEV: the SKIP is unconditional.
+  if (readPlan && !decisionGate) return {}
 
   const sessions = createSessionTools(client, directory ?? process.cwd())
 
@@ -89,7 +102,7 @@ export default (async ({ client, directory }) => {
     try {
       // FAIL-CLOSED: no rules fallback here — an error-carrying or missing
       // result becomes a SKIP (lib/retrieval.ts `evaluateRetrieval`).
-      const outcome = await decisionGate.decide(
+      const outcome = await decisionGate!.decide(
         buildRetrievalRequest(text, prompts.assertion, config.max_bytes),
         { fallback: "closed" },
       )
@@ -111,6 +124,28 @@ export default (async ({ client, directory }) => {
       const text = textOf((output as any)?.parts ?? []).trim()
       if (!text) return
 
+      if (!readPlan) {
+        if (config.inject) {
+          pending.set(
+            sid,
+            buildRetrievalDirective({ skip: true, reason: "memory:none", pTrue: null, readPlan: null }),
+          )
+        } else {
+          pending.delete(sid)
+        }
+        await logger.append({
+          ts: new Date().toISOString(),
+          session: sid,
+          event: "retrieval",
+          mode: config.gate ? "gate" : "shadow",
+          retrieve: false,
+          skip: true,
+          reason: "memory:none",
+          intent: false,
+        })
+        return
+      }
+
       const { gate, result } = await decideTurn(text)
       // Shadow mode logs the raw verdict but never suppresses retrieval.
       const skip = config.gate && gate.skip
@@ -124,8 +159,7 @@ export default (async ({ client, directory }) => {
             skip,
             reason,
             pTrue,
-            summaryWords: config.summary_words,
-            explorerGate: drainCfg.explorer_gate,
+            readPlan,
           }),
         )
       } else {

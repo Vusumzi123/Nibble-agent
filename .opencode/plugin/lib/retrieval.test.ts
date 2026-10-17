@@ -20,6 +20,8 @@ import {
   readRetrievalConfig,
   readRetrievalPrompts,
 } from "./retrieval.ts"
+import { brainReadPlan } from "./memory/providers/builtin/brain.ts"
+import { EXPLORER_LANE } from "./memory/providers/builtin/explorer.ts"
 import type { DecisionResult } from "./decisions.ts"
 import { writeSection } from "./test-utils.ts"
 
@@ -203,12 +205,22 @@ test("evaluateRetrieval fails closed on error, abstain, and bad shape", () => {
 // Directive + ledger
 
 test("buildRetrievalDirective emits an authoritative SKIP or RETRIEVE block", () => {
-  const skip = buildRetrievalDirective({ skip: true, reason: "confident-skip", pTrue: 0.93 })
+  const skip = buildRetrievalDirective({
+    skip: true,
+    reason: "confident-skip",
+    pTrue: 0.93,
+    readPlan: brainReadPlan(400),
+  })
   assert.match(skip, /\[brain-first: SKIP\]/)
   assert.match(skip, /authoritative for this turn/)
   assert.match(skip, /p=0\.930/)
 
-  const retrieve = buildRetrievalDirective({ skip: false, reason: "intent", pTrue: null })
+  const retrieve = buildRetrievalDirective({
+    skip: false,
+    reason: "intent",
+    pTrue: null,
+    readPlan: [brainReadPlan(400), EXPLORER_LANE].join("\n"),
+  })
   assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
   assert.match(retrieve, /p=n\/a/)
   // The directive carries the full protocol (template + result handling) so
@@ -226,7 +238,12 @@ test("buildRetrievalDirective emits an authoritative SKIP or RETRIEVE block", ()
 })
 
 test("buildRetrievalDirective sizes the synthesis to summaryWords", () => {
-  const retrieve = buildRetrievalDirective({ skip: false, reason: "retrieve", pTrue: null, summaryWords: 750 })
+  const retrieve = buildRetrievalDirective({
+    skip: false,
+    reason: "retrieve",
+    pTrue: null,
+    readPlan: brainReadPlan(750),
+  })
   assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
   assert.match(retrieve, /about 750 words/)
 })
@@ -276,13 +293,19 @@ test("capBytes leaves a short string untouched", () => {
   assert.equal(capBytes("hello", 100), "hello")
 })
 
-test("buildRetrievalDirective omits the recency lane when explorer_gate is off", () => {
+test("buildRetrievalDirective omits the recency lane for a Brain-only profile", () => {
   const retrieve = buildRetrievalDirective({
     skip: false,
     reason: "retrieve",
     pTrue: null,
-    explorerGate: false,
+    readPlan: brainReadPlan(400),
   })
   assert.equal(retrieve.includes("memory-explorer"), false)
   assert.match(retrieve, /\[brain-first: RETRIEVE\]/)
+})
+
+test("buildRetrievalDirective treats a null read plan as memory disabled", () => {
+  const block = buildRetrievalDirective({ skip: false, reason: "retrieve", pTrue: null, readPlan: null })
+  assert.match(block, /Memory is disabled in config/)
+  assert.match(block, /rag-search, rag-brain, memory-explorer/)
 })

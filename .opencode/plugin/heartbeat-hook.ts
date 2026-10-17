@@ -61,6 +61,8 @@ import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions } from "./lib/missions.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
+import { readMemoryConfig } from "./lib/memory/config.ts"
+import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
 import { runMissionRunner } from "./lib/drain/runner.ts"
 import { formatDrainResult, type DrainPipeClient } from "./lib/drain/pipe.ts"
@@ -525,12 +527,22 @@ export default (async ({ client, directory, ...rest }) => {
         // path entirely. An unknown runner logs and falls through.
         if (mission?.runner) {
           const drainCfg = await readDrainConfig(dir)
+          const memoryCfg = await readMemoryConfig(dir)
+          const provider = resolveProvider(memoryCfg.provider, {
+            directory: dir,
+            stateDir,
+            vaultDir,
+            drain: drainCfg,
+            dbFile: drainDbFile,
+            onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+          })
           const runnerResult = await runMissionRunner(mission.runner, {
             directory: dir,
             stateDir,
             vaultDir,
             config: drainCfg,
             client: client as unknown as DrainPipeClient,
+            provider,
             waitForIdle: waitForChildIdle,
             registerChild: (sid) => automationChildSessions.add(sid),
             dbFile: drainDbFile,

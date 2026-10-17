@@ -1,17 +1,15 @@
 // Drain pipe orchestration (knowledge-pipeline-redesign §A.12).
 //
-// One run: load cursor -> discover/fetch -> render -> summarize -> prefetch
-// candidates -> build the consolidation prompt -> spawn rag-brain -> parse the
-// report -> advance the cursor.
+// One run: load cursor -> discover/fetch -> render -> summarize -> hand the
+// items to the active memory provider's writer -> map its WriteReport to the
+// cursor.
 //
 // The pipe writes no vault notes and knows nothing about the writer's prompt
-// internals: the only contract is `Consolidation mode.` in and a
-// consolidated/skipped fence out. A run that cannot report every item does not
-// advance the cursor; poison handling bounds head-of-line blocking.
+// internals: the only contract is `WriteReport` (memory/types.ts). A run that
+// cannot report every item does not advance the cursor; transient failures back
+// off, permanent failures count toward poison.
 //
 // Loaded via relative import only.
-import { extractKeywords } from "../transcript.ts"
-import { extractTitlePhrases, findCandidateNotes, type CandidateNote } from "./candidates.ts"
 import type { DrainConfig } from "./config.ts"
 import {
   advanceCursor,
@@ -26,11 +24,14 @@ import {
 } from "./cursor.ts"
 import { openDrainSource, type DrainSource } from "./db.ts"
 import type { DrainLedger } from "./ledger.ts"
-import { buildConsolidationPrompt } from "./prompt.ts"
 import { renderSession, type RenderedSession } from "./render.ts"
-import { parseConsolidationReport } from "./report.ts"
-import { spawnConsolidationChild, type ConsolidationClient } from "./spawn.ts"
 import { summarizeSession, type SummaryItem, type SummarizerClient } from "./summarize.ts"
+import type {
+  MemoryProvider,
+  MemoryWriteClient,
+  WriteContext,
+  WriteItem,
+} from "../memory/types.ts"
 
 export type DrainOutcome = "completed" | "nothing" | "degraded" | "error" | "dropped"
 
@@ -61,7 +62,7 @@ export function formatDrainResult(result: DrainPipeResult): string {
   return bits.join(", ")
 }
 
-export type DrainPipeClient = SummarizerClient & ConsolidationClient
+export type DrainPipeClient = SummarizerClient & MemoryWriteClient
 
 export type DrainPipeDeps = {
   directory: string
@@ -69,6 +70,8 @@ export type DrainPipeDeps = {
   vaultDir: string
   config: DrainConfig
   client: DrainPipeClient
+  /** The single active memory provider; its writer owns consolidation. */
+  provider?: MemoryProvider
   /** Bounded wait for a child session to go idle. */
   waitForIdle: (sessionID: string) => Promise<boolean>
   registerChild?: (sessionID: string) => void
@@ -151,6 +154,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     })
 
   if (!cfg.enabled) return stuck()
+  // Complete-disable / read-only profiles: never open the DB, never advance.
+  if (!deps.provider || !deps.provider.consolidate) {
+    return stuck("memory provider has no writer")
+  }
 
   let source: DrainSource
   try {
@@ -226,87 +233,75 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         [entry.item.title, entry.item.summary, entry.item.atoms.join(" ")].join("\n"),
       ),
     ].join("\n\n")
-    let candidates: CandidateNote[] = []
-    try {
-      candidates = await findCandidateNotes({
-        vaultDir: deps.vaultDir,
-        keywords: extractKeywords(allText, 24),
-        phrases: extractTitlePhrases(allText, 12),
-        limit: cfg.prefetch_candidates,
-      })
-    } catch (err) {
-      deps.onWarn?.("drain pipe: candidate prefetch failed", err)
-    }
 
-    const prompt = buildConsolidationPrompt(
-      planned.map((entry) => entry.item),
-      candidates,
-      { maxBytes: cfg.drain_prompt_max_bytes },
-    )
-    promptBytes = Buffer.byteLength(prompt, "utf8")
-
-    const writerStarted = Date.now()
-    const spawned = await spawnConsolidationChild(deps.client, {
+    const items: WriteItem[] = planned.map((entry) => entry.item)
+    const ctx: WriteContext = {
       directory: deps.directory,
-      prompt,
-      model: cfg.writer_model,
+      vaultDir: deps.vaultDir,
+      config: cfg,
+      client: deps.client,
       waitForIdle: deps.waitForIdle,
       registerChild: deps.registerChild,
-    })
-    totalTokens += spawned.tokens ?? 0
+      onWarn: deps.onWarn,
+      dbFile: deps.dbFile,
+      searchText: allText,
+    }
+
+    const writerStarted = Date.now()
+    const report = await deps.provider!.consolidate!(items, ctx)
+    promptBytes = report.promptBytes ?? undefined
+    totalTokens += report.tokens ?? 0
 
     try {
       await deps.ledger?.write({
         source: "writer",
-        outcome: spawned.ok ? "ok" : "error",
+        outcome: report.ok ? "ok" : "error",
         model: cfg.writer_model || null,
-        prompt_bytes: promptBytes,
+        prompt_bytes: report.promptBytes ?? null,
         wall_ms: Date.now() - writerStarted,
-        tokens: spawned.tokens,
-        cost: spawned.cost,
+        tokens: report.tokens ?? null,
+        cost: report.cost ?? null,
         cursor_before: cursorBefore,
         cursor_after: cursorBefore,
-        session: spawned.sessionID || null,
-        error: spawned.error ?? null,
+        session: report.session ?? null,
+        error: report.detail ?? null,
       })
     } catch {
       /* fail-open */
     }
 
     const boundary = maxTurnTime(renderings)
+    const complete =
+      report.atomic === true || report.consumed.length + report.skipped.length === items.length
 
-    if (!spawned.ok) {
-      const failed = recordFailure(cursor, boundary, cfg.poison_attempts)
-      cursor = failed.cursor
-      await saveCursor(cursorFile, cursor)
+    if (!report.ok || !complete) {
+      // Transient provider failures back off without poisoning the boundary.
+      if (report.errorKind !== "transient") {
+        const failed = recordFailure(cursor, boundary, cfg.poison_attempts)
+        cursor = failed.cursor
+        await saveCursor(cursorFile, cursor)
+        return emit({
+          outcome: failed.dropped ? "dropped" : "error",
+          sessions: renderings.length,
+          items: planned.length,
+          consolidated: report.consumed.length,
+          skipped: report.skipped.length,
+          cursorBefore,
+          cursorAfter: cursor.last_ts,
+          degraded,
+          error: report.detail ?? (report.ok ? "incomplete report" : "writer failed"),
+        })
+      }
       return emit({
-        outcome: failed.dropped ? "dropped" : "error",
+        outcome: "error",
         sessions: renderings.length,
         items: planned.length,
-        consolidated: 0,
-        skipped: 0,
-        cursorBefore,
-        cursorAfter: cursor.last_ts,
-        degraded,
-        error: spawned.error ?? "writer failed",
-      })
-    }
-
-    const report = parseConsolidationReport(spawned.reply, planned.length)
-    if (!report.valid) {
-      const failed = recordFailure(cursor, boundary, cfg.poison_attempts)
-      cursor = failed.cursor
-      await saveCursor(cursorFile, cursor)
-      return emit({
-        outcome: failed.dropped ? "dropped" : "error",
-        sessions: renderings.length,
-        items: planned.length,
-        consolidated: report.consolidated.length,
+        consolidated: report.consumed.length,
         skipped: report.skipped.length,
         cursorBefore,
         cursorAfter: cursor.last_ts,
         degraded,
-        error: `invalid report: ${report.error ?? "incomplete"}`,
+        error: report.detail ?? "writer failed (transient)",
       })
     }
 
@@ -330,7 +325,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       outcome: degraded ? "degraded" : "completed",
       sessions: renderings.length,
       items: planned.length,
-      consolidated: report.consolidated.length,
+      consolidated: report.consumed.length,
       skipped: report.skipped.length,
       cursorBefore,
       cursorAfter: cursor.last_ts,

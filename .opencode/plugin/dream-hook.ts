@@ -55,8 +55,8 @@ import {
   durationToMs,
   reconcileSleep,
 } from "./lib/sleep.ts"
-import { loadCursor, resolveCursorFile } from "./lib/drain/cursor.ts"
-import { searchUnconsumed } from "./lib/drain/db.ts"
+import { readMemoryConfig } from "./lib/memory/config.ts"
+import { resolveProvider } from "./lib/memory/registry.ts"
 import { nowIso, sleep as delay } from "./lib/util.ts"
 
 // In-process dream timer (kanban card G, plan §17.2/§17.3 — the D-M9/§13
@@ -168,15 +168,15 @@ export default (async ({ client, directory, ...rest }) => {
     let recent: string | null = null
     try {
       const drainCfg = await readDrainConfig(dir)
-      const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
-      const [last] = await searchUnconsumed({
-        projectDir: dir,
-        cursorTs: cursor.last_ts,
-        query: "",
-        topK: 1,
+      const memoryCfg = await readMemoryConfig(dir)
+      const provider = resolveProvider(memoryCfg.provider, {
+        directory: dir,
+        stateDir,
+        vaultDir,
+        drain: drainCfg,
         dbFile: drainDbFile,
       })
-      if (last?.excerpt) recent = `recent turn: ${last.excerpt.replace(/\s+/g, " ").trim().slice(0, 300)}`
+      recent = (await provider.seed?.()) ?? null
     } catch {
       /* no turn store — seed A falls back to the mood line */
     }
@@ -374,12 +374,22 @@ export default (async ({ client, directory, ...rest }) => {
       try {
         if (mission?.runner) {
           const drainCfg = await readDrainConfig(dir)
+          const memoryCfg = await readMemoryConfig(dir)
+          const provider = resolveProvider(memoryCfg.provider, {
+            directory: dir,
+            stateDir,
+            vaultDir,
+            drain: drainCfg,
+            dbFile: drainDbFile,
+            onWarn: (msg, err) => void diag.warn(`[dream-hook] ${msg}`, err),
+          })
           const runnerResult = await runMissionRunner(mission.runner, {
             directory: dir,
             stateDir,
             vaultDir,
             config: drainCfg,
             client: client as unknown as DrainPipeClient,
+            provider,
             waitForIdle: waitForChildIdle,
             registerChild: (sid) => automationChildSessions.add(sid),
             dbFile: drainDbFile,

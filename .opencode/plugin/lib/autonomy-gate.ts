@@ -590,12 +590,13 @@ const VAULT_PREFIX = "markdown-vault_"
 // Built-in `task` sub-agent types → tier. The child session is floor-only under
 // gate_scope main, so the SPAWN is the permission event; the tier reflects the
 // worst the child could do. Unknown types fail closed to `subagent-write`.
-const SUBAGENT_TIERS: Record<string, CallClass> = {
+export const SUBAGENT_TIERS: Record<string, CallClass> = {
   "rag-search": "subagent-read",
   explore: "subagent-read",
   "safe-browser": "subagent-web",
   "deep-browser": "subagent-web-deep",
   "rag-brain": "subagent-write",
+  "memory-explorer": "subagent-read",
   "package-manager": "subagent-write",
   "os-configurator": "subagent-write",
   "sandbox-runner": "subagent-write",

@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-10-17
+
+### Added
+
+- **Memory provider modularization (`memory.provider`)** — the retrieval
+  directive, drain writer, heartbeat candidacy, dream seed, `memory_search`
+  tool, and memory-agent guard now go through one active
+  `MemoryProvider` instead of naming `rag-search` / `rag-brain` /
+  `memory-explorer` directly.
+  - New `lib/memory/` package: `types.ts` (contract + `WriteReport`),
+    `config.ts` (`both | rag-brain | memory-explorer | none`, invalid → `none`
+    + warn-once), `registry.ts`, `providers/builtin/{brain,explorer,index}.ts`,
+    and `guard.ts`. The consolidation prompt/spawn/report/candidates modules
+    moved under `providers/builtin/brain/`.
+  - `drain/pipe.ts` now imports only `memory/types.ts` and maps
+    `WriteReport` to cursor advance/poison (transient = back off, permanent =
+    poison, `atomic` = whole batch).
+  - `retrieval-hook.ts` injects `provider.readPlan()`; `none` short-circuits
+    the JEV and injects a SKIP that forbids every memory agent even without a
+    decision provider. New `memory-guard.ts` blocks manual `task` delegation
+    and `memory_search` calls the active provider does not own.
+  - New `memory:` config section; `drain.explorer_gate` removed (superseded).
+    `memory-explorer` added to `SUBAGENT_TIERS` as `subagent-read`.
+  - Docs: `docs/knowledge-memory-modularization.md` marked implemented,
+    reference/example/README updated.
+  - Tests: 759/760 pass; the remaining failure is the pre-existing
+    `autonomy.test.ts` live-config check, which needs a local
+    `.opencode/sysop-config.yaml` (absent in this checkout).
+
+### Removed
+
+- `drain.explorer_gate` — the recency lane is now a provider profile.
+
 Notable changes to Nibble, newest first. Sections follow
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions
 (`Added` / `Changed` / `Fixed` / `Removed`).
