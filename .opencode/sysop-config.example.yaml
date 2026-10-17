@@ -28,6 +28,25 @@ audit:
   compress_level: 6
   rotate_by: size            # size | daily | weekly
 
+drain:
+  # Cursor-backed conversation consolidation (drain-pipe). The heartbeat/dream
+  # `drain` mission reads the opencode SQLite store from the cursor, summarizes
+  # each session, and hands labelled items to rag-brain. All keys are optional.
+  enabled: true
+  cursor_file: drain-cursor.json   # leaf under <state>
+  writer_model: ""             # rag-brain writer; "" = the agent default
+  summarize_model: ""          # session-summarizer; "" = the agent default
+  batch_sessions: 5            # max top-level sessions per run
+  max_turns_per_session: 40    # turn cap per session
+  max_session_bytes: 24000     # rendered-delta byte cap (0 = unlimited)
+  max_items_per_session: 6     # summarizer output cap
+  prefetch_candidates: 3       # deterministic vault candidates per batch
+  continuity_turns: 6          # reserved for continuity tuning (currently unused)
+  continuity_sessions: 20      # prior summaries kept for long-lived sessions
+  poison_attempts: 3           # failed runs at one boundary before dropping
+  drain_prompt_max_bytes: 60000
+  explorer_gate: true          # recency lane (memory-explorer) directive
+
 backlog:
   # Action queue: canonical store <state>/backlog.ndjson; the human view
   # <vault>/Backlog.md is regenerated one-way from it — never hand-edit.

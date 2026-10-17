@@ -24,8 +24,9 @@ config warn-once behaviour).
 | `paths:` | every reader below (via `lib/paths.ts`), plus `scoped-permissions.ts` |
 | `vault:` | `vault-readonly-guard.ts`, `wikilink-guard.ts` |
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
+| `drain:` | `heartbeat-hook.ts` / `dream-hook.ts` → `lib/drain/*` (drain-pipe); `lib/heartbeat.ts` (candidacy) |
 | `backlog:` | `heartbeat-hook.ts` / `dream-hook.ts` (mission + drain-fallback records) → `lib/backlog.ts` |
-| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the knowledge / retrieval / profile hooks, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
+| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the retrieval / profile hooks and the drain config reader, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
 | `retrieval:` | `retrieval-hook.ts` → `lib/retrieval.ts` |
 | `browser:` | `web-scan-hook.ts` → `lib/browser.ts` (scanner: `lib/injection.ts`) |
 | `profile:` | `profile-hook.ts` (spawns `profile-writer`) |
@@ -55,7 +56,7 @@ and `~/` paths are honored as overrides.
 | `vault:` | repo root | the Obsidian vault, e.g. `<repo>/Brain` |
 | `diagrams:` | repo root | diagram-developer write scope |
 | `log:` | repo root | every NDJSON channel log (audit, telemetry, hook ledgers) — gitignored |
-| `state:` | repo root | project-local transient state: conversation turn buffer, hook state JSON — gitignored |
+| `state:` | repo root | project-local transient state: drain cursor, hook state JSON — gitignored |
 
 Everything is project-scoped; there is no home-wide directory, so two projects
 on one machine never share an audit trail or a state file.
@@ -106,6 +107,38 @@ and root/sandbox/dry flags.
 | `rotate_bytes` | 10 MB default in the example |
 | `keep_generations` | `audit.log.1` .. `audit.log.N` |
 | rotation keys | **bare** keys (no `log_` prefix) |
+
+---
+
+## `drain:`
+
+Cursor-backed conversation consolidation (`lib/drain/*`, design:
+`docs/knowledge-pipeline-redesign.md`). The drain mission discovers top-level
+sessions newer than the cursor, renders and summarizes each delta, and hands
+labelled `#1..N` items to `rag-brain`. The writer reports a
+`consolidated`/`skipped` fence; the cursor advances only when every item is
+reported exactly once.
+
+| Key | Meaning |
+| --- | ------- |
+| `enabled` | Master switch for the runner (`false` = the mission is a no-op). |
+| `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the activity-time cursor (`last_ts`), the blocked counter, and per-session continuity summaries. |
+| `writer_model` | `rag-brain` writer model; `""` = the agent default. |
+| `summarize_model` | `session-summarizer` model; `""` = the agent default. |
+| `batch_sessions` | Max top-level sessions per run. |
+| `max_turns_per_session` | Cap on fetched text parts per session. |
+| `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
+| `max_items_per_session` | Cap on summarizer output items. |
+| `prefetch_candidates` | Candidate notes scored deterministically per batch. |
+| `continuity_turns` | Reserved for continuity tuning (currently unused). |
+| `continuity_sessions` | Prior per-session summaries kept for long-lived sessions. |
+| `poison_attempts` | Failed runs at one boundary before the batch is dropped (`0` = never). |
+| `drain_prompt_max_bytes` | Consolidation-prompt byte cap; candidates are dropped first, then summaries are shortened. |
+| `explorer_gate` | Inject the recency-lane (`memory-explorer`) directive on retrieve turns. |
+
+The cursor is **activity time**, never an id. A partial, duplicate, or unknown
+writer report blocks the advance; after `poison_attempts` the pipe advances
+past the batch and records a `dropped` run.
 
 ---
 

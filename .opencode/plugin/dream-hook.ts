@@ -55,7 +55,8 @@ import {
   durationToMs,
   reconcileSleep,
 } from "./lib/sleep.ts"
-import { readMemory, resolveMemoryFile } from "./lib/turn-buffer.ts"
+import { loadCursor, resolveCursorFile } from "./lib/drain/cursor.ts"
+import { searchUnconsumed } from "./lib/drain/db.ts"
 import { nowIso, sleep as delay } from "./lib/util.ts"
 
 // In-process dream timer (kanban card G, plan §17.2/§17.3 — the D-M9/§13
@@ -160,17 +161,24 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   // §17.5 hybrid seeds, gathered hook-side (zero LLM): A = most recent
-  // temporal turn (mood/recent-turn-seeded proxy), B = one random vault note
-  // (the associative junk-dream character). The dreamer is tool-free, so the
-  // fragments ride in the prompt.
+  // un-consolidated turn (mood/recent-turn-seeded proxy), B = one random vault
+  // note (the associative junk-dream character). The dreamer is tool-free, so
+  // the fragments ride in the prompt.
   const pickDreamSeeds = async (): Promise<DreamSeeds> => {
     let recent: string | null = null
     try {
-      const turns = await readMemory(resolveMemoryFile(stateDir))
-      const last = turns.length > 0 ? turns.reduce((a, b) => (b.seq > a.seq ? b : a)) : null
-      if (last?.user) recent = `recent turn: ${String(last.user).replace(/\s+/g, " ").trim().slice(0, 300)}`
+      const drainCfg = await readDrainConfig(dir)
+      const cursor = await loadCursor(resolveCursorFile(stateDir, drainCfg.cursor_file))
+      const [last] = await searchUnconsumed({
+        projectDir: dir,
+        cursorTs: cursor.last_ts,
+        query: "",
+        topK: 1,
+        dbFile: drainDbFile,
+      })
+      if (last?.excerpt) recent = `recent turn: ${last.excerpt.replace(/\s+/g, " ").trim().slice(0, 300)}`
     } catch {
-      /* no memory — seed A falls back to the mood line */
+      /* no turn store — seed A falls back to the mood line */
     }
     if (!recent) recent = `mood: ${moodFeed.view().label}`
 
