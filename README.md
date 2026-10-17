@@ -124,7 +124,7 @@ Ships fully deterministic out of the box; two features are opt-in:
 
 ```bash
 npm --prefix .opencode ci                          # test-only dependency
-node --test .opencode/plugin/lib/*.test.ts
+node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts
 python3 scripts/tests/test_provider_resolve.py     # decision-provider resolver
 ```
 
