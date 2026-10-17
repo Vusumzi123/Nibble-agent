@@ -219,6 +219,10 @@ test("buildRetrievalDirective emits an authoritative SKIP or RETRIEVE block", ()
   assert.match(retrieve, /Never reply with a bare link list/)
   assert.match(retrieve, /Integrate the returned facts directly/)
   assert.match(retrieve, /No relevant vault knowledge found/)
+  // Part C: the recency lane is gated and merged, not always-on.
+  assert.match(retrieve, /memory-explorer/)
+  assert.match(retrieve, /specific date|recency language/)
+  assert.match(retrieve, /dedupe by content hash/)
 })
 
 test("buildRetrievalDirective sizes the synthesis to summaryWords", () => {

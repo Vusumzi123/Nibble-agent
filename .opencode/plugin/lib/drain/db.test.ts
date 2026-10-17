@@ -9,6 +9,7 @@ import {
   explainFetch,
   openDrainSource,
   resolveDbFile,
+  searchUnconsumed,
   type DrainSdkClient,
 } from "./db.ts"
 
@@ -75,6 +76,25 @@ function addMessage(
     id,
     JSON.stringify(part),
   )
+}
+
+function seedMemory(file: string): void {
+  const db = createFixture(file)
+  addSession(db, "top-1", PROJECT, 3000)
+  addSession(db, "child-1", PROJECT, 4000, "top-1")
+
+  addMessage(db, "old", "top-1", 500, "user", { type: "text", text: "old wireguard note" })
+  addMessage(db, "m1", "top-1", 1000, "user", {
+    type: "text",
+    text: "wireguard setup on the router",
+  })
+  addMessage(db, "m2", "top-1", 1500, "assistant", {
+    type: "text",
+    text: "use wg-quick with /etc/wireguard/wg0.conf",
+  })
+  addMessage(db, "m3", "top-1", 2500, "user", { type: "text", text: "backup policy is borg nightly" })
+  addMessage(db, "mc", "child-1", 2600, "user", { type: "text", text: "wireguard child turn" })
+  db.close()
 }
 
 function seed(file: string): void {
@@ -268,3 +288,108 @@ function mockClient(): DrainSdkClient {
     },
   }
 }
+
+test("memory search scores, filters, and caps the un-consolidated lane", async () => {
+  const file = await tmpDb()
+  seedMemory(file)
+
+  const wireguard = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "wireguard",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(wireguard.map((h) => h.session), ["top-1", "top-1"])
+  assert.deepEqual(wireguard.map((h) => h.time_ms), [1500, 1000])
+  assert.ok(wireguard.every((h) => h.score > 0))
+  assert.ok(wireguard.every((h) => h.excerpt.length <= 320))
+  assert.equal(wireguard.some((h) => h.excerpt.includes("old wireguard")), false)
+
+  const borg = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "borg",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(borg.map((h) => h.time_ms), [2500])
+})
+
+test("memory search honors since, session, tags, and top_k", async () => {
+  const file = await tmpDb()
+  seedMemory(file)
+
+  const recent = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    since: 2000,
+    query: "",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(recent.map((h) => h.time_ms), [2500])
+
+  const scoped = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "wireguard",
+    session: "top-1",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.equal(scoped.every((h) => h.session === "top-1"), true)
+
+  const child = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "wireguard",
+    session: "child-1",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(child, [])
+
+  const tagged = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "",
+    tags: ["wireguard"],
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(tagged.map((h) => h.time_ms), [1500, 1000])
+
+  const capped = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "wireguard",
+    topK: 1,
+    dbFile: file,
+  })
+  assert.equal(capped.length, 1)
+  assert.equal(capped[0].time_ms, 1500)
+})
+
+test("memory hits disappear once the drain cursor advances past them", async () => {
+  const file = await tmpDb()
+  seedMemory(file)
+
+  const before = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 900,
+    query: "wireguard",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.ok(before.length > 0)
+
+  const after = await searchUnconsumed({
+    projectDir: PROJECT,
+    cursorTs: 2000,
+    query: "wireguard",
+    topK: 5,
+    dbFile: file,
+  })
+  assert.deepEqual(after, [])
+})

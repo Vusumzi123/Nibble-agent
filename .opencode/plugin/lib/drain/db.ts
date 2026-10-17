@@ -53,6 +53,34 @@ export type DrainSdkClient = {
 
 export type DrainWarn = (message: string, err?: unknown) => void
 
+export type MemoryHit = {
+  session: string
+  /** ISO timestamp of the turn. */
+  time: string
+  time_ms: number
+  role: string
+  excerpt: string
+  score: number
+}
+
+export type MemorySearchOptions = {
+  projectDir: string
+  /** The drain cursor's activity time: only newer turns are searched. */
+  cursorTs: number
+  query: string
+  topK: number
+  since?: number
+  session?: string
+  tags?: string[]
+  dbFile?: string
+  onWarn?: DrainWarn
+}
+
+const MEMORY_TOP_K_CAP = 20
+const MEMORY_EXCERPT_MAX = 320
+const MEMORY_DISCOVER_LIMIT = 200
+const MEMORY_TURNS_PER_SESSION = 400
+
 export type OpenDrainSourceOptions = {
   projectDir: string
   /** Optional SDK client for the degraded fallback. */
@@ -311,6 +339,89 @@ export async function countUnconsumed(opts: {
   })
   try {
     return await source.unconsumedCount(opts.lastTs)
+  } finally {
+    await source.close().catch(() => {})
+  }
+}
+
+function queryTerms(query: string): string[] {
+  const tokens = query.toLowerCase().match(/[a-z0-9][a-z0-9._/-]{1,}/g) ?? []
+  return [...new Set(tokens)]
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0
+  let count = 0
+  let index = 0
+  while ((index = haystack.indexOf(needle, index)) !== -1) {
+    count++
+    index += needle.length
+  }
+  return count
+}
+
+/**
+ * Read-only keyword search over the un-consolidated lane (the memory
+ * explorer's `memory_search`). Only turns newer than the cursor are eligible,
+ * so results disappear as the drain advances. Deterministic: no embeddings, no
+ * model, no writes.
+ */
+export async function searchUnconsumed(opts: MemorySearchOptions): Promise<MemoryHit[]> {
+  const lastTs = Math.max(opts.cursorTs, opts.since ?? 0)
+  const topK = Math.max(0, Math.min(Math.floor(opts.topK), MEMORY_TOP_K_CAP))
+  if (topK === 0) return []
+
+  const terms = queryTerms(opts.query)
+  const requiredTags = (opts.tags ?? []).map((tag) => tag.toLowerCase()).filter(Boolean)
+
+  const source = await openDrainSource({
+    projectDir: opts.projectDir,
+    dbFile: opts.dbFile,
+    onWarn: opts.onWarn,
+  })
+  try {
+    const sessions = await source.discover(lastTs, MEMORY_DISCOVER_LIMIT)
+    const selected = opts.session
+      ? sessions.filter((session) => session.id === opts.session)
+      : sessions
+
+    const hits: MemoryHit[] = []
+    const seen = new Set<string>()
+
+    for (const session of selected) {
+      const turns = await source.fetch(session.id, lastTs, MEMORY_TURNS_PER_SESSION)
+      for (const turn of turns) {
+        const text = turn.text.trim()
+        if (!text) continue
+
+        const lower = text.toLowerCase()
+        if (requiredTags.some((tag) => !lower.includes(tag))) continue
+
+        const score =
+          terms.length === 0
+            ? 0
+            : terms.reduce((total, term) => total + countOccurrences(lower, term), 0)
+        if (terms.length > 0 && score === 0) continue
+
+        const excerpt = text.replace(/\s+/g, " ").slice(0, MEMORY_EXCERPT_MAX)
+        const key = `${turn.sessionID}|${turn.time}|${excerpt}`
+        if (seen.has(key)) continue
+        seen.add(key)
+
+        hits.push({
+          session: turn.sessionID,
+          time: new Date(turn.time).toISOString(),
+          time_ms: turn.time,
+          role: turn.role,
+          excerpt,
+          score,
+        })
+      }
+    }
+
+    return hits
+      .sort((a, b) => b.score - a.score || b.time_ms - a.time_ms)
+      .slice(0, topK)
   } finally {
     await source.close().catch(() => {})
   }

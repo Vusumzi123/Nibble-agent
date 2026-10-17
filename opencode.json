@@ -14,7 +14,8 @@
       "*": "allow"
     },
     "websearch": "deny",
-    "webfetch": "deny"
+    "webfetch": "deny",
+    "memory_search": "deny"
   },
   "mcp": {
     "markdown-vault": {
@@ -91,6 +92,22 @@
       "color": "#FFD700",
       "tools": { "markdown-vault_*": true },
       "permission": { "markdown-vault_edit": "deny", "task": "deny" }
+    },
+    "memory-explorer": {
+      "mode": "subagent",
+      "color": "#9CCC65",
+      "permission": {
+        "read": "deny",
+        "write": "deny",
+        "edit": "deny",
+        "bash": "deny",
+        "task": "deny",
+        "glob": "deny",
+        "grep": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "memory_search": "allow"
+      }
     },
     "safe-browser": {
       "mode": "subagent",
