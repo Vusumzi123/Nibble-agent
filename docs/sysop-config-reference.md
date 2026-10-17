@@ -24,8 +24,7 @@ config warn-once behaviour).
 | `paths:` | every reader below (via `lib/paths.ts`), plus `scoped-permissions.ts` |
 | `vault:` | `vault-readonly-guard.ts`, `wikilink-guard.ts` |
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
-| `knowledge:` | `knowledge-hook.ts` → `lib/knowledge.ts` |
-| `backlog:` | `knowledge-hook.ts` (drain fallback) → `lib/backlog.ts` |
+| `backlog:` | `heartbeat-hook.ts` / `dream-hook.ts` (mission + drain-fallback records) → `lib/backlog.ts` |
 | `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the knowledge / retrieval / profile hooks, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
 | `retrieval:` | `retrieval-hook.ts` → `lib/retrieval.ts` |
 | `browser:` | `web-scan-hook.ts` → `lib/browser.ts` (scanner: `lib/injection.ts`) |
@@ -56,7 +55,7 @@ and `~/` paths are honored as overrides.
 | `vault:` | repo root | the Obsidian vault, e.g. `<repo>/Brain` |
 | `diagrams:` | repo root | diagram-developer write scope |
 | `log:` | repo root | every NDJSON channel log (audit, telemetry, hook ledgers) — gitignored |
-| `state:` | repo root | project-local transient state: knowledge memory buffer, tag index, hook state JSON — gitignored |
+| `state:` | repo root | project-local transient state: conversation turn buffer, hook state JSON — gitignored |
 
 Everything is project-scoped; there is no home-wide directory, so two projects
 on one machine never share an audit trail or a state file.
@@ -110,58 +109,13 @@ and root/sandbox/dry flags.
 
 ---
 
-## `knowledge:`
-
-Turn capture and consolidation.
-
-| Key | Meaning |
-| --- | ------- |
-| `memory_file` | leaf under `<state>` → `.opencode/state/`. Single project-local JSON Lines buffer of unconsumed turns. Written only by knowledge-hook; `rag-search` reads it via `temporal_search`. |
-| `tag_index_file` | leaf under `<state>`. |
-| `min_ready_turns` | start an ingestion cycle at this many unconsumed turns. |
-| `batch_turns` | max turns handed to one ingestion cycle. |
-| `max_turn_age` | force-ingest turns older than this (ms); `0` disables. |
-| `max_attempts` | quarantine a turn after N failed drains; `0` = never. |
-| `drain_max_tokens` | aggregate token cap per cycle (chars/4). |
-| `drain_cooldown_ms` | minimum gap between ingestion cycles. |
-| `skip_triage` | conservative deterministic per-turn prefilter. |
-| `skip_triage_max_bytes` | only unambiguously trivial turns (small, no code/command/config/URL/path, no question, both sides filler) are auto-pruned without an LLM. Anything borderline ingests. |
-| `prefetch_candidates` | keyword-prefetched candidate notes handed to the ingestion child per cycle. |
-| `tag_gate` | capture-time decision tagging (tag choice + salience score). |
-| `tag_candidates` | number of tag candidates scored. |
-| `log_file` | the vault changelog (`## [YYYY-MM-DD] op | title`, newest last). |
-| `log_guard` | deterministic changelog, see below. |
-| `log_write` | `deterministic` (default) — the hook writes the changelog; `child` restores the legacy receipt + re-ask path. |
-| `log_max_entries` | entries kept in `log.md`; older ones roll into `log_archive` (`0` disables rollover). |
-| `log_archive` | leaf under `<state>` → `.opencode/state/changelog-archive.ndjson`. |
-| `digest` | deterministic drain-prompt digest, see below. |
-| `digest_verbatim_tail` | the last N turns stay fully verbatim. |
-| `digest_max_chars` | per-side cap on the compressed digest. |
-| `log` | per-cycle NDJSON ledger (tokens/cost/steps/outcome), leaf under `<log>`. |
-
-**Changelog (`log_guard`, `log_write`).** A consolidation child that
-consolidates anything MUST report its summary as a ` ```log ` fence. In the
-default `deterministic` mode the hook appends the entry itself (with its own
-date) and rolls the oldest entries past `log_max_entries` into the out-of-vault
-`log_archive`, so the changelog stays readable and no child round-trip is spent
-on it; a missing fence gets a mechanical fallback entry. `log_write: child`
-restores the legacy path (write receipts → one re-ask → fallback). `log.md` is
-the **only** vault file the hook may write.
-
-**Drain-prompt digest (`digest`).** Compresses turns older than the last
-`digest_verbatim_tail` ones into extracted atoms (questions, decision
-sentences, wikilinks, URLs, paths, flags), capped at `digest_max_chars` per
-side. Set `digest: false` to revert to fully verbatim prompts.
-
----
-
 ## `backlog:`
 
 Machine-readable action queue (plan §5). Canonical store at
 `<state>/backlog.ndjson` — one JSON object per line. The derived human view at
 `<vault>/Backlog.md` is regenerated one-way from it and must never be
-hand-edited. Owned by `lib/backlog.ts`; the only Phase-2 producer is the
-knowledge drain.
+hand-edited. Owned by `lib/backlog.ts`; producers are the heartbeat/dream mission
+runs.
 
 | Key | Meaning |
 | --- | ------- |
@@ -178,7 +132,7 @@ Typed-decision "System 1" provider (JEV).
 
 **Backend.** `.opencode/scripts/openjevserver.py` + `decisions_bridge.py`, a
 stateless stdin/stdout subprocess. The TypeScript side (`lib/decisions.ts`,
-loaded by knowledge-hook, retrieval-hook, profile-hook, `heartbeat-hook.ts`
+loaded by retrieval-hook, profile-hook, `heartbeat-hook.ts`
 and the autonomy-gate plugin through `lib/decision-gate.ts`) reads this block
 live.
 
@@ -194,7 +148,7 @@ live.
 | `mode` | Behaviour |
 | ------ | --------- |
 | `shadow` | verdicts are recorded to the ledger, never gate. |
-| `gate` | knowledge-hook lets the model skip (delete) confidently-trivial sessions during drain triage; retrieval-hook suppresses a turn's Brain-First search when judged self-contained. |
+| `gate` | retrieval-hook suppresses a turn's Brain-First search when judged self-contained; the profile/soul idle gates apply/withhold their updates. |
 
 Fail-open / fail-closed semantics are per-hook — see the `retrieval:` block.
 
@@ -319,7 +273,7 @@ writes.
 | `cooldown_turns` | min top-level idle turns between profile decisions. |
 | `decision_turns` | last N session turns handed to the decision + writer. |
 | `decision_max_bytes` | cap on that transcript. |
-| `skip_triage` / `skip_triage_max_bytes` | skip the decision on trivial-chatter turns; mirrors `knowledge.skip_triage_max_bytes`. |
+| `skip_triage` / `skip_triage_max_bytes` | skip the decision on trivial-chatter turns. |
 | `writer_agent` | generation child, see `.opencode/agents/profile-writer.md`. |
 | `writer_model` *(optional)* | profile-writer child model; when omitted the writer agent's own default model applies. |
 | `child_timeout_ms` | max wait for the writer child to reply. |
@@ -471,7 +425,7 @@ anchors at column 0, so the two never collide.
 | `enabled` | kill switch. `false` → the loop sleeps on the 60 s wake cap (hot; no restart). Also parks the dream timer — one lock, one engine (card G shares `heartbeat.lock` and this switch). |
 | `long_silence_factor` | a tick whose gap since the previous tick is ≥ factor × frequency feeds the `long_silence` mood event; `0` disables the feed. |
 | `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
-| `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `knowledge:`. Read once at plugin init. |
+| `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
 Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every
 tick. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`

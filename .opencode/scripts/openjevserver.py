@@ -133,8 +133,8 @@ def load_config(path: str | None) -> dict[str, Any]:
 SYSTEM_PROMPT = ("You are a deterministic decision engine. Answer with exactly "
                  "one token. Never explain, never think, never add punctuation.")
 
-# The exact noul assertion the knowledge-hook skip-triage asks (kept identical to
-# TRIAGE_ASSERTION in .opencode/plugin/lib/decisions.ts and reused by the selftest
+# The exact noul triage assertion (kept identical to TRIAGE_ASSERTION in
+# .opencode/plugin/lib/decisions.ts and reused by the selftest
 # and the corpus replay so the prompt can never drift between them).
 TRIAGE_ASSERTION = ("The transcript is pure filler with no durable signal, "
                     "decision, config, command, or question.")

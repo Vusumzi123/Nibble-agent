@@ -1,7 +1,6 @@
 // Loader for `.opencode/decision-prompts.yaml` — the commented, single source
 // of truth for the JEV question texts (assertions / criteria) asked by the
-// gates. One section per gate: retrieval (retrieval-hook), ingest
-// (knowledge-hook drain), tags (knowledge-hook capture tag/salience gate),
+// gates. One section per gate: retrieval (retrieval-hook),
 // autonomy (autonomy-gate borderline escalation), task (autonomy-gate task
 // classification), digest (heartbeat JEV digest decision).
 //
@@ -25,7 +24,6 @@ import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { parseFlatBlock, sectionCoercer } from "./config.ts"
 import { expandHome } from "./paths.ts"
-import { INGEST_ASSERTION } from "./decisions.ts"
 import { DEFAULT_AUTONOMY_ASSERTION, DEFAULT_TASK_ASSERTION } from "./autonomy-gate.ts"
 import { DEFAULT_DIGEST_ASSERTION } from "./heartbeat.ts"
 import { DEFAULT_RETRIEVAL_ASSERTION } from "./retrieval.ts"
@@ -34,8 +32,6 @@ export const DECISION_PROMPTS_LEAF = ".opencode/decision-prompts.yaml"
 
 export type DecisionPrompts = {
   retrieval: { assertion: string }
-  ingest: { assertion: string }
-  tags: { choice_criteria: string; score_criteria: string }
   autonomy: { assertion: string }
   task: { assertion: string }
   digest: { assertion: string }
@@ -43,8 +39,6 @@ export type DecisionPrompts = {
 
 export type PartialDecisionPrompts = {
   retrieval?: Partial<DecisionPrompts["retrieval"]>
-  ingest?: Partial<DecisionPrompts["ingest"]>
-  tags?: Partial<DecisionPrompts["tags"]>
   autonomy?: Partial<DecisionPrompts["autonomy"]>
   task?: Partial<DecisionPrompts["task"]>
   digest?: Partial<DecisionPrompts["digest"]>
@@ -52,17 +46,8 @@ export type PartialDecisionPrompts = {
 
 // Built-in fallbacks: the gate defaults live in their owning modules and are
 // re-exported here so there is exactly one copy of each string in the code.
-// The tags prompts were knowledge-hook's inline literals — they moved here as
-// part of the decision-prompts extraction; the YAML file mirrors these values.
 export const DEFAULT_DECISION_PROMPTS: DecisionPrompts = {
   retrieval: { assertion: DEFAULT_RETRIEVAL_ASSERTION },
-  ingest: { assertion: INGEST_ASSERTION },
-  tags: {
-    choice_criteria:
-      "Pick the existing tags that best categorize this turn. Choose NEW only if none of the existing tags fit.",
-    score_criteria:
-      "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)",
-  },
   autonomy: { assertion: DEFAULT_AUTONOMY_ASSERTION },
   task: { assertion: DEFAULT_TASK_ASSERTION },
   digest: { assertion: DEFAULT_DIGEST_ASSERTION },
@@ -70,8 +55,6 @@ export const DEFAULT_DECISION_PROMPTS: DecisionPrompts = {
 
 const KNOWN_KEYS: Record<keyof DecisionPrompts, Set<string>> = {
   retrieval: new Set(["assertion"]),
-  ingest: new Set(["assertion"]),
-  tags: new Set(["choice_criteria", "score_criteria"]),
   autonomy: new Set(["assertion"]),
   task: new Set(["assertion"]),
   digest: new Set(["assertion"]),
@@ -92,7 +75,7 @@ const COERCE = (key: string, raw: string): unknown => {
 // any input (including garbage) yields a partial/empty object, never throws.
 export function parseDecisionPrompts(yamlText: string): PartialDecisionPrompts {
   const out: PartialDecisionPrompts = {}
-  for (const section of ["retrieval", "ingest", "tags", "autonomy", "task", "digest"] as const) {
+  for (const section of ["retrieval", "autonomy", "task", "digest"] as const) {
     const parsed = parseFlatBlock(yamlText, section, {
       knownKeys: KNOWN_KEYS[section],
       coerce: COERCE,
@@ -104,17 +87,12 @@ export function parseDecisionPrompts(yamlText: string): PartialDecisionPrompts {
 }
 
 // Overlay a partial parse on the defaults, key by key (per-key fallback — a
-// file that defines only `tags:` still yields the default retrieval/ingest
-// assertions).
+// file that defines only `autonomy:` still yields the default retrieval
+// assertion).
 export function mergeDecisionPrompts(partial: PartialDecisionPrompts): DecisionPrompts {
   const d = DEFAULT_DECISION_PROMPTS
   return {
     retrieval: { assertion: partial.retrieval?.assertion || d.retrieval.assertion },
-    ingest: { assertion: partial.ingest?.assertion || d.ingest.assertion },
-    tags: {
-      choice_criteria: partial.tags?.choice_criteria || d.tags.choice_criteria,
-      score_criteria: partial.tags?.score_criteria || d.tags.score_criteria,
-    },
     autonomy: { assertion: partial.autonomy?.assertion || d.autonomy.assertion },
     task: { assertion: partial.task?.assertion || d.task.assertion },
     digest: { assertion: partial.digest?.assertion || d.digest.assertion },
@@ -140,7 +118,7 @@ export function resolveDecisionPrompts(directory: string): string {
 }
 
 // The always-complete prompts for a project: file overlay (or nothing) on the
-// built-in defaults. This is what the knowledge-hook consumes at init.
+// built-in defaults. This is what the hooks consume at init.
 export async function readDecisionPrompts(directory: string): Promise<DecisionPrompts> {
   return mergeDecisionPrompts((await readDecisionPromptsFrom(resolveDecisionPrompts(directory))) ?? {})
 }

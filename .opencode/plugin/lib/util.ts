@@ -55,12 +55,11 @@ export function asFloat(v: unknown, fallback: number): number {
 }
 
 // Token estimate ratio for prose/code transcripts: ~4 characters per token.
-// Used to express the drain's aggregate context ceiling in tokens rather than
-// only per-part bytes. Deterministic, no tokenizer dependency.
+// Used to express aggregate context ceilings in tokens rather than only
+// per-part bytes. Deterministic, no tokenizer dependency.
 export const CHARS_PER_TOKEN = 4
 
-// Estimate a transcript's token count from its UTF-8 byte length, matching the
-// knowledge pipeline's deterministic ceiling accounting.
+// Estimate a transcript's token count from its UTF-8 byte length.
 export function estimateTokens(s: string): number {
   return Math.ceil(Buffer.byteLength(s, "utf8") / CHARS_PER_TOKEN)
 }

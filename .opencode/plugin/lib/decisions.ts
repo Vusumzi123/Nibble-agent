@@ -19,9 +19,9 @@ import { fileURLToPath } from "node:url"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import {
   classifyTranscript,
-  DEFAULT_CONFIG as DEFAULT_KNOWLEDGE_CONFIG,
+  DEFAULT_SKIP_TRIAGE_MAX_BYTES,
   type TriageVerdict,
-} from "./knowledge.ts"
+} from "./transcript.ts"
 
 export type DecisionKind = "choice" | "noul" | "score"
 
@@ -184,7 +184,7 @@ export async function readDecisionsConfig(directory: string): Promise<DecisionsC
 }
 
 // ---------------------------------------------------------------------------
-// Triage decision (the first consumer — knowledge-hook skip-triage, shadow mode)
+// Triage decision
 
 // The exact noul assertion used by the local model, shared with
 // openjevserver.py's selftest cases.
@@ -193,8 +193,7 @@ export const TRIAGE_ASSERTION =
 
 // Build the noul request the provider answers for skip-triage: "is this
 // transcript trivial chatter (safe to skip)?" `state` is the raw transcript
-// text; `maxBytes` is the knowledge `skip_triage_max_bytes` the deterministic
-// RulesProvider applies.
+// text; `maxBytes` is the deterministic classifier's byte ceiling.
 export function buildTriageRequest(content: string, maxBytes?: number): DecisionRequest {
   return {
     kind: "noul",
@@ -204,77 +203,6 @@ export function buildTriageRequest(content: string, maxBytes?: number): Decision
     triage: true,
     maxBytes,
   }
-}
-
-// The noul assertion used by the per-turn memory ingestion gate
-// (docs/temporal-memory-plan.md §7.3). A turn is dropped only when the model
-// confidently answers "true" (no durable knowledge); every other outcome keeps
-// it for ingestion — the memory gate is fail-OPEN (the opposite of the
-// retrieval gate's fail-closed skip).
-export const INGEST_ASSERTION =
-  "This turn carries no durable knowledge worth remembering (it is trivial chatter, already documented, or a one-off with no lasting value)."
-
-// Build the noul request for one captured turn's ingest gate. `triage: true`
-// routes the deterministic RulesProvider fallback to the conservative
-// `classifyTranscript`, which (for a marker-less single turn) keeps the turn.
-// `assertion` overrides the question text; the hook passes the value loaded
-// from `.opencode/decision-prompts.yaml` (defaults here remain the fallback
-// for callers that pass nothing).
-export function buildIngestRequest(
-  content: string,
-  maxBytes?: number,
-  assertion: string = INGEST_ASSERTION,
-): DecisionRequest {
-  return {
-    kind: "noul",
-    state: content,
-    assertion,
-    allow_abstain: false,
-    triage: true,
-    maxBytes,
-  }
-}
-
-// Build the `choice` request for the capture-time tag gate: pick one candidate
-// tag (or NEW when none fit). Moved out of knowledge-hook as part of the
-// decision-gate seam so every request literal lives beside the others.
-export function buildTagChoiceRequest(
-  content: string,
-  candidates: string[],
-  criteria: string,
-): DecisionRequest {
-  return {
-    kind: "choice",
-    state: content,
-    candidates,
-    criteria,
-  }
-}
-
-// Build the `score` request for the capture-time salience gate (1-5 ordinal).
-export function buildSalienceRequest(content: string, criteria: string): DecisionRequest {
-  return {
-    kind: "score",
-    state: content,
-    criteria,
-  }
-}
-
-// Gate-mode predicate (plan §12 P5). Mirrors eval_decisions.py `gated_skip`:
-// a session is skipped by the model only when the provider answered "trivial"
-// (value === true) without falling back or abstaining, and its probability of
-// "true" clears the noul threshold. Every other outcome falls through to the
-// deterministic drain. Fail-open by construction — a fallback/abstain/error
-// never skips.
-export function isGateSkip(
-  result: DecisionResult,
-  fallback: boolean,
-  noulThreshold: number,
-): boolean {
-  if (fallback || result.abstained) return false
-  if (result.value !== true) return false
-  const pTrue = result.probabilities?.true
-  return typeof pTrue === "number" && pTrue >= noulThreshold
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +218,7 @@ export class RulesProvider implements DecisionProvider {
       const maxBytes =
         typeof request.maxBytes === "number"
           ? request.maxBytes
-          : DEFAULT_KNOWLEDGE_CONFIG.skip_triage_max_bytes
+          : DEFAULT_SKIP_TRIAGE_MAX_BYTES
       const verdict = classifyTranscript(request.state, maxBytes)
       return {
         kind: "noul",

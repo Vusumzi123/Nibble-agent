@@ -12,7 +12,6 @@ permission:
   grep: "deny"
   webfetch: "deny"
   websearch: "deny"
-  temporal_search: "deny"
 ---
 
 # Idea Generator — One Original Idea

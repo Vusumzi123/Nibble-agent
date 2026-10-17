@@ -22,7 +22,7 @@ import { dirname, isAbsolute, join } from "node:path"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import type { DecisionRequest } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
-import { extractKeywords } from "./knowledge.ts"
+import { extractKeywords } from "./transcript.ts"
 import { setFrontmatterDate } from "./profile.ts"
 
 // ---------------------------------------------------------------------------

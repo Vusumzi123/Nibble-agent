@@ -2,7 +2,7 @@
 // structured NDJSON channel logger, plus the shared config normalizer and the
 // console->log diagnostics bridge.
 //
-// Config stays per-section (`knowledge:`, `decisions:`, `browser:`,
+// Config stays per-section (`decisions:`, `browser:`,
 // `profile:`, `audit:`), but the *shape* is normalized here via
 // `logSettingsFrom`: a section's filename key plus its `log_*` (or bare) keys
 // map onto one `LogSettings`. New criteria (compression, time rotation) are read

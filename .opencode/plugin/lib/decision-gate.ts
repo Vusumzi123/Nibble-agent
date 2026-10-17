@@ -16,8 +16,7 @@
 //                      fails closed.
 //
 // `enabled: false` makes `openDecisionGate` return null; the caller keeps its
-// own disabled policy (knowledge-hook registers no hooks, retrieval-hook
-// returns {}). Loaded via relative import only.
+// own disabled policy (retrieval-hook returns {}). Loaded via relative import only.
 import { join } from "node:path"
 import { SYSCONFIG } from "./paths.ts"
 import {

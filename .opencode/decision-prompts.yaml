@@ -30,34 +30,6 @@ retrieval:
   # Consumed by: retrieval-hook decideTurn() → evaluateRetrieval().
   assertion: "The user's message is self-contained and does NOT require a search of the vault: it needs no stored note, procedure, configuration, preference, past decision, remembered fact, or prior session context. The default is TRUE. Answer FALSE only when the message clearly refers to something previously documented or remembered, builds on earlier vault knowledge, or explicitly asks to search, recall, or remember. When in any doubt, answer TRUE."
 
-ingest:
-  # Gate 2 — knowledge-hook consolidation drain, one call per buffered turn
-  # (kind: noul, FAIL-OPEN, decisions.mode: gate|shadow). "Is this turn
-  # trivial chatter that must NOT reach a vault note?" TRUE = no durable
-  # knowledge → the turn is pruned before batching. Only a confident,
-  # non-fallback TRUE at/above decisions.noul_threshold drops it; abstain,
-  # error, or rules-fallback always keeps the turn. Shadow mode journals the
-  # verdict to decisions.log but ingests everything.
-  # Consumed by: knowledge-hook ingestIfNeeded() phase 2 → isGateSkip().
-  assertion: "This turn carries no durable knowledge worth remembering (it is trivial chatter, already documented, or a one-off with no lasting value)."
-
-tags:
-  # Gate 3a — knowledge-hook capture-time tag gate (kind: choice, FAIL-OPEN
-  # to empty). Asked once per durable turn (after the hasDurableSignal
-  # prefilter) with the candidate tag list + NEW appended. The answer becomes
-  # the buffer entry's `tags` (or `NEW` mints the first keyword as a new tag
-  # candidate); any error/abstain leaves the turn untagged — capture never
-  # blocks on the JEV.
-  # Consumed by: knowledge-hook tagTurn().
-  choice_criteria: "Pick the existing tags that best categorize this turn. Choose NEW only if none of the existing tags fit."
-  # Gate 3b — knowledge-hook capture-time salience score (kind: score,
-  # FAIL-OPEN to null). 1-5 ordinal stored on the buffer entry; hints
-  # retrieval ranking for un-consumed turns (surfaced by temporal_search).
-  # The bridge returns a leveled label (string); the hook coerces + clamps
-  # to 1-5. Error/abstain → salience stays null.
-  # Consumed by: knowledge-hook tagTurn().
-  score_criteria: "How durable/useful is this turn for future retrieval, independent of any note? (1 = ephemeral, 5 = core knowledge)"
-
 autonomy:
   # Gate 4 — autonomy-gate, per borderline/jev-flagged call in gate mode
   # (kind: choice, FAIL-CLOSED). "May this exact call run without the user's

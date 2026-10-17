@@ -38,7 +38,7 @@ import {
   releaseHeartbeatLock,
   type DigestVerdict,
 } from "./lib/heartbeat.ts"
-import { drainAccounting, readKnowledgeConfig, resolveMemoryFile } from "./lib/knowledge.ts"
+import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions } from "./lib/missions.ts"
@@ -51,7 +51,7 @@ import {
   durationToMs,
   reconcileSleep,
 } from "./lib/sleep.ts"
-import { readMemory } from "./lib/temporal.ts"
+import { readMemory, resolveMemoryFile } from "./lib/turn-buffer.ts"
 import { nowIso, sleep as delay } from "./lib/util.ts"
 
 // In-process dream timer (kanban card G, plan §17.2/§17.3 — the D-M9/§13
@@ -80,7 +80,7 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 //   5. ONE survivor ⇒ dispatched directly (the §17.10 sole-candidate
 //      short-circuit — deterministic "roll failed + turns pending ⇒ drain
 //      still runs"); TWO+ survivors ⇒ JEV digest choice, fail-open no_reply.
-//   6. Execute one mission in a child session (knowledge-hook pattern,
+//   6. Execute one mission in a child session (delegation-child pattern,
 //      15 min abandon). A dream outcome is parsed by the hook — append the
 //      bucket entry, apply the §17.7 tone→delta (never the LLM's numbers),
 //      count dreams_tonight; other missions record like a heartbeat run.
@@ -161,8 +161,7 @@ export default (async ({ client, directory, ...rest }) => {
   const pickDreamSeeds = async (): Promise<DreamSeeds> => {
     let recent: string | null = null
     try {
-      const kCfg = await readKnowledgeConfig(dir)
-      const turns = await readMemory(resolveMemoryFile(stateDir, kCfg))
+      const turns = await readMemory(resolveMemoryFile(stateDir))
       const last = turns.length > 0 ? turns.reduce((a, b) => (b.seq > a.seq ? b : a)) : null
       if (last?.user) recent = `recent turn: ${String(last.user).replace(/\s+/g, " ").trim().slice(0, 300)}`
     } catch {
@@ -384,7 +383,7 @@ export default (async ({ client, directory, ...rest }) => {
             .messages({ path: { id: childID }, query: { directory: dir } })
             .catch(() => null)
           if (Array.isArray(msgs?.data)) {
-            const acct = drainAccounting(msgs.data)
+            const acct = sessionAccounting(msgs.data)
             tokenCost = acct.inputTokens + acct.outputTokens
             summary = await sessions.lastAssistantText(childID)
           }
@@ -533,7 +532,7 @@ export default (async ({ client, directory, ...rest }) => {
     scheduleWake(computeDreamWakeDelayMs(await wakeInput()))
   }
 
-  // First wake deferred so plugin init returns first (knowledge-hook startup
+  // First wake deferred so plugin init returns first (startup-catch-up
   // pattern); the immediate reconcile inside means window edges land right away.
   setTimeout(() => {
     void loop()

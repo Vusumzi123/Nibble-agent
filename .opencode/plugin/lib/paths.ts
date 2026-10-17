@@ -11,13 +11,13 @@
 //   log      — repo/project-scoped, resolved against the project directory
 //              (every NDJSON channel log: audit, telemetry, hook ledgers).
 //   state    — repo/project-scoped, resolved against the project directory
-//              (project-local transient state: knowledge memory buffer, tag
-//              index, per-hook state JSON).
+//              (project-local transient state: conversation turn buffer,
+//              per-hook state JSON).
 //
 // All roots are project-scoped: nothing is home-scoped, so two projects on one
 // machine never share an audit trail or a state file. Per-section leaves
-// (knowledge.memory_file -> state; audit.log -> log) are joined onto these
-// roots by the section readers.
+// (audit.log -> log; hook state JSON -> state) are joined onto these roots by
+// the section readers.
 //
 // Loaded via relative import only. The plugin auto-discovery glob
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is

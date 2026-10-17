@@ -2,8 +2,9 @@
 
 A barebone knowledge agent built on [opencode](https://opencode.ai) — a
 self-RAG loop over a local Obsidian-style markdown vault: retrieve when needed
-(`retrieval-hook` Brain-First gate → `rag-search`), capture durable knowledge
-after the fact (`knowledge-hook` → `rag-brain`).
+(`retrieval-hook` Brain-First gate → `rag-search`), write durable knowledge on
+request (`rag-brain`). The conversation-capture / consolidation pipeline
+(`knowledge-hook`) has been removed pending a redesign.
 
 **Status:** pre-1.0, under construction. M1–M4, M8, M9 migrated (self-RAG,
 vault guards, profile, web, audit, OS agents); M5–M7 (mail/telegram/idea) +
@@ -71,10 +72,10 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 - **Retrieve:** on every user turn, `retrieval-hook` decides (fail-closed, JEV
   `noul` gate) whether the message needs a vault search; if yes it injects the
   `[brain-first]` directive and the main agent delegates to `rag-search`
-  (read-only markdown-vault MCP + `temporal_search` over recent turns).
-- **Remember:** `knowledge-hook` stashes conversation turns into a
-  project-local buffer (`.opencode/state/memory.json`) and periodically
-  consolidates them into vault notes via a `rag-brain` child session.
+  (read-only markdown-vault MCP).
+- **Remember:** vault writes go through the `rag-brain` sub-agent on explicit
+  request. The former `knowledge-hook` turn-capture / consolidation pipeline has
+  been removed pending a redesign.
 - **Persona:** `profile-hook` injects `Brain/Agent.md` + `Brain/User.md` into
   the system prompt on the first turn of each session, re-injects the full
   block every `refresh_every_turns` turns (persona-fade mitigation; rebuilt

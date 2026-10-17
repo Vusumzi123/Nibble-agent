@@ -16,7 +16,6 @@ import {
   readDecisionPromptsFrom,
   resolveDecisionPrompts,
 } from "./decision-prompts.ts"
-import { INGEST_ASSERTION } from "./decisions.ts"
 import { DEFAULT_AUTONOMY_ASSERTION } from "./autonomy-gate.ts"
 import { DEFAULT_DIGEST_ASSERTION } from "./heartbeat.ts"
 import { DEFAULT_RETRIEVAL_ASSERTION } from "./retrieval.ts"
@@ -28,13 +27,6 @@ const VALID_YAML = [
   "  # what the question does",
   '  assertion: "Custom retrieval assertion."',
   "",
-  "ingest:",
-  '  assertion: "Custom ingest assertion."',
-  "",
-  "tags:",
-  "  choice_criteria: \"Pick a tag.\"",
-  "  score_criteria: 'Score it 1-5.'",
-  "",
   "autonomy:",
   '  assertion: "Custom autonomy assertion."',
   "",
@@ -45,9 +37,6 @@ const VALID_YAML = [
 
 test("defaults carry every gate key and re-use the owning modules' strings", () => {
   assert.equal(DEFAULT_DECISION_PROMPTS.retrieval.assertion, DEFAULT_RETRIEVAL_ASSERTION)
-  assert.equal(DEFAULT_DECISION_PROMPTS.ingest.assertion, INGEST_ASSERTION)
-  assert.ok(DEFAULT_DECISION_PROMPTS.tags.choice_criteria.includes("NEW"))
-  assert.ok(DEFAULT_DECISION_PROMPTS.tags.score_criteria.includes("ephemeral"))
   assert.equal(DEFAULT_DECISION_PROMPTS.autonomy.assertion, DEFAULT_AUTONOMY_ASSERTION)
   assert.equal(DEFAULT_DECISION_PROMPTS.digest.assertion, DEFAULT_DIGEST_ASSERTION)
   assert.ok(DEFAULT_DIGEST_ASSERTION.includes("no_reply"))
@@ -57,8 +46,6 @@ test("defaults carry every gate key and re-use the owning modules' strings", () 
 test("parseDecisionPrompts reads all sections and strips comment lines + quotes", () => {
   const parsed = parseDecisionPrompts(VALID_YAML)
   assert.deepEqual(parsed.retrieval, { assertion: "Custom retrieval assertion." })
-  assert.deepEqual(parsed.ingest, { assertion: "Custom ingest assertion." })
-  assert.deepEqual(parsed.tags, { choice_criteria: "Pick a tag.", score_criteria: "Score it 1-5." })
   assert.deepEqual(parsed.autonomy, { assertion: "Custom autonomy assertion." })
   assert.deepEqual(parsed.digest, { assertion: "Custom digest assertion." })
 })
@@ -72,18 +59,15 @@ test("parseDecisionPrompts ignores unknown sections, keys, and blank input", () 
 })
 
 test("parseDecisionPrompts drops empty values but keeps values with colons/hash-free punctuation", () => {
-  const yaml = ["retrieval:", '  assertion: "   "', "", "ingest:", '  assertion: "a: b, c (1 = x, 2 = y)."', ""].join("\n")
+  const yaml = ["retrieval:", '  assertion: "   "', "", "autonomy:", '  assertion: "a: b, c (1 = x, 2 = y)."', ""].join("\n")
   const parsed = parseDecisionPrompts(yaml)
   assert.equal(parsed.retrieval, undefined)
-  assert.equal(parsed.ingest?.assertion, "a: b, c (1 = x, 2 = y).")
+  assert.equal(parsed.autonomy?.assertion, "a: b, c (1 = x, 2 = y).")
 })
 
 test("mergeDecisionPrompts fills per key, not per section", () => {
-  const merged = mergeDecisionPrompts({ tags: { score_criteria: "Custom score." } })
-  assert.equal(merged.retrieval.assertion, DEFAULT_DECISION_PROMPTS.retrieval.assertion)
-  assert.equal(merged.ingest.assertion, DEFAULT_DECISION_PROMPTS.ingest.assertion)
-  assert.equal(merged.tags.choice_criteria, DEFAULT_DECISION_PROMPTS.tags.choice_criteria)
-  assert.equal(merged.tags.score_criteria, "Custom score.")
+  const merged = mergeDecisionPrompts({ retrieval: { assertion: "Custom retrieval." } })
+  assert.equal(merged.retrieval.assertion, "Custom retrieval.")
   assert.equal(merged.autonomy.assertion, DEFAULT_DECISION_PROMPTS.autonomy.assertion)
   assert.equal(merged.digest.assertion, DEFAULT_DECISION_PROMPTS.digest.assertion)
 
@@ -112,8 +96,7 @@ test("readDecisionPrompts overlays a partial file key by key", async () => {
   await writeFile(resolveDecisionPrompts(dir), VALID_YAML, "utf8")
   const prompts = await readDecisionPrompts(dir)
   assert.equal(prompts.retrieval.assertion, "Custom retrieval assertion.")
-  assert.equal(prompts.ingest.assertion, "Custom ingest assertion.")
-  assert.equal(prompts.tags.choice_criteria, "Pick a tag.")
+  assert.equal(prompts.autonomy.assertion, "Custom autonomy assertion.")
 })
 
 test("resolveDecisionPrompts keeps absolute leaves absolute", () => {

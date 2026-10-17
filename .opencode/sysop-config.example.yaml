@@ -28,50 +28,6 @@ audit:
   compress_level: 6
   rotate_by: size            # size | daily | weekly
 
-knowledge:
-  enabled: true
-  # Turn buffer: one JSON Lines file of unconsumed turns, written only by
-  # knowledge-hook; rag-search reads it via temporal_search. Leaves under <state>.
-  memory_file: memory.json
-  tag_index_file: tag-index.json
-  min_ready_turns: 3         # start an ingestion cycle at this many unconsumed turns
-  batch_turns: 8             # max turns handed to one ingestion cycle (N)
-  max_turn_age: 86400000     # force-ingest turns older than this (ms); 0 disables
-  max_attempts: 3            # quarantine a turn after N failed drains; 0 = never
-  drain_max_tokens: 150000   # aggregate token cap per cycle (chars/4)
-  drain_cooldown_ms: 60000   # min gap between ingestion cycles
-  # Deterministic prefilter: only unambiguously trivial turns are auto-pruned
-  # without an LLM; anything borderline ingests.
-  skip_triage: true
-  skip_triage_max_bytes: 800
-  # Keyword-prefetched candidate notes handed to the ingestion child per cycle.
-  prefetch_candidates: 3
-  # Capture-time decision tagging (tag choice + salience score).
-  tag_gate: true
-  tag_candidates: 8
-  # Changelog: the drain child reports a ```log summary; the hook writes
-  # meta/log.md deterministically and rolls old entries (past log_max_entries)
-  # into log_archive (a <state> leaf). log_write: child = legacy receipt path.
-  log_file: meta/log.md
-  log_guard: true
-  log_write: deterministic
-  log_max_entries: 50
-  log_archive: changelog-archive.ndjson
-  # Drain-prompt digest: older turns compress to extracted atoms; the last
-  # digest_verbatim_tail turns stay verbatim. false = fully verbatim prompts.
-  digest: true
-  digest_verbatim_tail: 2
-  digest_max_chars: 1200
-  # Per-cycle NDJSON ledger (tokens/cost/steps/outcome); leaf under <log>.
-  log: knowledge-hook.log
-  log_rotate_bytes: 1048576
-  log_keep_generations: 5
-  log_retention_days: 90
-  log_compress: true
-  log_compress_after: 1
-  log_compress_level: 6
-  log_rotate_by: size
-
 backlog:
   # Action queue: canonical store <state>/backlog.ndjson; the human view
   # <vault>/Backlog.md is regenerated one-way from it — never hand-edit.
@@ -158,7 +114,7 @@ profile:
   decision_turns: 3            # last N session turns handed to the decision + writer
   decision_max_bytes: 24000    # cap on that transcript
   skip_triage: true            # skip the decision on trivial-chatter turns
-  skip_triage_max_bytes: 800   # mirrors knowledge.skip_triage_max_bytes
+  skip_triage_max_bytes: 800   # byte ceiling for the deterministic transcript classifier
   writer_agent: profile-writer # generation child (see .opencode/agents/profile-writer.md)
   child_timeout_ms: 90000      # max wait for the writer child to reply
   note_max_bytes: 6000         # writer hard budget; draft rejected above this

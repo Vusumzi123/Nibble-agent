@@ -1,7 +1,7 @@
 // Deterministic NDJSON log writer with size- and/or time-based rotation,
 // gzip compression of older generations, and age-based retention. The single
-// shared engine behind every structured hook log (audit, memory, knowledge,
-// decisions, web-scan, profile), mirroring audit-logger.py's original
+// shared engine behind every structured hook log (audit, telemetry, decisions,
+// web-scan, profile), mirroring audit-logger.py's original
 // shift-and-rename scheme.
 //
 // Policy per generation index N:

@@ -20,7 +20,7 @@ function webLogPath(dir: string): string {
   return join(dir, ".opencode", "logs", "web-usage.log")
 }
 
-// One assistant step carrying usage + a tool call, matching drainAccounting's
+// One assistant step carrying usage + a tool call, matching sessionAccounting's
 // expected `info.tokens` shape.
 const childRow = {
   info: {

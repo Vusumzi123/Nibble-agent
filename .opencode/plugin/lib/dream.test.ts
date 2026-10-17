@@ -178,7 +178,7 @@ test("dreamer agent permission matrix: every execution tool is denied in opencod
   const permission = dreamer.permission as Record<string, string>
   const tools = (dreamer.tools ?? {}) as Record<string, boolean>
   // The plan's named denials (§17.5) + the full native tool surface.
-  for (const key of ["read", "write", "edit", "bash", "task", "glob", "grep", "webfetch", "websearch", "temporal_search"]) {
+  for (const key of ["read", "write", "edit", "bash", "task", "glob", "grep", "webfetch", "websearch"]) {
     const denied = permission[key] === "deny" || tools[key] === false
     assert.ok(denied, `dreamer must deny "${key}" (permission=${permission[key]}, tools=${tools[key]})`)
   }

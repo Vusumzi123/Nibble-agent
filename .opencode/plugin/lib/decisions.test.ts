@@ -6,15 +6,10 @@ import {
   BridgeDecisionProvider,
   RulesProvider,
   buildDecisionsLogEntry,
-  buildIngestRequest,
-  buildSalienceRequest,
-  buildTagChoiceRequest,
   buildTriageRequest,
   createDecisionProvider,
   decideWithFallback,
-  isGateSkip,
   parseDecisionsConfig,
-  type DecisionResult,
 } from "./decisions.ts"
 
 const TRIVIAL =
@@ -118,34 +113,6 @@ test("buildTriageRequest emits a noul request with the shared assertion", () => 
   assert.equal(req.triage, true)
   assert.equal(req.maxBytes, 800)
   assert.ok(req.assertion)
-})
-
-test("buildIngestRequest emits the per-turn memory-gate noul request", () => {
-  const req = buildIngestRequest("just a single turn", 800)
-  assert.equal(req.kind, "noul")
-  assert.equal(req.state, "just a single turn")
-  assert.equal(req.allow_abstain, false)
-  assert.equal(req.triage, true)
-  assert.equal(req.maxBytes, 800)
-  // The memory gate uses the inverted ("no durable knowledge") assertion.
-  assert.match(String(req.assertion), /no durable knowledge/i)
-})
-
-test("buildTagChoiceRequest emits a choice request over the candidate tags", () => {
-  const req = buildTagChoiceRequest("turn body", ["git", "NEW"], "pick one")
-  assert.equal(req.kind, "choice")
-  assert.equal(req.state, "turn body")
-  assert.deepEqual(req.candidates, ["git", "NEW"])
-  assert.equal(req.criteria, "pick one")
-  assert.equal(req.triage, undefined)
-})
-
-test("buildSalienceRequest emits a score request with the shared criteria", () => {
-  const req = buildSalienceRequest("turn body", "1 = ephemeral, 5 = core")
-  assert.equal(req.kind, "score")
-  assert.equal(req.state, "turn body")
-  assert.equal(req.criteria, "1 = ephemeral, 5 = core")
-  assert.equal(req.candidates, undefined)
 })
 
 // ---------------------------------------------------------------------------
@@ -404,48 +371,6 @@ test("createDecisionProvider returns a RulesProvider for provider: rules", () =>
 test("createDecisionProvider returns a bridge provider otherwise", () => {
   const provider = createDecisionProvider({ ...DEFAULT_DECISIONS, provider: "openjev" }, { configPath: "/x" })
   assert.ok(provider instanceof BridgeDecisionProvider)
-})
-
-// ---------------------------------------------------------------------------
-// Gate predicate (P5)
-
-const GATE_RESULT = (over: Partial<DecisionResult>): DecisionResult => ({
-  kind: "noul",
-  value: true,
-  confidence: 0.9,
-  probabilities: { true: 0.9, false: 0.1 },
-  abstained: false,
-  provider: "openjev",
-  backend: "llamacpp",
-  latencyMs: 10,
-  ...over,
-})
-
-test("isGateSkip returns true for a confident non-fallback 'trivial' verdict", () => {
-  assert.equal(isGateSkip(GATE_RESULT({}), false, 0.8), true)
-})
-
-test("isGateSkip rejects a verdict below the noul threshold", () => {
-  assert.equal(
-    isGateSkip(GATE_RESULT({ confidence: 0.5, probabilities: { true: 0.5, false: 0.5 } }), false, 0.8),
-    false,
-  )
-})
-
-test("isGateSkip rejects a fallback or abstained result (fail-open)", () => {
-  assert.equal(isGateSkip(GATE_RESULT({}), true, 0.8), false)
-  assert.equal(isGateSkip(GATE_RESULT({ abstained: true, value: null }), false, 0.8), false)
-})
-
-test("isGateSkip rejects a 'durable' (value=false) verdict", () => {
-  assert.equal(
-    isGateSkip(GATE_RESULT({ value: false, probabilities: { true: 0.05, false: 0.95 } }), false, 0.8),
-    false,
-  )
-})
-
-test("isGateSkip rejects when the true probability is absent", () => {
-  assert.equal(isGateSkip(GATE_RESULT({ probabilities: {} }), false, 0.8), false)
 })
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { automationChildSessions } from "./lib/automation.ts"
-import { classifyTranscript } from "./lib/knowledge.ts"
+import { classifyTranscript } from "./lib/transcript.ts"
 import { openDecisionGate, type DecisionGate } from "./lib/decision-gate.ts"
 import {
   atomicWriteFile,

@@ -10,12 +10,9 @@ import {
   extractWritePaths,
   normalizeFrontmatterDates,
   unescapeOutsideCode,
-  vaultLabel,
 } from "./lib/write-guard.ts"
 import { isReadonlyVaultPath, parseReadonlyDirs, readVaultPolicy } from "./lib/vault-policy.ts"
 import { isEnoent } from "./lib/util.ts"
-import { recordIssue, recordWrite } from "./lib/verification.ts"
-
 // Deterministic post-write guard (Plan A). Replaces the former rag-brain
 // post-write re-read mandate with provable checks for the three markdown-vault
 // serializer symptoms:
@@ -26,11 +23,7 @@ import { recordIssue, recordWrite } from "./lib/verification.ts"
 //   4. tool.execute.before snapshots the pre-write bytes per callID so the
 //      bullet diff has a real baseline (no false positives on intentional `*`).
 //
-// Escapes are also swept vault-wide on session.idle as a safety net. The guard
-// records per-session receipts in lib/verification; the knowledge-hook refuses
-// to delete a drained transcript while a session has unresolved (blocking)
-// issues, so a guard that cannot prove a write was clean retains the raw data.
-
+// Escapes are also swept vault-wide on session.idle as a safety net.
 const SKIP_DIRS = new Set([".obsidian", ".trash", ".markdown_vault_mcp"])
 const SNAPSHOT_TTL_MS = 5 * 60 * 1000
 const MAX_SNAPSHOTS = 5000
@@ -95,7 +88,6 @@ export default (async ({ directory }) => {
   // serializer is the known bullet-mangler; native edit/write/apply_patch are
   // byte-exact, so a marker-only change there is intentional and left alone.
   async function verifyWrite(
-    sessionID: string,
     fp: string,
     before: string | null,
     allowBulletRepair: boolean,
@@ -109,7 +101,6 @@ export default (async ({ directory }) => {
       if (!isEnoent(err)) void diag.warn(`[wikilink-guard] verify read failed ${fp}:`, err)
       return
     }
-    const label = vaultLabel(vaultRoot, fp)
     let working = current
     let dirty = false
 
@@ -117,12 +108,6 @@ export default (async ({ directory }) => {
     if (escapeCount > 0) {
       working = deEscaped
       dirty = true
-      recordIssue(sessionID, {
-        path: label,
-        kind: "escaped-wikilink",
-        detail: `${escapeCount} escaped wikilink(s)`,
-        repaired: true,
-      })
       void diag.error(`[wikilink-guard] repaired ${escapeCount} escaped wikilink(s) in ${fp}`)
     }
 
@@ -130,16 +115,10 @@ export default (async ({ directory }) => {
     if (fixed > 0) {
       working = dated
       dirty = true
-      recordIssue(sessionID, { path: label, kind: "date", detail: `${fixed} date(s) normalized`, repaired: true })
       void diag.error(`[wikilink-guard] normalized ${fixed} date(s) in ${fp}`)
     }
     if (invalid > 0) {
-      recordIssue(sessionID, {
-        path: label,
-        kind: "date",
-        detail: `${invalid} invalid/ambiguous date value(s) left untouched`,
-        repaired: false,
-      })
+      void diag.warn(`[wikilink-guard] ${invalid} invalid/ambiguous date value(s) left untouched in ${fp}`)
     }
 
     if (allowBulletRepair && before !== null && before !== working) {
@@ -147,20 +126,11 @@ export default (async ({ directory }) => {
       if (diff.kind === "safe") {
         working = diff.repaired
         dirty = true
-        recordIssue(sessionID, {
-          path: label,
-          kind: "bullet",
-          detail: `${diff.count} bullet(s) restored`,
-          repaired: true,
-        })
         void diag.error(`[wikilink-guard] restored ${diff.count} bullet(s) in ${fp}`)
       } else if (diff.kind === "ambiguous") {
-        recordIssue(sessionID, {
-          path: label,
-          kind: "ambiguous",
-          detail: "write changed bullet markers or content in a way the guard could not safely repair",
-          repaired: false,
-        })
+        void diag.warn(
+          `[wikilink-guard] bullet markers/content changed in a way the guard could not safely repair in ${fp}`,
+        )
       }
     }
 
@@ -169,12 +139,6 @@ export default (async ({ directory }) => {
         await writeFile(fp, working, "utf8")
       } catch (err) {
         void diag.error(`[wikilink-guard] repair write failed ${fp}:`, err)
-        recordIssue(sessionID, {
-          path: label,
-          kind: "escaped-wikilink",
-          detail: "repair write failed",
-          repaired: false,
-        })
       }
     }
   }
@@ -225,12 +189,9 @@ export default (async ({ directory }) => {
       const allowBulletRepair = input.tool.startsWith("markdown-vault")
       for (const p of paths) {
         if (!inVault(p) || inReadonly(p)) continue
-        // Record the write per session so the knowledge-hook's changelog guard
-        // can prove whether the drain child appended to meta/log.md.
-        recordWrite(input.sessionID, p)
         const snap = snapshots.get(input.callID)
         snapshots.delete(input.callID)
-        await verifyWrite(input.sessionID, p, snap && snap.path === p ? snap.content : null, allowBulletRepair)
+        await verifyWrite(p, snap && snap.path === p ? snap.content : null, allowBulletRepair)
       }
     },
 

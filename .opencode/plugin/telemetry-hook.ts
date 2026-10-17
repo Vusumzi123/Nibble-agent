@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { createDiagnostics, getLogger, logSettingsFrom } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
-import { drainAccounting } from "./lib/knowledge.ts"
+import { sessionAccounting } from "./lib/transcript.ts"
 import {
   buildTaskTelemetryEntry,
   parseWatchAgents,
@@ -15,7 +15,7 @@ import {
 
 // Phase 0 retrieval telemetry (docs/phase0-retrieval-telemetry-plan.md). On
 // every watched `task` delegation, emit one deterministic NDJSON record shaped
-// like the drain ledger — tokens/steps/cost/wall time — so the later retrieval
+// like the mission ledger — tokens/steps/cost/wall time — so the later retrieval
 // optimizations are falsifiable:
 //
 //   rag-search                 -> brain_log   (0a)
@@ -23,9 +23,9 @@ import {
 //
 // The bundled task tool returns `metadata: { parentSessionId, sessionId,
 // model, background?, jobId? }`, so no session discovery is needed. Usage comes
-// from `drainAccounting` over the child session's messages (the same pure helper
-// the drain ledger uses), embedded verbatim. NO prompt text is logged — only
-// `promptBytes`, a short description, and a byte-count/target for inner fetches.
+// from `sessionAccounting` over the child session's messages (the same pure
+// helper the mission ledger uses), embedded verbatim. NO prompt text is logged —
+// only `promptBytes`, a short description, and a byte-count/target for inner fetches.
 //
 // Fail-open by construction: the whole `after` is wrapped in try/catch, missing
 // metadata degrades to an `outcome:"error"` line, and a logging failure can
@@ -159,7 +159,7 @@ export default (async ({ client, directory }) => {
             path: { id: childSession },
             query: { directory: dir },
           })
-          usage = drainAccounting(Array.isArray(res?.data) ? res.data : [])
+          usage = sessionAccounting(Array.isArray(res?.data) ? res.data : [])
         } catch (err) {
           void diag.error("[telemetry-hook] child messages read failed:", err)
           outcome = "error"

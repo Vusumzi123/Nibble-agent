@@ -56,7 +56,7 @@ import {
   type IdeaConfig,
   type IdeaState,
 } from "./lib/idea.ts"
-import { drainAccounting } from "./lib/knowledge.ts"
+import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions } from "./lib/missions.ts"
@@ -88,7 +88,7 @@ import { nowIso, sleep } from "./lib/util.ts"
 //   6. Execute (cards B+C): JEV digest choice (`no_reply | mission:<id>`,
 //      fail-open to no_reply, `reason` explains which) → one child session via
 //      `client.session.create` + `session.promptAsync(fixed brief)`
-//      (knowledge-hook pattern), resolved on `session.idle`. The mission runs
+//      (delegation-child pattern), resolved on `session.idle`. The mission runs
 //      under the same autonomy gate and irreversibility floor as any session.
 //
 // Outcome recording (§7): every tick appends one NDJSON line to the
@@ -567,7 +567,7 @@ export default (async ({ client, directory, ...rest }) => {
             .messages({ path: { id: childID }, query: { directory: dir } })
             .catch(() => null)
           if (Array.isArray(msgs?.data)) {
-            const acct = drainAccounting(msgs.data)
+            const acct = sessionAccounting(msgs.data)
             tokenCost = acct.inputTokens + acct.outputTokens
             summary = await sessions.lastAssistantText(childID)
           }
@@ -724,8 +724,8 @@ export default (async ({ client, directory, ...rest }) => {
     scheduleWake(Math.min(computeWakeDelayMs(await wakeInput()), wakeCapMs))
   }
 
-  // First wake deferred so plugin init returns first (knowledge-hook
-  // startup-catch-up pattern); the due check inside means an overdue interval
+  // First wake deferred so plugin init returns first (startup-catch-up
+  // pattern); the due check inside means an overdue interval
   // fires once soon after boot — coalesce, never replay (§12.1).
   setTimeout(() => {
     void loop()

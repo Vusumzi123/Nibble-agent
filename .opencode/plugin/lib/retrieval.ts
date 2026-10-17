@@ -3,7 +3,7 @@
 //
 // Every user turn is asked one `noul` question — "this message is self-contained
 // and needs no vault search" — through the same typed-decision provider the
-// drain/profile gates use (lib/decisions.ts). A confident, non-failure "true"
+// profile/soul gates use (lib/decisions.ts). A confident, non-failure "true"
 // suppresses the Brain-First rag-search delegation for that turn and injects an
 // authoritative [brain-first] directive into the system prompt.
 //
@@ -13,11 +13,12 @@
 //   value === false                         -> RETRIEVE
 //   error | abstain | non-boolean           -> SKIP   (FAIL-CLOSED)
 //
-// Fail-closed is the deliberate inversion of the drain gate (`isGateSkip`, which
-// fail-opens so knowledge is never lost). Here the resource being protected is
-// tokens, not notes, so an outage degrades to "answer from scratch". The
-// deterministic `hasRetrievalIntent` override runs first and always retrieves,
-// so an explicit "search my notes" can never be mis-skipped by the model.
+// Fail-closed is the deliberate inversion of the profile/soul update gates,
+// which fail-open so a durable note is never lost to a provider outage. Here the
+// resource being protected is tokens, not notes, so an outage degrades to
+// "answer from scratch". The deterministic `hasRetrievalIntent` override runs
+// first and always retrieves, so an explicit "search my notes" can never be
+// mis-skipped by the model.
 //
 // The prose prior (the `retrieval.assertion` in `decision-prompts.yaml`) is
 // weighted toward "do not retrieve"; it is externalized so the economy/

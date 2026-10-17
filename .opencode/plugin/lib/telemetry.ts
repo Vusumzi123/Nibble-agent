@@ -9,7 +9,7 @@
 // Contract: logging only, zero behavior change, deterministic (no LLM), and
 // NO prompt text or full URLs in the ledger — only byte counts, a short task
 // description, and a `sanitizeTarget`-capped target. Usage is embedded verbatim
-// from `drainAccounting` (lib/knowledge.ts) so its camelCase keys are preserved.
+// from `sessionAccounting` (lib/transcript.ts) so its camelCase keys are preserved.
 //
 // Config lives in the `telemetry:` block of .opencode/sysop-config.yaml. The
 // two channels share one rotation policy via the bare keys (audit: pattern).
@@ -143,7 +143,7 @@ export type TaskTelemetryInput = {
   wallMs: number | null
   outcome: "ok" | "error" | "background"
   reason?: string
-  /** The exact `drainAccounting` return shape, embedded verbatim. */
+  /** The exact `sessionAccounting` return shape, embedded verbatim. */
   usage?: unknown
 }
 

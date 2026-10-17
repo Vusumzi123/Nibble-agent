@@ -14,8 +14,7 @@
       "*": "allow"
     },
     "websearch": "deny",
-    "webfetch": "deny",
-    "temporal_search": "deny"
+    "webfetch": "deny"
   },
   "mcp": {
     "markdown-vault": {
@@ -84,8 +83,7 @@
         "markdown-vault_edit": "deny",
         "markdown-vault_vault": "deny",
         "markdown-vault_system": "deny",
-        "markdown-vault_workflow": "deny",
-        "temporal_search": "allow"
+        "markdown-vault_workflow": "deny"
       }
     },
     "rag-brain": {
@@ -120,8 +118,7 @@
         "glob": "deny",
         "grep": "deny",
         "webfetch": "deny",
-        "websearch": "deny",
-        "temporal_search": "deny"
+        "websearch": "deny"
       }
     },
     "deep-browser": {

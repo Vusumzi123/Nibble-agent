@@ -29,13 +29,12 @@ import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.t
 import type { DecisionRequest, DecisionResult } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
-import { readKnowledgeConfig, resolveMemoryFile } from "./knowledge.ts"
 import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
 import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { readProfileConfig, resolveProfileFile } from "./profile.ts"
 import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
-import { readMemory } from "./temporal.ts"
+import { readMemory, resolveMemoryFile } from "./turn-buffer.ts"
 import { errText, nowIso } from "./util.ts"
 
 // ---------------------------------------------------------------------------
@@ -351,7 +350,6 @@ export async function computeDigest(
   const { stateDir, logDir, vaultDir } = await readResolvedPaths(directory)
 
   const backlogCfg = await readBacklogConfig(directory)
-  const knowledgeCfg = await readKnowledgeConfig(directory)
   const auditCfg = await readAuditConfig(directory)
   const profileCfg = await readProfileConfig(directory)
 
@@ -367,7 +365,7 @@ export async function computeDigest(
     /* silent */
   }
   try {
-    unconsumed_turns = (await readMemory(resolveMemoryFile(stateDir, knowledgeCfg))).length
+    unconsumed_turns = (await readMemory(resolveMemoryFile(stateDir))).length
   } catch {
     /* silent */
   }
