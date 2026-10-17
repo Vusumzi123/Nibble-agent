@@ -83,6 +83,7 @@ const FETCH_SQL = `
     AND m.time_created > ?
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
+    AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''
   ORDER BY m.time_created, m.id
   LIMIT ?`
 
@@ -95,7 +96,8 @@ const COUNT_SQL = `
     AND s.directory = ?
     AND m.time_created > ?
     AND json_extract(p.data, '$.type') = 'text'
-    AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0`
+    AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
+    AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
 
 export const FETCH_QUERY_PLAN_SQL = `EXPLAIN QUERY PLAN ${FETCH_SQL}`
 
@@ -256,6 +258,7 @@ function sdkSource(
       if (!(time > lastTs)) continue
       for (const part of row.parts ?? []) {
         if (part?.type !== "text" || part.synthetic || part.ignored) continue
+        if (typeof part.text !== "string" || part.text.trim() === "") continue
         turns.push({
           id: String(info.id ?? ""),
           sessionID: String(info.sessionID ?? sessionID),

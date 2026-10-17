@@ -92,6 +92,7 @@ function seed(file: string): void {
     text: "synthetic",
     synthetic: true,
   })
+  addMessage(db, "m-empty", "top-1", 850, "user", { type: "text", text: "   " })
   addMessage(db, "m-compaction", "top-1", 900, "assistant", { type: "compaction", text: "sum" })
   addMessage(db, "m-child", "child-1", 650, "user", { type: "text", text: "child turn" })
   addMessage(db, "m-other", "top-other", 650, "user", { type: "text", text: "other project" })
@@ -248,6 +249,7 @@ function mockClient(): DrainSdkClient {
               info: { id: "u", sessionID: "s-top", role: "user", time: { created: 600 } },
               parts: [
                 { type: "text", text: "hello" },
+                { type: "text", text: "   " },
                 { type: "text", text: "synthetic", synthetic: true },
                 { type: "compaction", text: "sum" },
               ],
