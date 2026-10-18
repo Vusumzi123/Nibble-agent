@@ -31,6 +31,7 @@ import type {
   MemoryWriteClient,
   WriteContext,
   WriteItem,
+  WriteReport,
 } from "../memory/types.ts"
 
 export type DrainOutcome = "completed" | "nothing" | "degraded" | "error" | "dropped"
@@ -93,6 +94,21 @@ function maxTurnTime(renderings: RenderedSession[]): number {
     for (const turn of rendered.turns) max = Math.max(max, turn.time)
   }
   return max
+}
+
+type PlannedChunk = { offset: number; items: PlannedItem[] }
+
+/** Split planned items into writer-sized chunks. Each chunk is a complete
+ *  `#1..N` batch for the provider, so a spawn never exceeds the step budget;
+ *  `offset` maps chunk-local labels back to the run-wide labels. */
+export function chunkPlanned(planned: PlannedItem[], size: number): PlannedChunk[] {
+  if (planned.length === 0) return []
+  const cap = Number.isFinite(size) && size > 0 ? Math.floor(size) : planned.length
+  const chunks: PlannedChunk[] = []
+  for (let i = 0; i < planned.length; i += cap) {
+    chunks.push({ offset: i, items: planned.slice(i, i + cap) })
+  }
+  return chunks
 }
 
 /**
@@ -247,36 +263,66 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       searchText: allText,
     }
 
-    const writerStarted = Date.now()
-    const report = await deps.provider!.consolidate!(items, ctx)
-    promptBytes = report.promptBytes ?? undefined
-    totalTokens += report.tokens ?? 0
+    // Chunk the writer so one spawn never has more items than its step budget
+    // can service. The cursor still advances once, only after every chunk
+    // reports or skips all of its items (atomic across chunks).
+    const chunks = chunkPlanned(planned, cfg.max_items_per_batch)
+    const consumed: number[] = []
+    const skipped: number[] = []
+    let failure: WriteReport | null = null
+    let atomicAll = false
+    promptBytes = 0
 
-    try {
-      await deps.ledger?.write({
-        source: "writer",
-        outcome: report.ok ? "ok" : "error",
-        model: cfg.writer_model || null,
-        prompt_bytes: report.promptBytes ?? null,
-        wall_ms: Date.now() - writerStarted,
-        tokens: report.tokens ?? null,
-        cost: report.cost ?? null,
-        cursor_before: cursorBefore,
-        cursor_after: cursorBefore,
-        session: report.session ?? null,
-        error: report.detail ?? null,
-      })
-    } catch {
-      /* fail-open */
+    for (const chunk of chunks) {
+      const writerStarted = Date.now()
+      const chunkReport = await deps.provider!.consolidate!(
+        chunk.items.map((entry) => entry.item),
+        ctx,
+      )
+      promptBytes += chunkReport.promptBytes ?? 0
+      totalTokens += chunkReport.tokens ?? 0
+
+      try {
+        await deps.ledger?.write({
+          source: "writer",
+          outcome: chunkReport.ok ? "ok" : "error",
+          model: cfg.writer_model || null,
+          prompt_bytes: chunkReport.promptBytes ?? null,
+          wall_ms: Date.now() - writerStarted,
+          tokens: chunkReport.tokens ?? null,
+          cost: chunkReport.cost ?? null,
+          cursor_before: cursorBefore,
+          cursor_after: cursorBefore,
+          session: chunkReport.session ?? null,
+          error: chunkReport.detail ?? null,
+        })
+      } catch {
+        /* fail-open */
+      }
+
+      if (!chunkReport.ok) {
+        failure = chunkReport
+        break
+      }
+      if (chunkReport.atomic === true) {
+        atomicAll = true
+        break
+      }
+      consumed.push(...chunkReport.consumed.map((label) => label + chunk.offset))
+      skipped.push(...chunkReport.skipped.map((label) => label + chunk.offset))
+      if (chunkReport.consumed.length + chunkReport.skipped.length !== chunk.items.length) {
+        failure = { ...chunkReport, detail: "incomplete report" }
+        break
+      }
     }
 
     const boundary = maxTurnTime(renderings)
-    const complete =
-      report.atomic === true || report.consumed.length + report.skipped.length === items.length
+    const complete = atomicAll || (failure === null && consumed.length + skipped.length === items.length)
 
-    if (!report.ok || !complete) {
+    if (failure || !complete) {
       // Transient provider failures back off without poisoning the boundary.
-      if (report.errorKind !== "transient") {
+      const errorKind = failure?.errorKind
+      if (errorKind !== "transient") {
         const failed = recordFailure(cursor, boundary, cfg.poison_attempts)
         cursor = failed.cursor
         await saveCursor(cursorFile, cursor)
@@ -284,24 +330,24 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           outcome: failed.dropped ? "dropped" : "error",
           sessions: renderings.length,
           items: planned.length,
-          consolidated: report.consumed.length,
-          skipped: report.skipped.length,
+          consolidated: consumed.length,
+          skipped: skipped.length,
           cursorBefore,
           cursorAfter: cursor.last_ts,
           degraded,
-          error: report.detail ?? (report.ok ? "incomplete report" : "writer failed"),
+          error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
       }
       return emit({
         outcome: "error",
         sessions: renderings.length,
         items: planned.length,
-        consolidated: report.consumed.length,
-        skipped: report.skipped.length,
+        consolidated: consumed.length,
+        skipped: skipped.length,
         cursorBefore,
         cursorAfter: cursor.last_ts,
         degraded,
-        error: report.detail ?? "writer failed (transient)",
+        error: failure?.detail ?? "writer failed (transient)",
       })
     }
 
@@ -325,8 +371,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       outcome: degraded ? "degraded" : "completed",
       sessions: renderings.length,
       items: planned.length,
-      consolidated: report.consumed.length,
-      skipped: report.skipped.length,
+      consolidated: consumed.length,
+      skipped: skipped.length,
       cursorBefore,
       cursorAfter: cursor.last_ts,
       degraded,

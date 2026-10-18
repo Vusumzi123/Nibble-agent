@@ -2,6 +2,16 @@
 
 ## 2026-10-18
 
+### Fixed
+
+- **Drain writer no longer loses a batch to its step budget** — the writer
+  (`rag-brain`) gets `steps: 20`, its reporting section now forbids wrapping the
+  outcome fences in prose or another code block and requires the raw blocks on
+  budget exhaustion, and oversized batches are chunked at
+  `drain.max_items_per_batch` (default 8) with a single cursor advance only
+  after every chunk reports. Invalid reports also log a 500-char reply excerpt
+  to diagnostics.
+
 ### Changed
 
 - **Heartbeat digests now carry a `warrant`** — each JEV candidate reports the

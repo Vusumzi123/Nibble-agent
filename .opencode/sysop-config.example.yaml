@@ -40,6 +40,7 @@ drain:
   max_turns_per_session: 40    # turn cap per session
   max_session_bytes: 24000     # rendered-delta byte cap (0 = unlimited)
   max_items_per_session: 6     # summarizer output cap
+  max_items_per_batch: 8       # writer items per spawn (step-budget safe)
   prefetch_candidates: 3       # deterministic vault candidates per batch
   continuity_turns: 6          # reserved for continuity tuning (currently unused)
   continuity_sessions: 20      # prior summaries kept for long-lived sessions

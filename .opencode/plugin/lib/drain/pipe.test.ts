@@ -363,6 +363,64 @@ test("a provider without a writer is a no-op and never opens the DB", async () =
   assert.equal(result.cursorAfter, 0)
 })
 
+test("a batch over max_items_per_batch is chunked into complete writer reports", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ summaryReply: TWO_ITEMS })
+  const ledger = createDrainLedger({ logDir: join(base.stateDir, "logs") })
+
+  const result = await runDrainPipe(
+    deps(base, client, { config: { max_items_per_batch: 1 }, ledger }),
+  )
+
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.items, 2)
+  assert.equal(result.consolidated, 2)
+  assert.equal(result.skipped, 0)
+  assert.equal(result.cursorAfter, 1000)
+
+  await ledger.flush()
+  const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  assert.deepEqual(lines.map((l) => l.source), ["writer", "writer", "pipe"])
+})
+
+test("a later chunk failure blocks the cursor even when earlier chunks succeeded", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ summaryReply: TWO_ITEMS })
+  let calls = 0
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
+    async consolidate() {
+      calls++
+      if (calls === 2) {
+        return { ok: false, consumed: [], skipped: [], errorKind: "permanent", detail: "chunk two failed" }
+      }
+      return { ok: true, consumed: [1], skipped: [] }
+    },
+  }
+
+  const result = await runDrainPipe({
+    ...deps(base, client, { config: { max_items_per_batch: 1 } }),
+    provider,
+  })
+
+  assert.equal(result.outcome, "error")
+  assert.equal(result.consolidated, 1)
+  assert.equal(result.cursorAfter, 0)
+  assert.match(result.error ?? "", /chunk two failed/)
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.deepEqual(cursor.blocked, { ts: 1000, attempts: 1 })
+})
+
 test("a transient provider error backs off without poisoning the boundary", async () => {
   const base = { ...(await workspace()), dbFile: await seedDb() }
   const { client } = fakeClient()

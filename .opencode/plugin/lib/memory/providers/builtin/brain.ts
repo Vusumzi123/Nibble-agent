@@ -125,6 +125,11 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
 
       const report = parseConsolidationReport(spawned.reply, items.length)
       if (!report.valid) {
+        const missing = report.missing.length > 0 ? ` missing=${report.missing.join(",")}` : ""
+        const excerpt = spawned.reply.replace(/\s+/g, " ").trim().slice(0, 500)
+        ctx.onWarn?.(
+          `memory brain: invalid report (${report.error ?? "incomplete"})${missing}; reply: ${excerpt}`,
+        )
         return {
           ok: false,
           consumed: report.consolidated,

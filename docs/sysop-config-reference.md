@@ -130,6 +130,7 @@ reported exactly once.
 | `max_turns_per_session` | Cap on fetched text parts per session. |
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
+| `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 8). |
 | `prefetch_candidates` | Candidate notes scored deterministically per batch. |
 | `continuity_turns` | Reserved for continuity tuning (currently unused). |
 | `continuity_sessions` | Prior per-session summaries kept for long-lived sessions. |

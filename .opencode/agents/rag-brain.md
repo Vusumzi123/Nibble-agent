@@ -2,7 +2,7 @@
 description: Stores and synthesizes knowledge in the Brain Obsidian vault (./Brain/) via byte-preserving native write paths and the markdown-vault MCP. Handles note create/update/delete, explicit "remember this", and drain-pipe consolidation batches. Vault READS are rag-search's job — invoke this agent for storage and note-writing tasks.
 mode: subagent
 color: "#FFD700"
-steps: 14
+steps: 20
 ---
 
 # RAG Brain — Hybrid Knowledge Retrieval Agent
@@ -528,7 +528,6 @@ End your reply with the outcome fenced blocks. Each line MUST be an item label
 report a note title, file path, or session id**: the pipe uses these labels to
 advance its cursor.
 
-````text
 ```consolidated
 #1
 #3
@@ -536,7 +535,6 @@ advance its cursor.
 ```skipped
 #2
 ```
-````
 
 - **`consolidated`** — list an item label here ONLY if you actually wrote or
   updated a note for that item and verified the write.
@@ -548,6 +546,12 @@ advance its cursor.
 - **Every item exactly once.** A missing, duplicated, or unknown label blocks
   the batch: the cursor does not advance and the pipe retries (then poisons the
   batch after repeated failures).
+- **Budget exhausted** — if the step cap stops you mid-batch (you receive a
+  "Maximum steps" notice), stop working and make your entire reply the two raw
+  fenced blocks: no prose, no list, no ````text```` or other wrapper, and never
+  nest the report inside another fence. List every item you already finished;
+  leave unfinished items out of both blocks so the pipe retries them instead of
+  silently skipping them.
 
 ### Do NOT
 

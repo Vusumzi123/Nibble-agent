@@ -105,12 +105,16 @@ test("consolidate owns the prompt/spawn/report contract", async () => {
 test("an invalid report is a permanent error that does not consume items", async () => {
   const ws = await workspace()
   const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
-  const result = await provider.consolidate!([ITEM], ctx(ws, client({ reply: "no fences here" })))
+  const warnings: string[] = []
+  const c = { ...ctx(ws, client({ reply: "no fences here" })), onWarn: (msg: string) => warnings.push(msg) }
+  const result = await provider.consolidate!([ITEM], c)
 
   assert.equal(result.ok, false)
   assert.equal(result.errorKind, "permanent")
   assert.deepEqual(result.consumed, [])
   assert.match(result.detail ?? "", /invalid report/)
+  assert.match(warnings[0] ?? "", /invalid report \(no report fence\)/)
+  assert.match(warnings[0] ?? "", /reply: no fences here/)
 })
 
 test("a spawn failure is transient", async () => {

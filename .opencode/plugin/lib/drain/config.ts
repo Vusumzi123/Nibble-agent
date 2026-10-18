@@ -16,6 +16,7 @@ export type DrainConfig = {
   max_turns_per_session: number
   max_session_bytes: number
   max_items_per_session: number
+  max_items_per_batch: number
   prefetch_candidates: number
   continuity_turns: number
   continuity_sessions: number
@@ -32,6 +33,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   max_turns_per_session: 40,
   max_session_bytes: 24000,
   max_items_per_session: 6,
+  max_items_per_batch: 8,
   prefetch_candidates: 3,
   continuity_turns: 6,
   continuity_sessions: 20,
@@ -45,6 +47,7 @@ const INT_KEYS = new Set([
   "max_turns_per_session",
   "max_session_bytes",
   "max_items_per_session",
+  "max_items_per_batch",
   "prefetch_candidates",
   "continuity_turns",
   "continuity_sessions",
@@ -84,6 +87,11 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     cfg.max_items_per_session,
     1,
     DEFAULT_DRAIN.max_items_per_session,
+  )
+  cfg.max_items_per_batch = atLeast(
+    cfg.max_items_per_batch,
+    1,
+    DEFAULT_DRAIN.max_items_per_batch,
   )
   cfg.prefetch_candidates = atLeast(
     cfg.prefetch_candidates,
