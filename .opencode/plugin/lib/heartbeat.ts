@@ -471,8 +471,8 @@ export const DEFAULT_DIGEST_ASSERTION =
   "`idea quota open`), or `judgment` when only the reported signals can decide. Answer mission:<id> when " +
   "a candidate's warrant shows pending work or a gate that has come due — pending work is warranted even " +
   "during quiet hours; for `judgment` candidates decide from the signals. Use the frequency × mood weight " +
-  "only to break ties among warranted candidates. Answer no_reply only when no candidate is warranted; " +
-  "never invent work."
+  "only to break ties among warranted candidates. If a candidate has no `warrant` field, judge it from " +
+  "the reported signals. Answer no_reply only when no candidate is warranted; never invent work."
 
 /** The typed digest verdict: run exactly one mission, or stay silent. */
 export type DigestVerdict = { kind: "no_reply" } | { kind: "mission"; id: string }
