@@ -2,6 +2,12 @@
 
 ## 2026-10-18
 
+### Added
+
+- **Dashboard backend lifecycle script** — `scripts/dashboard-ctl.sh` wraps the
+  dashboard server with a pid file, health polling, graceful stop, and adoption
+  of a manually started instance, replacing ad-hoc `nohup`/`kill`.
+
 ### Fixed
 
 - **The drain no longer consumes its own child sessions** — `drain-summarize`
