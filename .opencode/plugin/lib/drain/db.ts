@@ -14,7 +14,7 @@
 // Loaded via relative import only.
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { DatabaseSync } from "node:sqlite"
+import { openReadOnlyDb, type SqliteDatabase } from "./sqlite.ts"
 
 export type DrainSession = {
   id: string
@@ -131,7 +131,7 @@ export const FETCH_QUERY_PLAN_SQL = `EXPLAIN QUERY PLAN ${FETCH_SQL}`
 
 /** Rows of the fetch query plan (tests assert the index is used). */
 export function explainFetch(
-  db: DatabaseSync,
+  db: SqliteDatabase,
   sessionID: string,
   lastTs: number,
   limit: number,
@@ -164,7 +164,7 @@ export function resolveDbFile(opts: { home?: string; env?: NodeJS.ProcessEnv } =
 }
 
 /** Verify the tables/columns the fixed queries depend on. */
-export function checkSchema(db: DatabaseSync): { ok: true } | { ok: false; reason: string } {
+export function checkSchema(db: SqliteDatabase): { ok: true } | { ok: false; reason: string } {
   const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
 
   for (const [table, required] of Object.entries(REQUIRED_COLUMNS)) {
@@ -191,7 +191,7 @@ function turnFromRow(row: Record<string, unknown>): DrainTurn {
   }
 }
 
-function sqliteSource(db: DatabaseSync, projectDir: string): DrainSource {
+function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
   const discover = db.prepare(DISCOVER_SQL)
   const fetch = db.prepare(FETCH_SQL)
   const count = db.prepare(COUNT_SQL)
@@ -436,9 +436,9 @@ export async function openDrainSource(opts: OpenDrainSourceOptions): Promise<Dra
   const warn = opts.onWarn ?? (() => {})
   const dbFile = opts.dbFile ?? resolveDbFile({ home: opts.home, env: opts.env })
 
-  let db: DatabaseSync | null = null
+  let db: SqliteDatabase | null = null
   try {
-    db = new DatabaseSync(dbFile, { readOnly: true })
+    db = await openReadOnlyDb(dbFile)
   } catch (err) {
     warn(`drain db: cannot open ${dbFile}; falling back to the SDK`, err)
     if (!opts.client) throw new Error(`drain db unavailable at ${dbFile}`, { cause: err })
