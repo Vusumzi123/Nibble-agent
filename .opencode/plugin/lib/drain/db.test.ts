@@ -12,6 +12,7 @@ import {
   searchUnconsumed,
   type DrainSdkClient,
 } from "./db.ts"
+import { SUMMARIZER_SESSION_TITLE, WRITER_SESSION_TITLE } from "./automation.ts"
 
 const PROJECT = "/work/project-a"
 const OTHER = "/work/project-b"
@@ -29,7 +30,8 @@ function createFixture(file: string): DatabaseSync {
       id TEXT PRIMARY KEY,
       parent_id TEXT,
       directory TEXT NOT NULL,
-      time_updated INTEGER NOT NULL
+      time_updated INTEGER NOT NULL,
+      title TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE message (
       id TEXT PRIMARY KEY,
@@ -48,13 +50,17 @@ function createFixture(file: string): DatabaseSync {
   return db
 }
 
-function addSession(db: DatabaseSync, id: string, directory: string, updated: number, parent: string | null = null) {
-  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
-    id,
-    parent,
-    directory,
-    updated,
-  )
+function addSession(
+  db: DatabaseSync,
+  id: string,
+  directory: string,
+  updated: number,
+  parent: string | null = null,
+  title = "",
+) {
+  db.prepare(
+    "INSERT INTO session (id, parent_id, directory, time_updated, title) VALUES (?, ?, ?, ?, ?)",
+  ).run(id, parent, directory, updated, title)
 }
 
 function addMessage(
@@ -154,6 +160,26 @@ test("discovery is project-scoped, top-level only, and activity-ordered", async 
   assert.equal(sessions[0].timeUpdated, 1000)
 })
 
+test("discovery and the pending count skip the pipeline's own child sessions", async () => {
+  const file = await tmpDb()
+  seed(file)
+  const db = new DatabaseSync(file)
+  addSession(db, "auto-sum", PROJECT, 1100, null, SUMMARIZER_SESSION_TITLE)
+  addSession(db, "auto-writer", PROJECT, 1200, null, WRITER_SESSION_TITLE)
+  addMessage(db, "m-auto-sum", "auto-sum", 1100, "user", { type: "text", text: "meta" })
+  addMessage(db, "m-auto-writer", "auto-writer", 1200, "assistant", {
+    type: "text",
+    text: "meta",
+  })
+  db.close()
+
+  const source = await openDrainSource({ projectDir: PROJECT, dbFile: file })
+  const sessions = await source.discover(LAST_TS, 10)
+  assert.deepEqual(sessions.map((s) => s.id), ["top-1"])
+  assert.equal(await source.unconsumedCount(LAST_TS), 2)
+  await source.close()
+})
+
 test("fetch keeps only newer, non-synthetic text and respects the cap", async () => {
   const file = await tmpDb()
   seed(file)
@@ -251,6 +277,13 @@ function mockClient(): DrainSdkClient {
         return {
           data: [
             { id: "s-top", parentID: null, directory: PROJECT, time: { updated: 1000 } },
+            {
+              id: "s-auto",
+              parentID: null,
+              title: WRITER_SESSION_TITLE,
+              directory: PROJECT,
+              time: { updated: 1500 },
+            },
             { id: "s-child", parentID: "s-top", directory: PROJECT, time: { updated: 3000 } },
             { id: "s-other", parentID: null, directory: OTHER, time: { updated: 2000 } },
             { id: "s-stale", parentID: null, directory: PROJECT, time: { updated: 10 } },

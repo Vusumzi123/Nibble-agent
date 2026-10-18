@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **The drain no longer consumes its own child sessions** — `drain-summarize`
+  and `knowledge-consolidate` are top-level sessions (in-process runners have no
+  parent session), so discovery re-ingested every run's transcripts and the
+  pending queue grew faster than it drained (58 of 59 pending sessions were
+  self-generated). `lib/drain/automation.ts` now owns both titles: the SQLite
+  `discover`/`COUNT` queries, the SDK fallback lane, and both spawn sites import
+  it, so the pipeline's children are excluded from consolidation and from the
+  heartbeat's `unconsumed_turns` signal.
 - **Silent `jev-no-reply` is now attributable** — the shadow decision ledger
   (`decisions.ledger`) is wired: every gate outcome records its value, fallback
   reason, telemetry, and caller trace (the digest state/warrant for the

@@ -8,6 +8,7 @@
 //
 // Loaded via relative import only.
 import { textOf } from "../../../../sessions.ts"
+import { WRITER_SESSION_TITLE } from "../../../../drain/automation.ts"
 
 export type ConsolidationClient = {
   session: {
@@ -78,7 +79,7 @@ export async function spawnConsolidationChild(
   let sessionID = ""
   try {
     const created = await client.session.create({
-      body: { title: "knowledge-consolidate" },
+      body: { title: WRITER_SESSION_TITLE },
       query: { directory: opts.directory },
     })
     sessionID = String(created?.data?.id ?? "")

@@ -14,6 +14,7 @@
 // Loaded via relative import only.
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { AUTOMATION_SESSION_TITLES, isAutomationSessionTitle } from "./automation.ts"
 import { openReadOnlyDb, type SqliteDatabase } from "./sqlite.ts"
 
 export type DrainSession = {
@@ -92,12 +93,17 @@ export type OpenDrainSourceOptions = {
   onWarn?: DrainWarn
 }
 
+// The pipeline's own children are top-level sessions; excluding them by title
+// is what keeps the drain from consuming its own transcripts.
+const AUTOMATION_TITLE_PARAMS = AUTOMATION_SESSION_TITLES.map(() => "?").join(", ")
+
 const DISCOVER_SQL = `
   SELECT id, directory, time_updated
   FROM session
   WHERE parent_id IS NULL
     AND directory = ?
     AND time_updated > ?
+    AND title NOT IN (${AUTOMATION_TITLE_PARAMS})
   ORDER BY time_updated ASC
   LIMIT ?`
 
@@ -123,6 +129,7 @@ const COUNT_SQL = `
   WHERE s.parent_id IS NULL
     AND s.directory = ?
     AND m.time_created > ?
+    AND s.title NOT IN (${AUTOMATION_TITLE_PARAMS})
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
     AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
@@ -142,7 +149,7 @@ export function explainFetch(
 }
 
 const REQUIRED_COLUMNS: Record<string, string[]> = {
-  session: ["id", "parent_id", "directory", "time_updated"],
+  session: ["id", "parent_id", "directory", "time_updated", "title"],
   message: ["id", "session_id", "time_created", "data"],
   part: ["message_id", "data"],
 }
@@ -199,7 +206,12 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
   return {
     kind: "sqlite",
     async discover(lastTs, limit) {
-      const rows = discover.all(projectDir, lastTs, limit) as Array<Record<string, unknown>>
+      const rows = discover.all(
+        projectDir,
+        lastTs,
+        ...AUTOMATION_SESSION_TITLES,
+        limit,
+      ) as Array<Record<string, unknown>>
       return rows.map((row) => ({
         id: String(row.id ?? ""),
         directory: String(row.directory ?? ""),
@@ -211,7 +223,9 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
       return rows.map(turnFromRow)
     },
     async unconsumedCount(lastTs) {
-      const row = count.get(projectDir, lastTs) as { n?: unknown } | undefined
+      const row = count.get(projectDir, lastTs, ...AUTOMATION_SESSION_TITLES) as
+        | { n?: unknown }
+        | undefined
       return Number(row?.n ?? 0)
     },
     async close() {
@@ -223,6 +237,7 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
 type SdkSession = {
   id?: unknown
   parentID?: unknown
+  title?: unknown
   directory?: unknown
   time?: { updated?: unknown; created?: unknown }
 }
@@ -262,6 +277,7 @@ function sdkSource(
     const rows = await listSessions()
     return rows
       .filter((s) => !s.parentID)
+      .filter((s) => !isAutomationSessionTitle(s.title))
       .filter((s) => typeof s.directory !== "string" || s.directory === projectDir)
       .map((s) => ({
         id: String(s.id ?? ""),

@@ -16,7 +16,7 @@ async function workspace(): Promise<{ directory: string; stateDir: string; vault
   const dbFile = join(root, "opencode.db")
   const db = new DatabaseSync(dbFile)
   db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
   `)

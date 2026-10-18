@@ -10,6 +10,7 @@
 import { textOf } from "../sessions.ts"
 import { extractKeywords } from "../transcript.ts"
 import { hashContent, extractAtoms, type RenderedSession } from "./render.ts"
+import { SUMMARIZER_SESSION_TITLE } from "./automation.ts"
 
 export type SummaryItem = {
   title: string
@@ -272,7 +273,7 @@ export async function summarizeSession(
   let childID = ""
   try {
     const created = await deps.client.session.create({
-      body: { title: "drain-summarize" },
+      body: { title: SUMMARIZER_SESSION_TITLE },
       query: { directory: deps.directory },
     })
     childID = String(created?.data?.id ?? "")
