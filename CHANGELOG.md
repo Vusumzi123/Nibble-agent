@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-18
+
+### Changed
+
+- **Heartbeat digests now carry a `warrant`** — each JEV candidate reports the
+  signal that admitted it (`unconsumed_turns=N`, `backlog_pending=N`, a due
+  `min-gap`/dream/idea gate, or `judgment`), and the digest assertion treats
+  pending work or a due gate as clearly warranted instead of defaulting to
+  silence. The dispatch weight is cadence × mood, not urgency, so `drain` was
+  being skipped while hundreds of turns sat unconsolidated.
+
 ## 2026-10-17
 
 ### Added

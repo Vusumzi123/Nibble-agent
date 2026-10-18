@@ -18,6 +18,7 @@ import {
   buildCandidates,
   buildDigestChoiceRequest,
   candidacyPasses,
+  candidateWarrant,
   computeDigest,
   computeWakeDelayMs,
   digestHash,
@@ -695,6 +696,56 @@ test("buildDigestChoiceRequest: choice over no_reply + mission:<id>, capped stat
   assert.ok(state.includes("drain"), "state carries candidate ids")
   assert.ok(state.includes("backlog_pending"), "state carries the signals")
   assert.equal(state, digestStateSummary(digest))
+})
+
+test("candidateWarrant: one line per candidacy predicate", () => {
+  const base: DigestCandidate = {
+    id: "x",
+    title: "X",
+    frequency: "mid",
+    min_level: 2,
+    menus: ["day"],
+    candidacy: "digest",
+    frequency_weight: 0.5,
+    mood_bias: 1,
+    weight: 0.5,
+  }
+  const sig = signals({ unconsumed_turns: 930, backlog_pending: 2 })
+  const w = (candidacy: DigestCandidate["candidacy"]): string =>
+    candidateWarrant({ ...base, candidacy }, sig)
+  assert.equal(w("turns-pending"), "unconsumed_turns=930")
+  assert.equal(w("backlog-pending"), "backlog_pending=2")
+  assert.equal(w("dream-gate"), "dream gate passed")
+  assert.equal(w("idea-roll"), "idea quota open")
+  assert.equal(w("min-gap:express"), "min-gap express due")
+  assert.equal(w("roll:0.5"), "roll 0.5 passed")
+  assert.equal(w("digest"), "judgment")
+  assert.equal(w("always"), "judgment")
+})
+
+test("digestStateSummary: warrants make overdue-ness legible to the JEV", () => {
+  const digest = digestFixture({
+    signals: signals({ unconsumed_turns: 930, backlog_pending: 2 }),
+    candidates: candidatesFor(
+      [
+        mission({ id: "drain", title: "Drain", frequency: "high", candidacy: "turns-pending" }),
+        mission({ id: "queue", title: "Queue", frequency: "mid", candidacy: "backlog-pending" }),
+        mission({ id: "express", title: "Express", frequency: "mid", candidacy: "min-gap:express" }),
+      ],
+      { candidacy: { backlogPending: 2, unconsumedTurns: 930, nowMs: 1_000_000 } },
+    ),
+  })
+  const parsed = JSON.parse(digestStateSummary(digest)) as {
+    candidates: Array<{ id: string; warrant: string }>
+  }
+  assert.deepEqual(
+    parsed.candidates.map((c) => [c.id, c.warrant]),
+    [
+      ["drain", "unconsumed_turns=930"],
+      ["queue", "backlog_pending=2"],
+      ["express", "min-gap express due"],
+    ],
+  )
 })
 
 test("digestStateSummary: caps oversized digests with an ellipsis", () => {

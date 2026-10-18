@@ -466,9 +466,13 @@ export async function computeDigest(
  *  text; this is the missing-file fallback). */
 export const DEFAULT_DIGEST_ASSERTION =
   "Decide whether this heartbeat tick should run one of the listed maintenance missions or stay silent. " +
-  "Answer no_reply when none of the candidates is clearly warranted by the current signals — the default " +
-  "is silence; never invent work. Answer mission:<id> only for a candidate that appears in the list, " +
-  "using the frequency × mood weight as a tie-breaker among missions the signals actually justify."
+  "Each candidate carries a `warrant` naming why it is eligible: a pending-work warrant " +
+  "(`unconsumed_turns=N` / `backlog_pending=N`), a due gate (`min-gap ... due`, `dream gate passed`, " +
+  "`idea quota open`), or `judgment` when only the reported signals can decide. Answer mission:<id> when " +
+  "a candidate's warrant shows pending work or a gate that has come due — pending work is warranted even " +
+  "during quiet hours; for `judgment` candidates decide from the signals. Use the frequency × mood weight " +
+  "only to break ties among warranted candidates. Answer no_reply only when no candidate is warranted; " +
+  "never invent work."
 
 /** The typed digest verdict: run exactly one mission, or stay silent. */
 export type DigestVerdict = { kind: "no_reply" } | { kind: "mission"; id: string }
@@ -509,9 +513,26 @@ export function soleDeterministicVerdict(candidates: readonly DigestCandidate[])
   return null
 }
 
+/** Why a candidate reached the JEV — the signal half of the decision. The
+ *  weight is cadence × mood, not urgency, so the model needs this field to
+ *  tell "always eligible" apart from "930 turns are waiting".
+ *  Compact by design: the whole state is capped at 1500 chars. */
+export function candidateWarrant(candidate: DigestCandidate, signals: HeartbeatSignals): string {
+  const c = candidate.candidacy
+  if (c === "turns-pending") return `unconsumed_turns=${signals.unconsumed_turns}`
+  if (c === "backlog-pending") return `backlog_pending=${signals.backlog_pending}`
+  if (c === "dream-gate") return "dream gate passed"
+  if (c === "idea-roll") return "idea quota open"
+  if (c.startsWith("min-gap:")) return `min-gap ${c.slice("min-gap:".length)} due`
+  if (c.startsWith("roll:")) return `roll ${c.slice("roll:".length)} passed`
+  if (c === "digest" || c === "always") return "judgment"
+  return "eligible"
+}
+
 /** Compact one-block digest state for the JEV `choice` (mirrors
  *  jevStateSummary's 1500-char cap): signals, bias, and the candidates with
- *  their effective weights — everything the verdict needs, nothing more. */
+ *  their effective weights and warrants — everything the verdict needs,
+ *  nothing more. */
 export function digestStateSummary(digest: HeartbeatDigest): string {
   const summary = {
     level: digest.level,
@@ -530,6 +551,7 @@ export function digestStateSummary(digest: HeartbeatDigest): string {
       id: c.id,
       title: c.title,
       weight: Number(c.weight.toFixed(2)),
+      warrant: candidateWarrant(c, digest.signals),
     })),
     digest_hash: digest.digest_hash,
   }

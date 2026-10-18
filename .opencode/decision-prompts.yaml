@@ -57,9 +57,11 @@ digest:
   # pre-gate (kind: choice, FAIL-OPEN to no_reply). "Which mission should the
   # heartbeat run, or stay silent?" Candidates: no_reply | mission:<id> for
   # every mission that already passed the structural filter (enabled, menu
-  # window, min_level, candidacy). Error/abstain/unknown-id all resolve to
+  # window, min_level, candidacy). Each candidate carries a `warrant` (the
+  # pending-work signal or due gate that admitted it), because the weight is
+  # cadence × mood, not urgency. Error/abstain/unknown-id all resolve to
   # no_reply — a broken digest never invents work. The answer becomes the
   # typed verdict; brief = fixed prompt + verdict + mission body.
   # Consumed by: heartbeat.ts buildDigestChoiceRequest() + digestVerdictFromResult()
   # (scheduler: heartbeat-hook.ts, card D).
-  assertion: "Decide whether this heartbeat tick should run one of the listed maintenance missions or stay silent. Answer no_reply when none of the candidates is clearly warranted by the current signals — the default is silence; never invent work. Answer mission:<id> only for a candidate that appears in the list, using the frequency × mood weight as a tie-breaker among missions the signals actually justify."
+  assertion: "Decide whether this heartbeat tick should run one of the listed maintenance missions or stay silent. Each candidate carries a `warrant` naming why it is eligible: a pending-work warrant (`unconsumed_turns=N` / `backlog_pending=N`), a due gate (`min-gap ... due`, `dream gate passed`, `idea quota open`), or `judgment` when only the reported signals can decide. Answer mission:<id> when a candidate's warrant shows pending work or a gate that has come due — pending work is warranted even during quiet hours; for `judgment` candidates decide from the signals. Use the frequency × mood weight only to break ties among warranted candidates. Answer no_reply only when no candidate is warranted; never invent work."
