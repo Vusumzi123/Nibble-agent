@@ -13,6 +13,7 @@ import {
   createCsrfStore,
   flattenValues,
   guardLeaf,
+  heartbeatSchedule,
   heartbeatSnapshot,
   isLoopback,
   listLedgers,
@@ -475,6 +476,77 @@ test("setMissionEnabled: unknown mission, file-disabled enable, and bad input re
     () => setMissionEnabled(dir, "drain", "off"),
     (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
   )
+})
+
+test("heartbeatSchedule: first run is due, then projects from last_tick", async () => {
+  const dir = await project()
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+
+  const first = await heartbeatSchedule(dir, Date.UTC(2026, 9, 17, 12, 0, 0))
+  assert.equal(first.frequency, "12h")
+  assert.equal(first.interval_ms, 12 * 3_600_000)
+  assert.equal(first.last_tick, null)
+  assert.equal(first.next_tick, null)
+  assert.equal(first.due, true)
+  assert.equal(first.paused, false)
+  assert.equal(first.off, false)
+
+  const lastTick = Date.UTC(2026, 9, 17, 11, 0, 0)
+  await writeFile(
+    join(stateDir, "heartbeat.json"),
+    JSON.stringify({ last_tick: lastTick, ticks: 4, noop_hash: "x", noop_streak: 0 }),
+    "utf8",
+  )
+  const upcoming = await heartbeatSchedule(dir, Date.UTC(2026, 9, 17, 12, 0, 0))
+  assert.equal(upcoming.last_tick, new Date(lastTick).toISOString())
+  assert.equal(upcoming.next_tick, new Date(lastTick + 12 * 3_600_000).toISOString())
+  assert.equal(upcoming.remaining_ms, 11 * 3_600_000)
+  assert.equal(upcoming.due, false)
+})
+
+test("heartbeatSchedule: noop backoff stretches the interval", async () => {
+  const dir = await project()
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  const now = Date.UTC(2026, 9, 17, 12, 0, 0)
+  await writeFile(
+    join(stateDir, "heartbeat.json"),
+    JSON.stringify({ last_tick: now - 3_600_000, ticks: 9, noop_hash: "x", noop_streak: 2 }),
+    "utf8",
+  )
+  const sched = await heartbeatSchedule(dir, now)
+  assert.equal(sched.interval_ms, 24 * 3_600_000)
+  assert.equal(sched.next_tick, new Date(now - 3_600_000 + 24 * 3_600_000).toISOString())
+})
+
+test("heartbeatSchedule: paused (level 0 / kill switch) and off (frequency)", async () => {
+  const dir = await project()
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(join(stateDir, "heartbeat.json"), JSON.stringify({ last_tick: Date.now(), noop_streak: 0 }), "utf8")
+
+  const cfgPath = join(dir, ".opencode", "sysop-config.yaml")
+  const edit = async (section: string, values: Record<string, string>) =>
+    writeFile(cfgPath, applySectionEdits(await readConfig(dir), section, values), "utf8")
+
+  await edit("autonomy", { level: "0" })
+  const paused = await heartbeatSchedule(dir)
+  assert.equal(paused.paused, true)
+  assert.equal(paused.due, false)
+  assert.equal(paused.next_tick, null)
+
+  await edit("autonomy", { level: "3", "heartbeat.frequency": "off" })
+  const off = await heartbeatSchedule(dir)
+  assert.equal(off.off, true)
+  assert.equal(off.interval_ms, null)
+  assert.equal(off.due, false)
+
+  await edit("heartbeat", { enabled: "false" })
+  await edit("autonomy", { "heartbeat.frequency": "30m" })
+  const killed = await heartbeatSchedule(dir)
+  assert.equal(killed.paused, true)
+  assert.equal(killed.next_tick, null)
 })
 
 test("heartbeatSnapshot: idle (no marker) vs in-flight marker + lock", async () => {

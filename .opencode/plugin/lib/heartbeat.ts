@@ -733,6 +733,10 @@ export async function releaseHeartbeatLock(file: string): Promise<void> {
 
 export const HEARTBEAT_CURRENT_FILE = "heartbeat.current.json"
 
+/** Scheduler state (last tick + B7 noop backoff), shared with the dashboard
+ *  so its next-tick projection uses exactly the hook's cadence math. */
+export const HEARTBEAT_STATE_FILE = "heartbeat.json"
+
 export type HeartbeatCurrent = {
   /** "in-flight" between tick start and tick end; "idle" once the tick closes. */
   state: "idle" | "in-flight"

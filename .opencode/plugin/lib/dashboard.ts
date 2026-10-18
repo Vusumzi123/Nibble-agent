@@ -38,6 +38,9 @@ import { atomicWrite } from "./fsx.ts"
 import { readMoodState } from "./mood.ts"
 import {
   HEARTBEAT_CURRENT_FILE,
+  HEARTBEAT_STATE_FILE,
+  effectiveFrequencyMs,
+  frequencyToMs,
   readHeartbeatConfig,
   readHeartbeatCurrent,
   type HeartbeatCurrent,
@@ -529,6 +532,33 @@ export async function metricsSnapshot(directory: string): Promise<MetricsSnapsho
 // Live heartbeat status (card 16 §9.2): the on-flight marker + the lock. The
 // dashboard's "flight" widget polls this; history comes from the heartbeat.log
 // ledger and the backlog snapshot.
+/** Next-tick projection — the hook's own cadence math, read from disk.
+ *  `interval_ms` includes the B7 noop backoff (×2 at streak 2, ×4 at 3+). */
+export type HeartbeatSchedule = {
+  /** heartbeat.enabled kill switch. */
+  enabled: boolean
+  level: number
+  /** Raw `autonomy.heartbeat.frequency` dial. */
+  frequency: string
+  /** frequencyToMs(frequency) — before backoff; null = off/malformed. */
+  base_interval_ms: number | null
+  /** Effective cadence: base × noop backoff; null = off. */
+  interval_ms: number | null
+  noop_streak: number
+  /** Last completed tick (ISO), null before the first tick. */
+  last_tick: string | null
+  /** Projected next tick (ISO); null when off, paused, or first-run due. */
+  next_tick: string | null
+  /** Milliseconds until next_tick, clamped at 0; null when none scheduled. */
+  remaining_ms: number | null
+  /** A tick is due now (first run, or the projected time has passed). */
+  due: boolean
+  /** level 0 or heartbeat.enabled: false — the scheduler sleeps. */
+  paused: boolean
+  /** frequency off/malformed — the scheduler sleeps. */
+  off: boolean
+}
+
 export type HeartbeatSnapshot = {
   ts: string
   /** heartbeat.current.json — null when the tick has never run or is idle. */
@@ -537,6 +567,48 @@ export type HeartbeatSnapshot = {
   lock: boolean
   /** Lock held longer than the 30-min stale window (presumed dead tick). */
   lock_stale: boolean
+  schedule: HeartbeatSchedule
+}
+
+type HeartbeatStateFile = { last_tick?: number; ticks?: number; noop_streak?: number }
+
+export async function heartbeatSchedule(
+  directory: string,
+  nowMs: number = Date.now(),
+): Promise<HeartbeatSchedule> {
+  const { stateDir } = await readResolvedPaths(directory)
+  const [autonomy, hbCfg] = await Promise.all([readAutonomyConfig(directory), readHeartbeatConfig(directory)])
+  let state: HeartbeatStateFile = {}
+  try {
+    state = JSON.parse(await readFile(join(stateDir, HEARTBEAT_STATE_FILE), "utf8")) as HeartbeatStateFile
+  } catch {
+    // never ticked / unreadable — treated as first run
+  }
+  const frequency = autonomy.heartbeat.frequency
+  const level = autonomy.level
+  const noopStreak = Number.isFinite(state.noop_streak) ? Math.max(0, Number(state.noop_streak)) : 0
+  const lastTickMs = Number.isFinite(state.last_tick) && Number(state.last_tick) > 0 ? Number(state.last_tick) : null
+  const baseMs = frequencyToMs(frequency)
+  const intervalMs = effectiveFrequencyMs(baseMs, noopStreak)
+  const paused = !hbCfg.enabled || level <= 0
+  const off = intervalMs === null
+  const active = !paused && !off
+  const nextMs = active && lastTickMs !== null && intervalMs !== null ? lastTickMs + intervalMs : null
+  const remainingMs = nextMs === null ? null : Math.max(0, nextMs - nowMs)
+  return {
+    enabled: hbCfg.enabled,
+    level,
+    frequency,
+    base_interval_ms: baseMs,
+    interval_ms: intervalMs,
+    noop_streak: noopStreak,
+    last_tick: lastTickMs === null ? null : new Date(lastTickMs).toISOString(),
+    next_tick: nextMs === null ? null : new Date(nextMs).toISOString(),
+    remaining_ms: remainingMs,
+    due: active && (nextMs === null || remainingMs === 0),
+    paused,
+    off,
+  }
 }
 
 export async function heartbeatSnapshot(directory: string): Promise<HeartbeatSnapshot> {
@@ -556,7 +628,7 @@ export async function heartbeatSnapshot(directory: string): Promise<HeartbeatSna
   } catch {
     // no lock
   }
-  return { ts: new Date().toISOString(), current, lock, lock_stale }
+  return { ts: new Date().toISOString(), current, lock, lock_stale, schedule: await heartbeatSchedule(directory) }
 }
 
 export type BacklogSnapshot = { total: number; entries: BacklogEntry[] }

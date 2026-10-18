@@ -16,6 +16,7 @@ import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import {
   HEARTBEAT_CURRENT_FILE,
+  HEARTBEAT_STATE_FILE,
   HEARTBEAT_WAKE_CAP_MS,
   acquireHeartbeatLock,
   assembleMissionBrief,
@@ -149,7 +150,7 @@ export default (async ({ client, directory, ...rest }) => {
     ticks: number
     noop_hash: string | null
     noop_streak: number
-  }>(join(stateDir, "heartbeat.json"), { last_tick: 0, ticks: 0, noop_hash: null, noop_streak: 0 })
+  }>(join(stateDir, HEARTBEAT_STATE_FILE), { last_tick: 0, ticks: 0, noop_hash: null, noop_streak: 0 })
 
   // B7 bookkeeping: a no_reply tick on the SAME digest extends the streak, a
   // changed digest restarts it at 1; an executed mission clears it (§17.8

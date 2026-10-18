@@ -27,6 +27,12 @@
 </section>
 
 <section>
+  Next heartbeat tick <span class="muted">— from autonomy.heartbeat.frequency + last tick</span>
+  <div style="font-size:2rem;margin:.4rem 0" id="countdown">–</div>
+  <pre id="tick">–</pre>
+</section>
+
+<section>
   Config snapshot <button data-get="/api/config">GET</button>
   <pre id="config">–</pre>
 </section>
@@ -60,6 +66,58 @@
   } catch (e) {
     show("health", String(e));
   }
+
+  // Heartbeat next-tick countdown. The server projects next_tick from the
+  // hook's own cadence math (frequency + B7 noop backoff); we resync every
+  // 10s and count down locally so the display stays smooth between polls.
+  let hb = null;
+  let deadline = null;
+  const pad = (n) => String(n).padStart(2, "0");
+  const clock = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+  };
+  const renderTick = () => {
+    const out = document.getElementById("countdown");
+    const pre = document.getElementById("tick");
+    if (!hb) { out.textContent = "–"; return; }
+    const s = hb.schedule;
+    if (hb.current && hb.current.state === "in-flight") {
+      out.textContent = `tick #${hb.current.tick ?? "?"} in flight`;
+    } else if (s.paused) {
+      out.textContent = `paused (${s.enabled ? "level 0" : "heartbeat.enabled false"})`;
+    } else if (s.off) {
+      out.textContent = `off (frequency: ${s.frequency})`;
+    } else if (s.due) {
+      out.textContent = "due now";
+    } else if (deadline !== null) {
+      out.textContent = clock(deadline - Date.now());
+    } else {
+      out.textContent = "–";
+    }
+    pre.textContent = JSON.stringify({
+      frequency: s.frequency,
+      effective_interval: s.interval_ms === null ? null : clock(s.interval_ms),
+      noop_streak: s.noop_streak,
+      last_tick: s.last_tick,
+      next_tick: s.next_tick,
+      remaining_ms: s.remaining_ms,
+      lock: hb.lock,
+    }, null, 2);
+  };
+  const refreshTick = async () => {
+    try {
+      const res = await fetch("/api/heartbeat");
+      hb = await res.json();
+      deadline = hb.schedule.remaining_ms === null ? null : Date.now() + hb.schedule.remaining_ms;
+      renderTick();
+    } catch (e) {
+      document.getElementById("countdown").textContent = String(e);
+    }
+  };
+  refreshTick();
+  setInterval(refreshTick, 10_000);
+  setInterval(renderTick, 1_000);
 })();
 </script>
 </body>
