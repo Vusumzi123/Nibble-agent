@@ -556,6 +556,7 @@ export default (async ({ client, directory, ...rest }) => {
             handledByRunner = true
             outcome = runnerResult.outcome
             summary = formatDrainResult(runnerResult)
+            tokenCost = runnerResult.tokens ?? 0
             phase = "mission"
             await setCurrent({
               phase,

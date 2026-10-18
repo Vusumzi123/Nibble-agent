@@ -469,6 +469,7 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
   const [tick] = await readTickLog(dir)
   assert.equal(tick.mission, "drain")
   assert.equal(tick.outcome, "completed")
+  assert.equal(tick.token_cost, 45, "summarizer 15 + writer 30")
 
   const cursor = JSON.parse(
     await readFile(join(dir, ".opencode", "state", "drain-cursor.json"), "utf8"),
@@ -478,6 +479,7 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
   const entries = await readBacklog(dir)
   assert.equal(entries[0].status, "done")
   assert.match(entries[0].result.summary, /drain:completed/)
+  assert.equal(entries[0].result.token_cost, 45)
 })
 
 // A failed mission run: outcome error feeds `mission_failure` (shared mood

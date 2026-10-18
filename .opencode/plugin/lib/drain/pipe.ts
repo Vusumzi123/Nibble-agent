@@ -46,6 +46,8 @@ export type DrainPipeResult = {
   cursorAfter: number
   /** Writer child session (the dashboard's output/thoughts transcript). */
   session?: string | null
+  /** Billable tokens (summarizer + writer) spent by the run. */
+  tokens?: number | null
   degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback"
   error?: string
 }
@@ -180,6 +182,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       skipped: 0,
       cursorBefore,
       cursorAfter: cursor.last_ts,
+      tokens: totalTokens || null,
       degraded,
       ...(error ? { error } : {}),
     })
@@ -352,6 +355,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursorBefore,
           cursorAfter: cursor.last_ts,
           session: writerSession,
+          tokens: totalTokens || null,
           degraded,
           error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
@@ -365,6 +369,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         cursorBefore,
         cursorAfter: cursor.last_ts,
         session: writerSession,
+        tokens: totalTokens || null,
         degraded,
         error: failure?.detail ?? "writer failed (transient)",
       })
@@ -395,6 +400,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       cursorBefore,
       cursorAfter: cursor.last_ts,
       session: writerSession,
+      tokens: totalTokens || null,
       degraded,
     })
   } catch (err) {
@@ -406,6 +412,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       skipped: 0,
       cursorBefore,
       cursorAfter: cursor.last_ts,
+      tokens: totalTokens || null,
       degraded,
       error: errorText(err),
     })

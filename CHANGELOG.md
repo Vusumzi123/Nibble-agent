@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **Runner missions report token spend** — `DrainPipeResult.tokens` (summarizer +
+  writer chunks) now fills the heartbeat tick's `token_cost`, the backlog result,
+  and the dashboard's token totals; previously drain ticks always reported 0.
 - **Fresh drain cursors no longer replay days of history** —
   `drain.initial_lookback_hours` (default 24) seeds a new cursor at
   `now - N hours`
