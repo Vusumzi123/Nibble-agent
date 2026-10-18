@@ -127,6 +127,7 @@ reported exactly once.
 | `writer_model` | `rag-brain` writer model; `""` = the agent default. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |
 | `batch_sessions` | Max top-level sessions per run. |
+| `initial_lookback_hours` | Fresh-cursor start: only consolidate sessions active in the last N hours (`0` = whole history). |
 | `max_turns_per_session` | Cap on fetched text parts per session. |
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |

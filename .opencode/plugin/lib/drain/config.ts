@@ -13,6 +13,7 @@ export type DrainConfig = {
   writer_model: string
   summarize_model: string
   batch_sessions: number
+  initial_lookback_hours: number
   max_turns_per_session: number
   max_session_bytes: number
   max_items_per_session: number
@@ -30,6 +31,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   writer_model: "",
   summarize_model: "",
   batch_sessions: 5,
+  initial_lookback_hours: 24,
   max_turns_per_session: 40,
   max_session_bytes: 24000,
   max_items_per_session: 6,
@@ -44,6 +46,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
 const BOOL_KEYS = new Set(["enabled"])
 const INT_KEYS = new Set([
   "batch_sessions",
+  "initial_lookback_hours",
   "max_turns_per_session",
   "max_session_bytes",
   "max_items_per_session",
@@ -77,6 +80,11 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   const cfg = await readSection(directory, "drain", DEFAULT_DRAIN, { coerce: DRAIN_COERCE })
 
   cfg.batch_sessions = atLeast(cfg.batch_sessions, 1, DEFAULT_DRAIN.batch_sessions)
+  cfg.initial_lookback_hours = atLeast(
+    cfg.initial_lookback_hours,
+    0,
+    DEFAULT_DRAIN.initial_lookback_hours,
+  )
   cfg.max_turns_per_session = atLeast(
     cfg.max_turns_per_session,
     1,

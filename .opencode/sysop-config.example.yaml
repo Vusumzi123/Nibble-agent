@@ -37,6 +37,7 @@ drain:
   writer_model: ""             # rag-brain writer; "" = the agent default
   summarize_model: ""          # session-summarizer; "" = the agent default
   batch_sessions: 5            # max top-level sessions per run
+  initial_lookback_hours: 24   # fresh cursor starts N hours back (0 = all history)
   max_turns_per_session: 40    # turn cap per session
   max_session_bytes: 24000     # rendered-delta byte cap (0 = unlimited)
   max_items_per_session: 6     # summarizer output cap

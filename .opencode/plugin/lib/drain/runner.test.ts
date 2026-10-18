@@ -29,7 +29,7 @@ async function deps(): Promise<DrainPipeDeps> {
     directory: "/work/project-a",
     stateDir: root,
     vaultDir: root,
-    config: { ...DEFAULT_DRAIN, enabled: false },
+    config: { ...DEFAULT_DRAIN, enabled: false, initial_lookback_hours: 0 },
     client: stubClient(),
     waitForIdle: async () => true,
   }

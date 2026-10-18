@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- **Fresh drain cursors no longer replay days of history** —
+  `drain.initial_lookback_hours` (default 24) seeds a new cursor at
+  `now - N hours`
+  instead of epoch, so the pipe no longer starts from the oldest session in the
+  DB (`0` preserves the old whole-history behavior).
 - **Drain transcripts reach the dashboard's output page** — the pipe now
   returns the writer child session (last chunk) in `DrainPipeResult.session`,
   the heartbeat records it in `heartbeat.current.json`, and the dashboard falls

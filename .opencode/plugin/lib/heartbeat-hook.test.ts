@@ -350,7 +350,17 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
 // it dispatches the pipe, which spawns its own summarizer + rag-brain, and the
 // cursor advances only after the writer reports every item.
 test("mission runner: drain-pipe bypasses child dispatch and advances the cursor", async () => {
-  const dir = await project(["autonomy:", "  level: 3", "", "decisions:", "  enabled: true", "  provider: openjev"])
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  initial_lookback_hours: 0",
+  ])
   await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
   await writeFile(
     join(dir, ".opencode", "missions", "drain.md"),

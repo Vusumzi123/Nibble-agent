@@ -131,6 +131,19 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     deps.onWarn?.("drain pipe: cursor load failed", err)
     cursor = defaultCursor()
   }
+
+  // A fresh cursor starts at epoch and would replay every session in the DB,
+  // oldest first. Seed it to a bounded lookback instead; 0 keeps the
+  // historical behavior (consolidate from the beginning of history).
+  if (cursor.last_ts <= 0 && cfg.initial_lookback_hours > 0) {
+    cursor = advanceCursor(cursor, Date.now() - cfg.initial_lookback_hours * 3_600_000)
+    try {
+      await saveCursor(cursorFile, cursor)
+    } catch (err) {
+      deps.onWarn?.("drain pipe: cursor bootstrap save failed", err)
+    }
+  }
+
   const cursorBefore = cursor.last_ts
   let promptBytes: number | undefined
   let totalTokens = 0

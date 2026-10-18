@@ -103,6 +103,7 @@ async function seedDb(
     text?: string
     partType?: string
     time?: number
+    sessionTime?: number
     sessionDirectory?: string
   } = {},
 ): Promise<string> {
@@ -119,7 +120,7 @@ async function seedDb(
     "top-1",
     null,
     opts.sessionDirectory ?? PROJECT,
-    1000,
+    opts.sessionTime ?? 1000,
   )
   const text = opts.text ?? "run sudo systemctl restart wg0"
   db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
@@ -138,7 +139,13 @@ async function seedDb(
 }
 
 function config(overrides: Partial<DrainConfig> = {}): DrainConfig {
-  return { ...DEFAULT_DRAIN, writer_model: "test/writer", summarize_model: "test/sum", ...overrides }
+  return {
+    ...DEFAULT_DRAIN,
+    writer_model: "test/writer",
+    summarize_model: "test/sum",
+    initial_lookback_hours: 0,
+    ...overrides,
+  }
 }
 
 function deps(
@@ -207,6 +214,40 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.deepEqual(lines.map((l) => l.source), ["writer", "pipe"])
   assert.equal(lines[0].outcome, "ok")
   assert.equal(lines[1].cursor_after, 1000)
+})
+
+test("a fresh cursor starts at the configured lookback, not at epoch", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client, prompts } = fakeClient()
+  const before = Date.now()
+
+  const result = await runDrainPipe(
+    deps(base, client, { config: { initial_lookback_hours: 1 } }),
+  )
+
+  const lookback = 3_600_000
+  assert.equal(result.outcome, "nothing")
+  assert.equal(result.sessions, 0)
+  assert.ok(result.cursorBefore >= before - lookback - 1000)
+  assert.ok(result.cursorBefore <= Date.now() - lookback + 1000)
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.equal(cursor.last_ts, result.cursorBefore)
+  assert.equal(prompts.length, 0, "old sessions are not summarized")
+})
+
+test("lookback still picks up a session inside the window", async () => {
+  const now = Date.now()
+  const base = { ...(await workspace()), dbFile: await seedDb({ time: now - 60_000, sessionTime: now - 60_000 }) }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+
+  const result = await runDrainPipe(
+    deps(base, client, { config: { initial_lookback_hours: 1 } }),
+  )
+
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.sessions, 1)
+  assert.equal(result.items, 1)
+  assert.ok(result.cursorAfter >= now - 60_000)
 })
 
 test("nothing to do leaves the cursor untouched", async () => {

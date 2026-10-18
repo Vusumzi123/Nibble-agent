@@ -12,6 +12,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  enabled: false",
       "  batch_sessions: 9",
       "  max_items_per_batch: 5",
+      "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
       "  poison_attempts: 0",
       "  unknown_key: 1",
@@ -20,6 +21,7 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.enabled, false)
   assert.equal(parsed.batch_sessions, 9)
   assert.equal(parsed.max_items_per_batch, 5)
+  assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
   assert.equal(parsed.poison_attempts, 0)
   assert.equal("unknown_key" in parsed, false)
@@ -42,6 +44,7 @@ test("invalid values fall back and models may be empty", async () => {
       "  max_turns_per_session: 0",
       "  max_items_per_session: 0",
       "  max_items_per_batch: 0",
+      "  initial_lookback_hours: -1",
       "  poison_attempts: -1",
       '  cursor_file: ""',
       '  writer_model: ""',
@@ -55,6 +58,7 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.max_turns_per_session, DEFAULT_DRAIN.max_turns_per_session)
   assert.equal(cfg.max_items_per_session, DEFAULT_DRAIN.max_items_per_session)
   assert.equal(cfg.max_items_per_batch, DEFAULT_DRAIN.max_items_per_batch)
+  assert.equal(cfg.initial_lookback_hours, DEFAULT_DRAIN.initial_lookback_hours)
   assert.equal(cfg.poison_attempts, DEFAULT_DRAIN.poison_attempts)
   assert.equal(cfg.cursor_file, DEFAULT_DRAIN.cursor_file)
   assert.equal(cfg.writer_model, "")
