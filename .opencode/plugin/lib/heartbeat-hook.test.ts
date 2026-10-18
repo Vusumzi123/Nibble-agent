@@ -470,6 +470,7 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
   assert.equal(tick.mission, "drain")
   assert.equal(tick.outcome, "completed")
   assert.equal(tick.token_cost, 45, "summarizer 15 + writer 30")
+  assert.equal(typeof tick.pid, "number", "the tick records which instance ran it")
 
   const cursor = JSON.parse(
     await readFile(join(dir, ".opencode", "state", "drain-cursor.json"), "utf8"),

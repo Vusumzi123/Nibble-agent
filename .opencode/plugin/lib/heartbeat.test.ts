@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -39,6 +39,7 @@ import {
   readHeartbeatCurrent,
   releaseHeartbeatLock,
   soleDeterministicVerdict,
+  staleCodeFiles,
   writeHeartbeatCurrent,
   type CandidacyContext,
   type DigestCandidate,
@@ -1046,4 +1047,32 @@ test("computeDigest: memory.provider none yields zero unconsumed turns", async (
   const digest = await computeDigest(dir, { now: at(12, 0), dbFile })
   assert.equal(digest.signals.unconsumed_turns, 0)
   assert.deepEqual(digest.candidates.map((c) => c.id), [])
+})
+
+// ---------------------------------------------------------------------------
+// Stale-code guard
+
+test("staleCodeFiles flags plugin files newer than the process start", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hb-stale-"))
+  const a = join(dir, ".opencode/plugin/heartbeat-hook.ts")
+  const b = join(dir, ".opencode/plugin/lib/heartbeat.ts")
+  await mkdir(join(dir, ".opencode/plugin/lib"), { recursive: true })
+  await writeFile(a, "// a\n")
+  await writeFile(b, "// b\n")
+  const old = new Date(Date.now() - 120_000)
+  await utimes(a, old, old)
+  await utimes(b, old, old)
+  const startedAt = Date.now() - 60_000
+  assert.deepEqual(await staleCodeFiles(dir, startedAt), [], "both predate the process")
+  const future = new Date(Date.now() + 60_000)
+  await utimes(b, future, future)
+  assert.deepEqual(await staleCodeFiles(dir, startedAt), [".opencode/plugin/lib/heartbeat.ts"])
+  assert.deepEqual(await staleCodeFiles(dir, Date.now() + 120_000), [], "nothing postdates a later start")
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("staleCodeFiles ignores a project without plugin files", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hb-stale-empty-"))
+  assert.deepEqual(await staleCodeFiles(dir, Date.now()), [])
+  await rm(dir, { recursive: true, force: true })
 })

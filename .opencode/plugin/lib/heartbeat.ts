@@ -513,6 +513,36 @@ export function soleDeterministicVerdict(candidates: readonly DigestCandidate[])
   return null
 }
 
+/** Core plugin files whose on-disk mtime must not postdate the running
+ *  process: when they do, this instance loaded stale code and must not run
+ *  the heartbeat scheduler (a pre-warrant instance silently answered
+ *  `no_reply` despite pending turns). */
+export const HEARTBEAT_CODE_FILES = [
+  ".opencode/plugin/heartbeat-hook.ts",
+  ".opencode/plugin/lib/heartbeat.ts",
+]
+
+/** Relative plugin files modified after the process started (mtime newer
+ *  than `startedAtMs`, with a small clock tolerance). Missing files are not
+ *  stale; the check is a guard, never a load-time failure. */
+export async function staleCodeFiles(
+  directory: string,
+  startedAtMs: number,
+  files: readonly string[] = HEARTBEAT_CODE_FILES,
+  toleranceMs = 2_000,
+): Promise<string[]> {
+  const stale: string[] = []
+  for (const rel of files) {
+    try {
+      const s = await stat(join(directory, rel))
+      if (s.mtimeMs > startedAtMs + toleranceMs) stale.push(rel)
+    } catch {
+      /* missing file — nothing to compare */
+    }
+  }
+  return stale
+}
+
 /** Why a candidate reached the JEV — the signal half of the decision. The
  *  weight is cadence × mood, not urgency, so the model needs this field to
  *  tell "always eligible" apart from "930 turns are waiting".
@@ -568,6 +598,8 @@ export function buildDigestChoiceRequest(digest: HeartbeatDigest, criteria: stri
     state: digestStateSummary(digest),
     candidates: ["no_reply", ...digest.candidates.map((c) => `mission:${c.id}`)],
     criteria,
+    // Ledger-only: the exact state the JEV saw, so a no_reply is diagnosable.
+    trace: { digest_state: digestStateSummary(digest) },
   }
 }
 

@@ -17,8 +17,10 @@
 //
 // `enabled: false` makes `openDecisionGate` return null; the caller keeps its
 // own disabled policy (retrieval-hook returns {}). Loaded via relative import only.
+import { homedir } from "node:os"
 import { join } from "node:path"
-import { SYSCONFIG } from "./paths.ts"
+import { getLogger, logSettingsFrom } from "./logging.ts"
+import { readResolvedPaths, SYSCONFIG } from "./paths.ts"
 import {
   RulesProvider,
   createDecisionProvider,
@@ -86,6 +88,52 @@ export async function openDecisionGate(
   )
   const rules = new RulesProvider()
 
+  // Shadow decision ledger (plan §7): every gate outcome — value, fallback
+  // reason, telemetry, and any caller trace — lands here, so a silent
+  // `no_reply` is always attributable after the fact. Best-effort.
+  let ledger: ReturnType<typeof getLogger> | null = null
+  try {
+    const { logDir } = await readResolvedPaths(directory)
+    ledger = getLogger(
+      logSettingsFrom(config as unknown as Record<string, unknown>, "ledger", "log_"),
+      { logDir, home: homedir(), channel: "decisions" },
+    )
+  } catch {
+    ledger = null
+  }
+  async function record(
+    request: DecisionRequest,
+    result: DecisionResult | null,
+    fallback: boolean,
+    reason: FallbackReason,
+  ): Promise<void> {
+    if (!ledger) return
+    try {
+      await ledger.append({
+        ts: new Date().toISOString(),
+        event: "decision",
+        kind: request.kind,
+        candidates: request.candidates ?? null,
+        provider: result?.provider ?? null,
+        backend: result?.backend ?? null,
+        model: result?.model ?? null,
+        mode: config.mode,
+        value: result?.value ?? null,
+        confidence: result?.confidence ?? null,
+        abstained: result?.abstained ?? null,
+        error: result?.error ?? null,
+        latencyMs: result?.latencyMs ?? null,
+        wallMs: result?.wallMs ?? null,
+        usage: result?.usage ?? null,
+        fallback,
+        fallbackReason: reason,
+        ...(request.trace ? { trace: request.trace } : {}),
+      })
+    } catch {
+      /* the ledger must never fail a decision */
+    }
+  }
+
   async function decide(
     request: DecisionRequest,
     decideOpts: { fallback: "open" },
@@ -100,13 +148,19 @@ export async function openDecisionGate(
   ): Promise<DecisionOutcome> {
     if (decideOpts.fallback === "open") {
       const { result, fallback, fallbackReason } = await decideWithFallback(provider, request, rules)
+      await record(request, result, fallback, fallbackReason)
       return { result, fallback, reason: fallbackReason }
     }
     try {
       const result = await provider.decide(request)
-      if (result.error) return { result, fallback: false, reason: "error" }
+      if (result.error) {
+        await record(request, result, false, "error")
+        return { result, fallback: false, reason: "error" }
+      }
+      await record(request, result, false, "none")
       return { result, fallback: false, reason: "none" }
     } catch {
+      await record(request, null, true, "error")
       return { result: null, fallback: true, reason: "error" }
     }
   }

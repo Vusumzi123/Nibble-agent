@@ -38,6 +38,8 @@ export type DecisionRequest = {
   instructions?: string
   triage?: boolean
   maxBytes?: number
+  /** Caller-supplied, ledger-only trace (never sent to the provider). */
+  trace?: Record<string, unknown>
 }
 
 // Backend-agnostic token/timing counters, normalized from the bridge's
@@ -301,7 +303,7 @@ export function spawnBridge(args: {
 // Strip TS-only routing fields before the request crosses the subprocess
 // boundary (the Python side ignores unknown keys, but keep the contract clean).
 function serializeRequest(request: DecisionRequest): string {
-  const { triage: _triage, maxBytes: _maxBytes, ...rest } = request
+  const { triage: _triage, maxBytes: _maxBytes, trace: _trace, ...rest } = request
   return JSON.stringify(rest)
 }
 

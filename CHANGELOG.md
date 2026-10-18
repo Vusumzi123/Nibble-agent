@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Silent `jev-no-reply` is now attributable** — the shadow decision ledger
+  (`decisions.ledger`) is wired: every gate outcome records its value, fallback
+  reason, telemetry, and caller trace (the digest state/warrant for the
+  heartbeat). Ticks also stamp `pid`, so a stale instance is identifiable.
+- **Stale-code heartbeat instances refuse to tick** — at plugin init the
+  scheduler compares its process start against the mtimes of
+  `heartbeat-hook.ts`/`lib/heartbeat.ts` and disables itself with a diagnostic
+  when the loaded code is stale, instead of firing a pre-fix digest (the
+  pre-warrant code reliably made clef answer `no_reply`).
 - **Runner missions report token spend** — `DrainPipeResult.tokens` (summarizer +
   writer chunks) now fills the heartbeat tick's `token_cost`, the backlog result,
   and the dashboard's token totals; previously drain ticks always reported 0.

@@ -32,6 +32,7 @@ import {
   heartbeatErrorFields,
   writeHeartbeatCurrent,
   soleDeterministicVerdict,
+  staleCodeFiles,
   type DigestVerdict,
   type HeartbeatCurrent,
   type HeartbeatPhase,
@@ -133,6 +134,18 @@ export default (async ({ client, directory, ...rest }) => {
   })
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "heartbeat-hook" })
 
+  // Stale-code guard: a long-lived `opencode serve` can keep ticking with
+  // plugin code that predates the latest edits (the pre-warrant digest bug).
+  // Refuse to schedule until the process is restarted on current code.
+  const startedAtMs = Date.now() - process.uptime() * 1000
+  const staleFiles = await staleCodeFiles(dir, startedAtMs)
+  if (staleFiles.length > 0) {
+    void diag.warn(
+      `[heartbeat-hook] plugin code changed after this process started (${staleFiles.join(", ")}); heartbeat scheduler disabled — restart opencode`,
+    )
+    return {}
+  }
+
   const lockFile = join(stateDir, "heartbeat.lock")
   // Live status marker for the dashboard (§9.2, card 16): written on every
   // phase transition so `idle | in-flight` + the in-flight mission are
@@ -232,7 +245,7 @@ export default (async ({ client, directory, ...rest }) => {
 
   const logTick = async (entry: Record<string, unknown>): Promise<void> => {
     try {
-      await logger.append({ ts: nowIso(), event: "tick", ...entry })
+      await logger.append({ ts: nowIso(), event: "tick", pid: process.pid, ...entry })
     } catch (err) {
       void diag.error("[heartbeat-hook] tick log failed:", err)
     }

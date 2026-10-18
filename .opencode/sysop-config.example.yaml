@@ -81,7 +81,8 @@ decisions:
   n_probs: 20                  # candidate token depth (unused by the structured tier)
   structured_max_tokens: 512   # JSON-mode budget — must cover reasoning + answer
   fallback: rules              # on error/abstain/timeout -> deterministic rules
-  # Shadow ledger, one NDJSON line per decision; leaf under <log>.
+  # Shadow decision ledger, one NDJSON line per gate outcome (value, fallback
+  # reason, telemetry, caller trace); leaf under <log>.
   ledger: decisions.log
   log_rotate_bytes: 1048576
   log_keep_generations: 5

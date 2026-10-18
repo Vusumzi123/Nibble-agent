@@ -262,7 +262,7 @@ is the prefix before the first `/` in `model`.
 | `n_probs` | candidate token depth (unused by the structured tier). |
 | `structured_max_tokens` | JSON-mode output budget for openjev. Must cover the reasoning trace **and** the answer — a smaller cap starves reasoning models (empty content → abstain). |
 | `fallback` | on error / abstain / timeout → deterministic `rules`. |
-| `ledger` | shadow ledger, one NDJSON line per decision, leaf under `<log>`. |
+| `ledger` | shadow decision ledger, one NDJSON line per gate outcome (value, fallback reason, telemetry, caller trace — e.g. the digest state/warrant), leaf under `<log>`. |
 
 ---
 
@@ -491,7 +491,7 @@ anchors at column 0, so the two never collide.
 | --- | ------- |
 | `enabled` | kill switch. `false` → the loop sleeps on the 60 s wake cap (hot; no restart). Also parks the dream timer — one lock, one engine (card G shares `heartbeat.lock` and this switch). |
 | `long_silence_factor` | a tick whose gap since the previous tick is ≥ factor × frequency feeds the `long_silence` mood event; `0` disables the feed. |
-| `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
+| `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, pid, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
 | `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
 Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every

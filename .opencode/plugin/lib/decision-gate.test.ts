@@ -1,11 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { openDecisionGate } from "./decision-gate.ts"
 import { buildTriageRequest } from "./decisions.ts"
+import { readResolvedPaths } from "./paths.ts"
 
 // A project dir with only a `.opencode/sysop-config.yaml` holding the given
 // `decisions:` block (other sections pass through untouched).
@@ -163,5 +164,42 @@ test("an invalid timeout overlay keeps decisions.timeout_ms", async () => {
   assert.ok(gate)
   await gate.decide(REQUEST, { fallback: "closed" })
   assert.equal(seen, 7000)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("the shadow ledger records the decision and any caller trace", async () => {
+  const dir = await project(["enabled: true", "provider: rules", "ledger: decisions.log"])
+  const gate = await openDecisionGate(dir)
+  assert.ok(gate)
+  await gate.decide(
+    {
+      kind: "noul",
+      state: "turn text",
+      assertion: "say noul",
+      triage: true,
+      candidates: ["no_reply", "mission:drain"],
+      trace: { digest_state: "warrant=unconsumed_turns=3" },
+    },
+    { fallback: "open" },
+  )
+  const { logDir } = await readResolvedPaths(dir)
+  const file = join(logDir, "decisions.log")
+  let line = ""
+  for (let i = 0; i < 50; i++) {
+    try {
+      line = (await readFile(file, "utf8")).trim().split("\n").at(-1) ?? ""
+      if (line) break
+    } catch {
+      /* logger write still queued */
+    }
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  assert.ok(line, "a decision ledger line is written")
+  const entry = JSON.parse(line)
+  assert.equal(entry.event, "decision")
+  assert.equal(entry.kind, "noul")
+  assert.deepEqual(entry.candidates, ["no_reply", "mission:drain"])
+  assert.equal(entry.fallbackReason, "none")
+  assert.equal(entry.trace.digest_state, "warrant=unconsumed_turns=3")
   await rm(dir, { recursive: true, force: true })
 })
