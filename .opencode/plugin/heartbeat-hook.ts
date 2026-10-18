@@ -561,7 +561,7 @@ export default (async ({ client, directory, ...rest }) => {
               phase,
               mission: brief.mission_id,
               mission_title: mission.title,
-              session: null,
+              session: runnerResult.session ?? null,
             })
             if (runnerResult.error) {
               runError = heartbeatErrorFields("mission", new Error(runnerResult.error))

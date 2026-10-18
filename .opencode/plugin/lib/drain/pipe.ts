@@ -44,6 +44,8 @@ export type DrainPipeResult = {
   skipped: number
   cursorBefore: number
   cursorAfter: number
+  /** Writer child session (the dashboard's output/thoughts transcript). */
+  session?: string | null
   degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback"
   error?: string
 }
@@ -271,6 +273,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     const skipped: number[] = []
     let failure: WriteReport | null = null
     let atomicAll = false
+    let writerSession: string | null = null
     promptBytes = 0
 
     for (const chunk of chunks) {
@@ -281,6 +284,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       )
       promptBytes += chunkReport.promptBytes ?? 0
       totalTokens += chunkReport.tokens ?? 0
+      writerSession = chunkReport.session ?? writerSession
 
       try {
         await deps.ledger?.write({
@@ -334,6 +338,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           skipped: skipped.length,
           cursorBefore,
           cursorAfter: cursor.last_ts,
+          session: writerSession,
           degraded,
           error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
@@ -346,6 +351,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         skipped: skipped.length,
         cursorBefore,
         cursorAfter: cursor.last_ts,
+        session: writerSession,
         degraded,
         error: failure?.detail ?? "writer failed (transient)",
       })
@@ -375,6 +381,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       skipped: skipped.length,
       cursorBefore,
       cursorAfter: cursor.last_ts,
+      session: writerSession,
       degraded,
     })
   } catch (err) {

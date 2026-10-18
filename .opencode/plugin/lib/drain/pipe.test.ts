@@ -187,6 +187,7 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.equal(result.skipped, 0)
   assert.equal(result.cursorBefore, 0)
   assert.equal(result.cursorAfter, 1000)
+  assert.equal(result.session, "ses_writer", "writer session is exposed for the transcript")
 
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
   assert.equal(cursor.last_ts, 1000)
@@ -377,6 +378,7 @@ test("a batch over max_items_per_batch is chunked into complete writer reports",
   assert.equal(result.consolidated, 2)
   assert.equal(result.skipped, 0)
   assert.equal(result.cursorAfter, 1000)
+  assert.equal(result.session, "ses_writer")
 
   await ledger.flush()
   const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))

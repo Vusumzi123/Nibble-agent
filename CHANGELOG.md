@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **Drain transcripts reach the dashboard's output page** — the pipe now
+  returns the writer child session (last chunk) in `DrainPipeResult.session`,
+  the heartbeat records it in `heartbeat.current.json`, and the dashboard falls
+  back to the newest `knowledge-consolidate` session when a runner mission has
+  no `heartbeat:` child (the dashboard also needed a live `opencode serve` on
+  its proxy target).
 - **Drain writer no longer loses a batch to its step budget** — the writer
   (`rag-brain`) gets `steps: 20`, its reporting section now forbids wrapping the
   outcome fences in prose or another code block and requires the raw blocks on
