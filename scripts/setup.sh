@@ -29,6 +29,9 @@ done
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=scripts/lib/config-edit.sh
+source "$REPO_ROOT/scripts/lib/config-edit.sh"
+
 CONFIG=".opencode/sysop-config.yaml"
 EXAMPLE=".opencode/sysop-config.example.yaml"
 GLOBAL_CONFIG="$HOME/.config/opencode/opencode.json"
@@ -241,48 +244,22 @@ apply_decisions_model() { # provider/model
   # openjev now links to opencode: `model` is an opencode spec and the endpoint
   # + credential are resolved from opencode at runtime, so backend/base_url/
   # api_key_file stay commented as advanced overrides. Never writes a secret.
-  node -e '
-const fs=require("fs"),f=process.argv[1],model=process.argv[2];
-let s=fs.readFileSync(f,"utf8");
-s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"openjev");
-const setKey=(key,val)=>{ const re=new RegExp("^(\\s*)(#\\s*)?"+key+":.*$","m");
-  if(re.test(s)) s=s.replace(re,(m0,ind)=>ind+key+": "+val);
-  else s=s.replace(/^(\s*)provider:\s*openjev\s*$/m,(m0,ind)=>m0+"\n"+ind+key+": "+val);
-};
-setKey("model",model);
-fs.writeFileSync(f,s);
-if(!/\n  provider: openjev/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
-' "$CONFIG" "$1"
+  set_block_key "$CONFIG" decisions provider openjev
+  set_block_key "$CONFIG" decisions model "$1" provider
 }
 
 apply_decisions_rules() { # force the deterministic provider
-  node -e '
-const fs=require("fs"),f=process.argv[1];
-let s=fs.readFileSync(f,"utf8");
-s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"rules");
-fs.writeFileSync(f,s);
-if(!/\n  provider: rules/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
-' "$CONFIG"
+  set_block_key "$CONFIG" decisions provider rules
 }
 
 apply_decisions_backend() { # backend model [base_url] — local Ollama backends
   # provider stays openjev (the TS bridge path); `backend` + `model` steer
   # openjevserver.py. backend: clef uses Ollama's System One /v1/systemone
   # decision API; backend: ollama uses native /api/chat first-token logprobs.
-  node -e '
-const fs=require("fs"),f=process.argv[1],backend=process.argv[2],model=process.argv[3],base=process.argv[4]||"";
-let s=fs.readFileSync(f,"utf8");
-s=s.replace(/^(\s*provider:\s*)\S.*$/m,(m0,p1)=>p1+"openjev");
-const setKey=(key,val)=>{ const re=new RegExp("^(\\s*)(#\\s*)?"+key+":.*$","m");
-  if(re.test(s)) s=s.replace(re,(m0,ind)=>ind+key+": "+val);
-  else s=s.replace(/^(\s*)provider:\s*openjev\s*$/m,(m0,ind)=>m0+"\n"+ind+key+": "+val);
-};
-setKey("backend",backend);
-setKey("model",model);
-if(base) setKey("base_url",base);
-fs.writeFileSync(f,s);
-if(!/\n  provider: openjev/.test("\n"+s)){ console.error("decisions: provider not set"); process.exit(2); }
-' "$CONFIG" "$1" "$2" "$3"
+  set_block_key "$CONFIG" decisions provider openjev
+  set_block_key "$CONFIG" decisions backend "$1" provider
+  set_block_key "$CONFIG" decisions model "$2" backend
+  if [ -n "${3-}" ]; then set_block_key "$CONFIG" decisions base_url "$3" model; fi
 }
 
 ollama_available() { command -v ollama >/dev/null 2>&1; }
@@ -380,25 +357,6 @@ configure_decision_gate() { # interactive: rules / openjev / clef / ollama
       fi
       ;;
   esac
-}
-
-set_block_key() { # set_block_key <file> <block> <key> <value>
-  node -e '
-const fs=require("fs"),f=process.argv[1],block=process.argv[2],key=process.argv[3],val=process.argv[4];
-const lines=fs.readFileSync(f,"utf8").split("\n");
-const esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
-const bRe=new RegExp("^"+esc(block)+":\\s*(#.*)?$");
-let bi=-1;
-for(let i=0;i<lines.length;i++){ if(bRe.test(lines[i])){ bi=i; break; } }
-if(bi<0){ console.error("block not found: "+block); process.exit(2); }
-let end=bi+1;
-for(; end<lines.length; end++){ const l=lines[end]; if(l.trim()===""||!/^\s/.test(l)) break; }
-const kRe=new RegExp("^(\\s+)"+esc(key)+":\\s");
-let found=false;
-for(let i=bi+1;i<end;i++){ const mm=lines[i].match(kRe); if(mm){ lines[i]=mm[1]+key+": "+val; found=true; break; } }
-if(!found){ lines.splice(end,0,"  "+key+": "+val); }
-fs.writeFileSync(f,lines.join("\n"));
-' "$1" "$2" "$3" "$4"
 }
 
 agents_have_model() { # 0 if any agent already carries a `model:` frontmatter pin
