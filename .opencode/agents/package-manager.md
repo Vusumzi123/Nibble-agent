@@ -1,6 +1,6 @@
 ---
 description: Handles package lifecycle operations (install, remove, upgrade, purge, search, hold/unhold) across apt, dnf, pacman, brew, winget, snap, flatpak, and other package managers. Invoke for any package-related task.
-model: deepseek/deepseek-flash
+model: opencode/deepseek-v4.1-flash-free
 mode: subagent
 color: "#44AAFF"
 permission:

@@ -11,7 +11,7 @@
 
 ### Changed
 
-- **Subagents pinned to `deepseek/deepseek-flash`** — every project agent with
+- **Subagents pinned to the free model `opencode/deepseek-v4.1-flash-free`** — every project agent with
   `mode: subagent` declares the model, and the built-in `explore`/`general`
   subagents are overridden in `opencode.json`. The primary `chat` agent keeps
   the session default; `drain.writer_model` can still override the writer.

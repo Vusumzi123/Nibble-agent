@@ -47,10 +47,10 @@
   },
   "agent": {
     "explore": {
-      "model": "deepseek/deepseek-flash"
+      "model": "opencode/deepseek-v4.1-flash-free"
     },
     "general": {
-      "model": "deepseek/deepseek-flash"
+      "model": "opencode/deepseek-v4.1-flash-free"
     },
     "security-locks": {
       "mode": "subagent",

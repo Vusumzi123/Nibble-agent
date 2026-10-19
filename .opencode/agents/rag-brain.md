@@ -1,6 +1,6 @@
 ---
 description: Stores and synthesizes knowledge in the Brain Obsidian vault (./Brain/) via byte-preserving native write paths and the markdown-vault MCP. Handles note create/update/delete, explicit "remember this", and drain-pipe consolidation batches. Vault READS are rag-search's job — invoke this agent for storage and note-writing tasks.
-model: deepseek/deepseek-flash
+model: opencode/deepseek-v4.1-flash-free
 mode: subagent
 color: "#FFD700"
 steps: 20
