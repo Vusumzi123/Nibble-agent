@@ -259,7 +259,24 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       }
     }
 
-    if (planned.length === 0) return stuck("summarizer produced no items", degraded)
+    if (planned.length === 0) {
+      // Every session summarized to an empty item list: nothing durable in the
+      // batch. Advance past it so the same turns are not re-ingested each tick,
+      // and spawn no writer.
+      cursor = advanceCursor(cursor, maxTurnTime(renderings))
+      await saveCursor(cursorFile, cursor)
+      return emit({
+        outcome: "nothing",
+        sessions: renderings.length,
+        items: 0,
+        consolidated: 0,
+        skipped: 0,
+        cursorBefore,
+        cursorAfter: cursor.last_ts,
+        tokens: totalTokens || null,
+        degraded,
+      })
+    }
 
     const allText = [
       ...renderings.map((rendered) => rendered.text),

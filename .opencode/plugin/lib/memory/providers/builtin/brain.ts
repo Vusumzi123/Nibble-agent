@@ -9,11 +9,8 @@
 // Loaded via relative import only.
 import { extractKeywords } from "../../../transcript.ts"
 import type { DrainConfig } from "../../../drain/config.ts"
-import {
-  loadCursor,
-  resolveCursorFile,
-} from "../../../drain/cursor.ts"
 import { countUnconsumed } from "../../../drain/db.ts"
+import { effectiveCursorLastTs } from "../../../drain/status.ts"
 import type {
   MemoryProfile,
   MemoryProvider,
@@ -55,10 +52,10 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
   const id: MemoryProfile = "rag-brain"
 
   const pending = async (): Promise<number> => {
-    const cursor = await loadCursor(resolveCursorFile(deps.stateDir, deps.drain.cursor_file))
+    const { lastTs } = await effectiveCursorLastTs(deps.stateDir, deps.drain)
     return countUnconsumed({
       projectDir: deps.directory,
-      lastTs: cursor.last_ts,
+      lastTs,
       dbFile: deps.dbFile,
     })
   }

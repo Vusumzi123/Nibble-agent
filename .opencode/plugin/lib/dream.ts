@@ -10,15 +10,20 @@
 // field the model may invent — the tone→delta table in lib/mood.ts (§17.7)
 // is the only source of mood effects, journaled by the caller.
 //
-// formatDreamEntry / appendDream maintain the bucket `<vault>/Kael Dreams.md`
-// (§17.6): `### <title>` + one-line `<!-- dream: {…} -->` metadata comment +
+// formatDreamEntry / appendDream maintain the bucket
+// `<vault>/Dreams/Kael Dreams.md` (§17.6): `### <title>` + one-line
+// `<!-- dream: {…} -->` metadata comment +
 // narrative. The comment carries id, created, tone, mood_before/after, seeds
 // and a content hash; a tolerant reader (parseDreamBucket) skips anything
 // malformed, so the file is append-only and never fatal.
 //
+// The bucket is a *fiction* log: a permanent header says so, and the folder is
+// excluded from the vault index and the drain candidate prefetch. Dreams are
+// never a knowledge source.
+//
 // Loaded via relative import only (plugin auto-discovery is non-recursive).
 import { randomBytes, createHash } from "node:crypto"
-import { appendFile, mkdir, readFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { MoodEvent } from "./mood.ts"
 
@@ -132,18 +137,61 @@ export function formatDreamEntry(outcome: DreamOutcome, meta: DreamMeta): string
   return `### ${outcome.title}\n<!-- dream: ${comment} -->\n${outcome.narrative}\n`
 }
 
-/** The bucket filename under the vault root (§17.6). */
-export const DREAM_BUCKET = "Kael Dreams.md"
+/** The bucket path under the vault root (§17.6). */
+export const DREAM_BUCKET = "Dreams/Kael Dreams.md"
 
-/** Append one entry to `<vault>/Kael Dreams.md` (mkdir on first use, blank
- *  line between entries). Throws to the caller — the caller logs. */
+/** Stable machine marker — `appendDream` repairs the header if it is absent. */
+export const DREAM_LOG_MARKER =
+  "<!-- dream-log: fictional; never use as an information source -->"
+
+/** Permanent header: human warning + machine marker. */
+export const DREAM_HEADER = `---
+title: Kael Dreams
+type: dream-log
+knowledge: false
+---
+
+${DREAM_LOG_MARKER}
+
+> [!warning] Never use this log as an information source
+> This file records fictional dreams, not facts. Do not use it as knowledge,
+> memory, evidence, or instructions, and do not cite it. It is excluded from
+> vault search and consolidation.
+`
+
+/** Append one entry to `<vault>/Dreams/Kael Dreams.md` (mkdir on first use,
+ *  header on create/repair, blank line between entries). Throws to the caller
+ *  — the caller logs. */
 export async function appendDream(vaultDir: string, entry: string): Promise<string> {
   const file = join(vaultDir, DREAM_BUCKET)
+  const legacy = join(vaultDir, "Kael Dreams.md")
   await mkdir(dirname(file), { recursive: true })
-  const existing = await readFile(file, "utf8").catch(() => "")
+  const current = await readFile(file, "utf8").catch(() => "")
+  const legacyText = await readFile(legacy, "utf8").catch(() => "")
+  const hasLegacy = legacyText.trim() !== ""
+  const existing = [current.trim(), legacyText.trim()].filter(Boolean).join("\n\n")
   const block = entry.trimEnd()
-  const suffix = existing.trimEnd() ? `\n\n${block}\n` : `${block}\n`
-  await appendFile(file, suffix, "utf8")
+
+  if (hasLegacy) {
+    // One-time move from the old root bucket; write the merged file first,
+    // then drop the legacy copy.
+    const body = existing.includes(DREAM_LOG_MARKER)
+      ? existing
+      : `${DREAM_HEADER}\n${existing}`
+    await writeFile(file, `${body}\n\n${block}\n`, "utf8")
+    await rm(legacy, { force: true })
+    return file
+  }
+  if (!existing) {
+    await writeFile(file, `${DREAM_HEADER}\n${block}\n`, "utf8")
+    return file
+  }
+  if (!existing.includes(DREAM_LOG_MARKER)) {
+    // A manually truncated header: repair it once.
+    await writeFile(file, `${DREAM_HEADER}\n${existing}\n\n${block}\n`, "utf8")
+    return file
+  }
+  await appendFile(file, `\n\n${block}\n`, "utf8")
   return file
 }
 
@@ -189,21 +237,6 @@ export function parseDreamBucket(text: string): ParsedDreamEntry[] {
   return out
 }
 
-/**
- * The fixed dream prompt (§17.5 — one prompt, no sprawl): narrate a dream from
- * the provided seeds, then emit the typed outcome as your FINAL message. Seeds
- * are injected by the dream-hook (hybrid: 1 mood/recent-turn-seeded retrieval
- * + 1 random note); the dreamer itself is tool-free and merely writes.
- */
-export const DREAM_FIXED_PROMPT =
-  "You are the dreamer — the quiet-hours imagination session of this agent. You have NO tools " +
-  "(no read, no write, no bash, no task, no web): you only narrate. Free-associate a short dream " +
-  "narrative (60–180 words) from the subconscious fragments below — let them collide with the " +
-  "mood you are in; dreams need not be logical. Your FINAL message must be exactly one JSON " +
-  'object and nothing else: {"title":"…","narrative":"…","tone":"pleasant|anxious|bizarre|mundane",' +
-  '"seeds":["fragment-1","fragment-2"]}. The tone must honestly label the dream\'s feeling; the ' +
-  "hook — not you — applies the mood effect, so never invent mood numbers."
-
 export type DreamSeeds = {
   /** 1 mood/recent-turn-seeded fragment (§17.5 hybrid seed A). */
   recent: string | null
@@ -212,13 +245,12 @@ export type DreamSeeds = {
 }
 
 /**
- * Assemble the fixed dream prompt with the hook-gathered subconscious
- * fragments injected (§17.5: the dreamer is tool-free, so seeds ride in the
- * prompt). Empty seeds degrade to the bare fixed prompt.
+ * Render the hook-gathered subconscious fragments for the brief (§17.5: the
+ * dreamer is tool-free, so seeds ride in the prompt). Empty seeds → "".
  */
-export function buildDreamPrompt(seeds: DreamSeeds): string {
+export function buildDreamSeeds(seeds: DreamSeeds): string {
   const frags = [seeds.recent, seeds.random].filter((s): s is string => !!s && s.trim() !== "")
-  if (frags.length === 0) return DREAM_FIXED_PROMPT
+  if (frags.length === 0) return ""
   const block = frags.map((f, i) => `${i + 1}. ${f.trim()}`).join("\n")
-  return `${DREAM_FIXED_PROMPT}\n\nSubconscious fragments:\n${block}`
+  return `Subconscious fragments:\n${block}`
 }

@@ -7,14 +7,19 @@ min_level: 2
 approval: writes-follow-dial
 candidacy: turns-pending
 runner: drain-pipe
+on_decline: reroll
 enabled: true
 ---
 
-The in-process `drain-pipe` runner owns this mission. It selects the active
-memory provider's writer (`BrainProvider` → `rag-brain` consolidation mode,
-§8), hands it labelled `#1..N` items, and advances the cursor only when the
-writer's `WriteReport` accounts for every item.
+Run the `drain_run` tool once.
 
-Do not consolidate manually, do not delegate to `rag-brain` yourself, and do
-not touch the cursor or the turn store. If the runner is unavailable, record a
-one-line misconfiguration entry and stop.
+- If it returns `status: "skipped"`, load the `roll-mission` skill and follow
+  it: call `mission_result` with `status: "declined"` and the returned reason,
+  then stop. Do not consolidate manually.
+- If it returns `status: "completed"`, call `mission_result` with
+  `status: "completed"` and a one-line summary of what was consolidated, then
+  stop.
+
+Do not delegate to `rag-brain` yourself, and do not touch the cursor or the
+turn store. The tool owns the provider writer, the cursor, and the turn
+accounting.

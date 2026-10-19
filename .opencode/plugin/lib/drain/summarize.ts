@@ -304,8 +304,18 @@ export async function summarizeSession(
     const reply = lastAssistantText(rows)
 
     const raw = parseSummaryReply(reply)
-    if (!raw || raw.length === 0) {
+    if (!raw) {
       return fallback("malformed summarizer reply", Date.now() - started)
+    }
+    if (raw.length === 0) {
+      // Valid strict JSON with no durable items: a clean no-op, not a failure.
+      return {
+        items: [],
+        model: deps.model || null,
+        promptBytes,
+        wallMs: Date.now() - started,
+        tokens: usageTokens(rows),
+      }
     }
 
     const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)

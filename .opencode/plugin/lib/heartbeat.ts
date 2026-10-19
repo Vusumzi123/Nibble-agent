@@ -335,6 +335,8 @@ export type ComputeDigestOpts = {
   onDreamGate?: CandidacyContext["onDreamGate"]
   /** Explicit opencode DB path (tests/E2E); defaults to the data dir. */
   dbFile?: string
+  /** Missions excluded from the candidate list (declined rerolls). */
+  excludeMissions?: string[]
 }
 
 /**
@@ -417,6 +419,8 @@ export async function computeDigest(
   } catch {
     missions = []
   }
+  const excluded = new Set(opts.excludeMissions ?? [])
+  if (excluded.size > 0) missions = missions.filter((m) => !excluded.has(m.id))
 
   const candidates = buildCandidates(missions, {
     level: autonomy.level,
@@ -520,6 +524,10 @@ export function soleDeterministicVerdict(candidates: readonly DigestCandidate[])
 export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/heartbeat-hook.ts",
   ".opencode/plugin/lib/heartbeat.ts",
+  ".opencode/plugin/lib/missions.ts",
+  ".opencode/plugin/lib/mission-result.ts",
+  ".opencode/plugin/lib/drain/status.ts",
+  ".opencode/plugin/lib/drain/tool.ts",
 ]
 
 /** Relative plugin files modified after the process started (mtime newer
@@ -623,17 +631,62 @@ export type MissionBrief = {
   mission_id: string
 }
 
-/** Assemble the child-session brief: fixed prompt + verdict + mission body.
+/** The small, mission-agnostic preamble injected before every mission body.
+ *  Dynamic values live here; the mission body stays the authoritative task
+ *  prompt and owns the tool-usage instructions. */
+export type MissionContext = {
+  tick: number
+  nowMs: number
+  level: number
+  quiet: boolean
+  signals: HeartbeatSignals
+  digestHash: string
+}
+
+export function missionContextHeader(
+  ctx: MissionContext,
+  opts: { resultContract?: boolean; tokenBudget?: number | "unlimited" } = {},
+): string {
+  const stale = Object.entries(ctx.signals.staleness)
+    .map(([key, hours]) => `${key}=${Math.round(hours)}h`)
+    .join(",")
+  const lines = [
+    `Mission context — tick ${ctx.tick}, level ${ctx.level}, ${new Date(ctx.nowMs).toISOString()}, quiet=${ctx.signals.quiet}, digest=${ctx.digestHash}.`,
+    `Signals: backlog_pending=${ctx.signals.backlog_pending}, unconsumed_turns=${ctx.signals.unconsumed_turns}, audit_failures=${ctx.signals.audit_failures}${stale ? `, staleness=${stale}` : ""}.`,
+  ]
+  if (typeof opts.tokenBudget === "number" && Number.isFinite(opts.tokenBudget)) {
+    const contract =
+      opts.resultContract === false
+        ? ""
+        : " Never skip the result contract to save tokens."
+    lines.push(
+      `Token budget: ~${opts.tokenBudget} tokens for this turn (soft; measured after the turn — no mid-turn stop). ` +
+        `Scope the work and stop when the objective is met.${contract}`,
+    )
+  }
+  if (opts.resultContract !== false) {
+    lines.push(
+      "Result contract: end by calling the `mission_result` tool exactly once with " +
+        '`{status: "completed" | "declined" | "error", summary, reason?}`. ' +
+        "If the mission cannot proceed, call it with status \"declined\", give a reason, and stop without side effects.",
+    )
+  }
+  return lines.join("\n")
+}
+
+/** Assemble the child-session brief: context + fixed prompt + verdict + body.
  *  Returns null on a no_reply verdict or a verdict/mission mismatch — the
  *  caller treats null as "end the tick without a session" (§12.1 step 6). */
 export function assembleMissionBrief(
   verdict: DigestVerdict,
   mission: Mission | undefined,
   fixedPrompt: string = HEARTBEAT_FIXED_PROMPT,
+  context?: string,
 ): MissionBrief | null {
   if (verdict.kind === "no_reply") return null
   if (!mission || mission.id !== verdict.id) return null
   const prompt = [
+    context?.trim() ?? "",
     fixedPrompt.trim(),
     `Verdict: mission:${mission.id} — ${mission.title}`,
     mission.body,

@@ -32,6 +32,7 @@ import {
   HEARTBEAT_CURRENT_FILE,
   idleHeartbeatCurrent,
   isQuietNow,
+  missionContextHeader,
   moodDispatchBias,
   parseHeartbeatConfig,
   parseWindow,
@@ -52,6 +53,32 @@ import { parseMissionFile, type Mission } from "./missions.ts"
 
 // ---------------------------------------------------------------------------
 // Quiet-window predicate
+
+test("missionContextHeader states a soft token budget only when numeric", () => {
+  const ctx = {
+    tick: 1,
+    nowMs: Date.now(),
+    level: 3,
+    quiet: false,
+    signals: {
+      backlog_pending: 0,
+      unconsumed_turns: 0,
+      audit_failures: 0,
+      staleness: {},
+      quiet: false,
+    },
+    digestHash: "abc",
+  }
+  const text = missionContextHeader(ctx, { tokenBudget: 32000 })
+  assert.ok(text.includes("~32000 tokens"))
+  assert.ok(text.includes("soft"))
+  assert.ok(text.includes("Never skip the result contract"))
+  assert.ok(!missionContextHeader(ctx, { tokenBudget: "unlimited" }).includes("Token budget:"))
+  assert.ok(!missionContextHeader(ctx, {}).includes("Token budget:"))
+  const dream = missionContextHeader(ctx, { tokenBudget: 8000, resultContract: false })
+  assert.ok(dream.includes("~8000 tokens"))
+  assert.ok(!dream.includes("result contract"), "tool-free missions get no result-contract clause")
+})
 
 test("parseWindow parses HH:MM-HH:MM into minutes-of-day", () => {
   assert.deepEqual(parseWindow("23:00-08:00"), { startMin: 23 * 60, endMin: 8 * 60 })
@@ -464,6 +491,8 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       '    window: "23:00-08:00"',
       "mood:",
       "  dispatch_influence: false",
+      "drain:",
+      "  initial_lookback_hours: 0",
       "",
     ].join("\n"),
     ".opencode/state/backlog.ndjson":

@@ -29,6 +29,7 @@ import {
   heartbeatSnapshot,
   isLoopback,
   listLedgers,
+  memoryPendingSnapshot,
   metricsSnapshot,
   missionsSnapshot,
   setMissionEnabled,
@@ -322,6 +323,12 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
 
     if (path === "/api/metrics" && method === "GET") {
       json(res, 200, await metricsSnapshot(directory))
+      return
+    }
+
+    // Unconsumed memory turns (drain backlog) for the header indicator.
+    if (path === "/api/memory/pending" && method === "GET") {
+      json(res, 200, await memoryPendingSnapshot(directory))
       return
     }
 

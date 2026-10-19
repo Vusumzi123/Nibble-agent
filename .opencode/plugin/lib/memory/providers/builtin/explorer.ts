@@ -12,6 +12,7 @@ import {
   resolveCursorFile,
 } from "../../../drain/cursor.ts"
 import { countUnconsumed, searchUnconsumed } from "../../../drain/db.ts"
+import { effectiveCursorLastTs } from "../../../drain/status.ts"
 import type {
   MemoryEvidence,
   MemoryProfile,
@@ -90,10 +91,10 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
   const id: MemoryProfile = "memory-explorer"
 
   const pending = async (): Promise<number> => {
-    const cursor = await loadCursor(resolveCursorFile(deps.stateDir, deps.drain.cursor_file))
+    const { lastTs } = await effectiveCursorLastTs(deps.stateDir, deps.drain)
     return countUnconsumed({
       projectDir: deps.directory,
-      lastTs: cursor.last_ts,
+      lastTs,
       dbFile: deps.dbFile,
     })
   }

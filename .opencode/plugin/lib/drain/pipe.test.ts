@@ -270,6 +270,26 @@ test("disabled config is a no-op", async () => {
   assert.equal(result.error, undefined)
 })
 
+test("a valid empty summary advances the cursor without spawning a writer", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client, prompts } = fakeClient({ summaryReply: '{"items":[]}' })
+
+  const result = await runDrainPipe(deps(base, client))
+
+  assert.equal(result.outcome, "nothing")
+  assert.equal(result.sessions, 1)
+  assert.equal(result.items, 0)
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.cursorAfter, 1000)
+  assert.equal(
+    prompts.some((p) => p.body.agent === "rag-brain"),
+    false,
+    "no writer spawn for an empty batch",
+  )
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.equal(cursor.last_ts, 1000)
+})
+
 test("a partial writer report blocks the cursor and counts attempts", async () => {
   const base = { ...(await workspace()), dbFile: await seedDb() }
   const { client } = fakeClient({ summaryReply: TWO_ITEMS, writerReply: report(["#1"]) })

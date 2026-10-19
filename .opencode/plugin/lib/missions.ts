@@ -42,6 +42,10 @@ export const MISSIONS_DIR = ".opencode/missions"
 export type MissionApproval = "n/a" | "per-item" | "writes-follow-dial" | "always"
 export const MISSION_APPROVALS = ["n/a", "per-item", "writes-follow-dial", "always"] as const
 
+/** What the orchestrator does after a mission reports `declined`. */
+export type MissionDeclinePolicy = "reroll" | "stop"
+export const MISSION_DECLINE_POLICIES = ["reroll", "stop"] as const
+
 /** D-M8 named candidacy predicates (cards 6/G added `turns-pending` and
  *  `dream-gate` for the night pre-gate, plan §17.3; card 7a added `idea-roll`
  *  for the day-rollover draw, §17.10). */
@@ -69,8 +73,10 @@ export type Mission = {
   candidacy: MissionCandidacy
   /** opencode agent name; "" = the heartbeat agent (D-M7). */
   agent: string
-  /** In-process runner name; "" = normal child-session dispatch. */
+  /** Tool binding name (metadata); the body names the tool to call. */
   runner: string
+  /** Same-tick reroll policy after mission_result says declined. */
+  onDecline: MissionDeclinePolicy
   enabled: boolean
   /** Workflow prose after the frontmatter — the mission brief body. */
   body: string
@@ -88,6 +94,7 @@ export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
   candidacy: "digest",
   agent: "",
   runner: "",
+  onDecline: "stop",
   enabled: true,
 }
 
@@ -124,8 +131,12 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
       // `agent: ""` is the spec's explicit default (empty = heartbeat agent).
       return stripPairQuotes(raw)
     case "runner":
-      // `runner: ""` is the explicit default (normal child dispatch).
+      // `runner: ""` is the explicit default (no tool binding).
       return stripPairQuotes(raw)
+    case "on_decline": {
+      const v = stripPairQuotes(raw)
+      return (MISSION_DECLINE_POLICIES as readonly string[]).includes(v) ? v : undefined
+    }
     case "frequency": {
       const v = stripPairQuotes(raw)
       return (MISSION_FREQUENCIES as readonly string[]).includes(v) ? v : undefined
@@ -176,6 +187,7 @@ const MISSION_KEYS = new Set([
   "candidacy",
   "agent",
   "runner",
+  "on_decline",
   "enabled",
 ])
 
@@ -230,6 +242,7 @@ export function parseMissionFile(
     candidacy: (parsed.candidacy as MissionCandidacy) ?? DEFAULT_MISSION.candidacy,
     agent: typeof parsed.agent === "string" ? parsed.agent : DEFAULT_MISSION.agent,
     runner: typeof parsed.runner === "string" ? parsed.runner : DEFAULT_MISSION.runner,
+    onDecline: (parsed.on_decline as MissionDeclinePolicy) ?? DEFAULT_MISSION.onDecline,
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_MISSION.enabled,
     body: body.trim(),
   }

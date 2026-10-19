@@ -9,7 +9,7 @@ import { mockClient, tempDir, tempHome } from "./test-utils.ts"
 const TEST_HOME = tempHome("dreamhook-home-")
 void TEST_HOME
 const { default: createHook } = await import("../dream-hook.ts")
-const { DREAM_FIXED_PROMPT, parseDreamBucket } = await import("./dream.ts")
+const { parseDreamBucket } = await import("./dream.ts")
 const { HEARTBEAT_FIXED_PROMPT } = await import("./heartbeat.ts")
 
 async function project(extraLines: string[] = []): Promise<string> {
@@ -112,16 +112,17 @@ async function writePendingTurn(dir: string): Promise<string> {
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
     CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
   `)
+  const now = Date.now()
   db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
     "s",
     null,
     dir,
-    1_000,
+    now,
   )
   db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
     "m1",
     "s",
-    1_000,
+    now,
     JSON.stringify({ role: "user" }),
   )
   db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
@@ -273,7 +274,7 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
   assert.equal(state.calls, 0, "sole candidate dispatched without a JEV call (§17.10 short-circuit)")
   assert.equal(client.calls.create, 1)
   const body = client.calls.prompts[0].body
-  assert.ok(body.parts[0].text.startsWith(HEARTBEAT_FIXED_PROMPT), "drain uses the maintenance prompt")
+  assert.ok(body.parts[0].text.includes(HEARTBEAT_FIXED_PROMPT), "drain uses the maintenance prompt")
 
   await idle(hooks)
   await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
@@ -283,6 +284,7 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
   assert.equal(t.mission, "drain")
   assert.equal(t.outcome, "completed")
   assert.equal(t.token_cost, 150)
+  assert.equal(t.session, "ses_child", "dream ticks carry the child session id")
   assert.equal(t.reason, "sole-candidate")
 
   const entries = await readBacklog(dir)
@@ -295,7 +297,7 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
 })
 
 // §17.12 acceptance #3: a passed roll dispatches the dreamer tool-free child;
-// the hook parses the typed outcome, appends Brain/Kael Dreams.md with
+// the hook parses the typed outcome, appends Brain/Dreams/Kael Dreams.md with
 // parseable metadata, and applies the tone-table mood delta itself.
 test("dream run: dreamer child pinned, bucket entry lands, mood delta is the table's", async () => {
   const dir = await project()
@@ -321,7 +323,7 @@ test("dream run: dreamer child pinned, bucket entry lands, mood delta is the tab
   const prompt = client.calls.prompts[0]
   assert.equal(prompt.body.agent, "dreamer")
   const text: string = prompt.body.parts[0].text
-  assert.ok(text.startsWith(DREAM_FIXED_PROMPT))
+  assert.ok(text.includes("Narrate one dream; end with the typed JSON outcome."), "the mission body is the prompt")
   assert.ok(text.includes("Subconscious fragments:"), "seed A (recent turn or mood) injected")
   assert.equal(state.calls, 0, "sole dream candidate → no JEV call")
 
@@ -329,7 +331,8 @@ test("dream run: dreamer child pinned, bucket entry lands, mood delta is the tab
   await waitFor(async () => (await readDreamLog(dir)).length > 0)
 
   // The bucket: parseable metadata comment + narrative (§17.6).
-  const bucket = await readFile(join(dir, "Brain", "Kael Dreams.md"), "utf8")
+  const bucket = await readFile(join(dir, "Brain", "Dreams", "Kael Dreams.md"), "utf8")
+  assert.ok(bucket.includes("Never use this log as an information source"), "the log carries its disclaimer")
   const entries = parseDreamBucket(bucket)
   assert.equal(entries.length, 1)
   assert.equal(entries[0].title, "Glass elevator")
@@ -351,6 +354,8 @@ test("dream run: dreamer child pinned, bucket entry lands, mood delta is the tab
   assert.equal(t.verdict, "mission:dream")
   assert.equal(t.outcome, "completed")
   assert.equal(t.token_cost, 150)
+  assert.equal(t.result_status, "completed", "the typed JSON is the tool-free result")
+  assert.equal(t.result_missing, false)
   assert.equal(t.dream_gate[0].passed, true)
   assert.equal(t.mood_event, "dream_pleasant")
 })
@@ -464,8 +469,10 @@ test("malformed dream outcome: skipped, wobbled, bucket untouched", async () => 
 
   const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
   assert.equal(t.outcome, "malformed")
+  assert.equal(t.result_status, "error")
+  assert.equal(t.result_missing, true)
   assert.equal(t.mood_event, "mission_failure", "tiny valence wobble like a failed mission (§17.5)")
-  const bucket = await readFile(join(dir, "Brain", "Kael Dreams.md"), "utf8").catch(() => "")
+  const bucket = await readFile(join(dir, "Brain", "Dreams", "Kael Dreams.md"), "utf8").catch(() => "")
   assert.equal(bucket, "", "nothing half-written into the bucket")
   const mood = await readMood(dir)
   assert.ok((mood.valence ?? 0) < 0, "the wobble landed")

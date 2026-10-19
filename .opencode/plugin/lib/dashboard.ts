@@ -48,6 +48,11 @@ import {
 import { readAll, readBacklogConfig, resolveBacklogFile, type BacklogEntry } from "./backlog.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { LOG_DEFAULTS, getLogger } from "./logging.ts"
+import { readDrainConfig } from "./drain/config.ts"
+import { loadCursor, resolveCursorFile } from "./drain/cursor.ts"
+import { countUnconsumed } from "./drain/db.ts"
+import { readMemoryConfig } from "./memory/config.ts"
+import type { MemoryProfile } from "./memory/types.ts"
 
 // ---------------------------------------------------------------------------
 // Errors — one shape for the server to map onto HTTP
@@ -643,6 +648,121 @@ export async function backlogSnapshot(directory: string): Promise<BacklogSnapsho
     return { total: entries.length, entries }
   } catch {
     return { total: 0, entries: [] }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memory consolidation backlog (dashboard indicator)
+//
+// "Pending" is not a stored queue: it is the drain's unconsumed-turn count —
+// eligible text parts newer than the cursor (drain/db.ts). The read is
+// read-only and independent of drain.enabled, so a paused lane can still show
+// the backlog it is accumulating.
+
+export type MemoryPendingSnapshot = {
+  ts: string
+  /** drain.enabled — false means the pipe will not run. */
+  enabled: boolean
+  provider: MemoryProfile
+  /** The active provider has a consolidation writer. */
+  writer: boolean
+  /** !enabled or no writer: the backlog will not drain on its own. */
+  paused: boolean
+  pending_turns: number | null
+  /** Effective lower bound: the cursor, or the initial lookback when seeded. */
+  cursor_last_ts: number | null
+  cursor_updated_at: string | null
+  /** True when the cursor was missing and the lookback window was applied. */
+  seeded: boolean
+  available: boolean
+  error?: string
+}
+
+const MEMORY_PENDING_TTL_MS = 5_000
+const memoryPendingCache = new Map<string, { at: number; value: MemoryPendingSnapshot }>()
+const memoryPendingInflight = new Map<string, Promise<MemoryPendingSnapshot>>()
+
+/** Test seam: drop the per-directory cache. */
+export function resetMemoryPendingCache(): void {
+  memoryPendingCache.clear()
+  memoryPendingInflight.clear()
+}
+
+/**
+ * Read-only snapshot for the header indicator. The SQLite count can be slow on
+ * a cold cursor, so results are cached for 5 s and concurrent polls share one
+ * read. Every failure degrades to `available: false` — never a silent 0.
+ */
+export async function memoryPendingSnapshot(
+  directory: string,
+  opts: { dbFile?: string; now?: number; ttlMs?: number } = {},
+): Promise<MemoryPendingSnapshot> {
+  const now = opts.now ?? Date.now()
+  const ttl = opts.ttlMs ?? MEMORY_PENDING_TTL_MS
+  const cacheable = opts.dbFile === undefined
+  const cached = memoryPendingCache.get(directory)
+  if (cacheable && cached && now - cached.at < ttl) return cached.value
+
+  const inflight = memoryPendingInflight.get(directory)
+  if (cacheable && inflight) return inflight
+
+  const run = (async (): Promise<MemoryPendingSnapshot> => {
+    const ts = new Date(now).toISOString()
+    const drain = await readDrainConfig(directory)
+    const memory = await readMemoryConfig(directory)
+    const writer = memory.provider === "rag-brain" || memory.provider === "both"
+    const base = {
+      ts,
+      enabled: drain.enabled,
+      provider: memory.provider,
+      writer,
+      paused: !drain.enabled || !writer,
+    }
+
+    try {
+      const { stateDir } = await readResolvedPaths(directory)
+      const cursor = await loadCursor(resolveCursorFile(stateDir, drain.cursor_file))
+      let lastTs = cursor.last_ts
+      let seeded = false
+      if (lastTs <= 0 && drain.initial_lookback_hours > 0) {
+        lastTs = now - drain.initial_lookback_hours * 3_600_000
+        seeded = true
+      }
+      const pending_turns = await countUnconsumed({
+        projectDir: directory,
+        lastTs,
+        ...(opts.dbFile === undefined ? {} : { dbFile: opts.dbFile }),
+      })
+      return {
+        ...base,
+        pending_turns,
+        cursor_last_ts: lastTs,
+        cursor_updated_at: cursor.last_ts > 0 ? cursor.updated_at : null,
+        seeded,
+        available: true,
+      }
+    } catch (err) {
+      return {
+        ...base,
+        pending_turns: null,
+        cursor_last_ts: null,
+        cursor_updated_at: null,
+        seeded: false,
+        available: false,
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+  })()
+
+  if (!cacheable) return run
+
+  memoryPendingInflight.set(directory, run)
+  try {
+    const value = await run
+    memoryPendingCache.set(directory, { at: now, value })
+    return value
+  } finally {
+    memoryPendingInflight.delete(directory)
   }
 }
 

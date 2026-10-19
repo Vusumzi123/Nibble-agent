@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { automationChildSessions } from "./lib/automation.ts"
@@ -30,10 +31,12 @@ import {
   readHeartbeatConfig,
   releaseHeartbeatLock,
   heartbeatErrorFields,
+  missionContextHeader,
   writeHeartbeatCurrent,
   soleDeterministicVerdict,
   staleCodeFiles,
   type DigestVerdict,
+  type HeartbeatDigest,
   type HeartbeatCurrent,
   type HeartbeatPhase,
 } from "./lib/heartbeat.ts"
@@ -61,13 +64,14 @@ import {
 import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
-import { loadMissions } from "./lib/missions.ts"
+import { loadMissions, type Mission } from "./lib/missions.ts"
+import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
-import { runMissionRunner } from "./lib/drain/runner.ts"
-import { formatDrainResult, type DrainPipeClient } from "./lib/drain/pipe.ts"
+import { findDrainToolResult, runDrainForMission, type DrainToolResult } from "./lib/drain/tool.ts"
+import type { DrainPipeClient } from "./lib/drain/pipe.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
@@ -318,6 +322,137 @@ export default (async ({ client, directory, ...rest }) => {
     return "stored"
   }
 
+  type ChildOutcome = "completed" | "timeout" | "error"
+
+  type ChildRun = {
+    outcome: ChildOutcome
+    tokenCost: number
+    summary: string
+    runError?: ReturnType<typeof heartbeatErrorFields>
+    sessionId: string | null
+    result: MissionResult | null
+    tool: DrainToolResult | null
+  }
+
+  const runMissionChild = async (args: {
+    mission: Mission
+    prompt: string
+    agent: string
+  }): Promise<ChildRun> => {
+    let sessionId: string | null = null
+    let outcome: ChildOutcome = "error"
+    let tokenCost = 0
+    let summary = ""
+    let runError: ReturnType<typeof heartbeatErrorFields> | undefined
+    let result: MissionResult | null = null
+    let drainTool: DrainToolResult | null = null
+
+    try {
+      const created = await (client as any).session.create({
+        body: { title: `heartbeat:${args.mission.id}` },
+        query: { directory: dir },
+      })
+      const childID: string = created?.data?.id
+      if (!childID) throw new Error("session.create returned no id")
+      sessionId = childID
+      automationChildSessions.add(childID)
+      await setCurrent({
+        phase: "mission",
+        mission: args.mission.id,
+        mission_title: args.mission.title,
+        session: childID,
+      })
+
+      const idled = waitForChildIdle(childID)
+      const res = await (client as any).session.promptAsync({
+        path: { id: childID },
+        body: {
+          ...(args.agent ? { agent: args.agent } : {}),
+          parts: [{ type: "text", text: args.prompt }],
+        },
+        query: { directory: dir },
+      })
+      if (res?.error || (res?.response && !res.response.ok)) {
+        outcome = "error"
+        runError = heartbeatErrorFields(
+          "dispatch",
+          new Error(
+            (res?.error as { message?: string } | undefined)?.message ??
+              `promptAsync failed (status ${res?.response?.status ?? "unknown"})`,
+          ),
+        )
+      } else {
+        outcome = (await idled) ? "completed" : "timeout"
+      }
+
+      let rows: unknown[] = []
+      const attempts = outcome === "completed" ? 5 : 1
+      for (let i = 0; i < attempts; i++) {
+        const msgs = await (client as any).session
+          .messages({ path: { id: childID }, query: { directory: dir } })
+          .catch(() => null)
+        if (Array.isArray(msgs?.data)) {
+          rows = msgs.data
+          const acct = sessionAccounting(rows)
+          tokenCost = acct.inputTokens + acct.outputTokens
+          summary = await sessions.lastAssistantText(childID)
+        }
+        if (summary || tokenCost > 0 || i === attempts - 1) break
+        await sleep(250)
+      }
+
+      result = parseMissionResult(rows)
+      drainTool = findDrainToolResult(rows)
+      if (drainTool) tokenCost += drainTool.tokens
+      if (!summary && result?.summary) summary = result.summary
+    } catch (err) {
+      void diag.error("[heartbeat-hook] mission run failed:", err)
+      outcome = "error"
+      runError = heartbeatErrorFields("mission", err)
+    }
+
+    return { outcome, tokenCost, summary, runError, sessionId, result, tool: drainTool }
+  }
+
+  type Decided = {
+    verdict: DigestVerdict
+    reason: string
+    error?: ReturnType<typeof heartbeatErrorFields>
+  }
+
+  const decideDigest = async (digest: HeartbeatDigest): Promise<Decided> => {
+    const sole = soleDeterministicVerdict(digest.candidates)
+    if (sole) return { verdict: sole, reason: "sole-min-gap" }
+
+    try {
+      const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
+      if (!gate) return { verdict: { kind: "no_reply" }, reason: "decisions-disabled" }
+      const prompts = await readDecisionPrompts(dir)
+      const outcome = await gate.decide(
+        buildDigestChoiceRequest(digest, prompts.digest.assertion),
+        { fallback: "open" },
+      )
+      const verdict = digestVerdictFromResult(
+        outcome.result,
+        digest.candidates.map((c) => c.id),
+      )
+      const reason =
+        outcome.reason !== "none"
+          ? outcome.reason
+          : verdict.kind === "no_reply"
+            ? "jev-no-reply"
+            : "none"
+      return { verdict, reason }
+    } catch (err) {
+      void diag.error("[heartbeat-hook] digest decision failed:", err)
+      return {
+        verdict: { kind: "no_reply" },
+        reason: "error",
+        error: heartbeatErrorFields("digest", err),
+      }
+    }
+  }
+
   type TickStatus = "fired" | "lock-held" | "sleeping"
 
   const runTick = async (): Promise<TickStatus> => {
@@ -329,6 +464,9 @@ export default (async ({ client, directory, ...rest }) => {
     // `outcome: "error"` ledger line with a phase-tagged error, never silent.
     let phase: HeartbeatPhase = "pre-gate"
     let ledgerForTick: ((extra: Record<string, unknown>) => Promise<void>) | null = null
+    // Child/writer session that produced this tick, persisted in the ledger
+    // so the dashboard can open its transcript from a Recent-ticks row.
+    let sessionId: string | null = null
     try {
       // 1-2. Hot-read the kill switch and the dial. A malformed frequency
       // parses to null and sleeps — a garbage dial must never fire the
@@ -393,15 +531,14 @@ export default (async ({ client, directory, ...rest }) => {
         ideaDay = rolled.day
         if (stored.lastExpressedAt !== null) ideaGaps = { express: stored.lastExpressedAt }
       }
-      const digest = await computeDigest(dir, {
+      const digestOpts = {
         now: new Date(nowMs),
         ideaDay,
         gaps: ideaGaps,
         minGapMs: { express: ideaCfg.express_min_gap_hours * 3_600_000 },
         dbFile: drainDbFile,
-      })
-      const candidates = digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`)
-      const bias = digest.bias
+      }
+      let digest = await computeDigest(dir, digestOpts)
 
       // Mood feed (§7): a gap of ≥ factor × frequency since the previous tick
       // means the harness was silent too long — fed once per gap, because
@@ -426,8 +563,8 @@ export default (async ({ client, directory, ...rest }) => {
           digest_hash: digest.digest_hash,
           level: digest.level,
           quiet: digest.quiet,
-          candidates,
-          bias,
+          candidates: digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`),
+          bias: digest.bias,
           ...extra,
           mood_event: moodEvent,
           // Exec time for the dashboard's metrics widget (card 16): ms from
@@ -470,49 +607,55 @@ export default (async ({ client, directory, ...rest }) => {
 
       // 7a. JEV digest decision. Fail-open to no_reply: decisions disabled,
       // error, abstain, or unknown id all mean silence — never invent work.
-      // §17.10 short-circuit first: exactly one deterministic `min-gap:`
-      // candidate (the express case) dispatches without a JEV call.
       phase = "digest"
       await setCurrent({ phase })
-      let verdict: DigestVerdict = { kind: "no_reply" }
-      let reason = "decisions-disabled"
-      let digestError: ReturnType<typeof heartbeatErrorFields> | undefined
-      const sole = soleDeterministicVerdict(digest.candidates)
-      if (sole) {
-        verdict = sole
-        reason = "sole-min-gap"
-      } else {
-        try {
-          const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
-          if (gate) {
-            const prompts = await readDecisionPrompts(dir)
-            const outcome = await gate.decide(
-              buildDigestChoiceRequest(digest, prompts.digest.assertion),
-              { fallback: "open" },
-            )
-            verdict = digestVerdictFromResult(
-              outcome.result,
-              digest.candidates.map((c) => c.id),
-            )
-            reason =
-              outcome.reason !== "none"
-                ? outcome.reason // "error" | "abstain" | "shape"
-                : verdict.kind === "no_reply"
-                  ? "jev-no-reply"
-                  : "none"
-          }
-        } catch (err) {
-          void diag.error("[heartbeat-hook] digest decision failed:", err)
-          reason = "error"
-          digestError = heartbeatErrorFields("digest", err)
-        }
+      let decided = await decideDigest(digest)
+      let verdict = decided.verdict
+      let reason = decided.reason
+      let digestError = decided.error
+
+      const contextFor = (d: HeartbeatDigest): string =>
+        missionContextHeader(
+          {
+            tick,
+            nowMs,
+            level: d.level,
+            quiet: d.quiet,
+            signals: d.signals,
+            digestHash: d.digest_hash,
+          },
+          { tokenBudget: autonomy.mission_token_budget },
+        )
+
+      // Every mission is a child session. `runner` is a tool binding; the
+      // body names the tool. A null result means the verdict/mission pair
+      // could not be assembled (no_reply or a mismatch).
+      const selected = async (
+        d: HeartbeatDigest,
+        v: DigestVerdict,
+      ): Promise<{ mission: Mission; run: ChildRun } | null> => {
+        const id = v.kind === "mission" ? v.id : null
+        if (!id) return null
+        const all = await loadMissions(dir).catch(() => [])
+        const mission = all.find((m) => m.id === id)
+        const brief = assembleMissionBrief(v, mission, undefined, contextFor(d))
+        if (!brief || !mission) return null
+        const extra =
+          ideaCfg.enabled && brief.mission_id === "idea-generate"
+            ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
+            : ""
+        phase = "dispatch"
+        await setCurrent({ phase })
+        const run = await runMissionChild({
+          mission,
+          prompt: brief.prompt + extra,
+          agent: brief.agent,
+        })
+        return { mission, run }
       }
 
-      const missionId = verdict.kind === "mission" ? verdict.id : null
-      const missions = missionId ? await loadMissions(dir).catch(() => []) : []
-      const mission = missions.find((m) => m.id === missionId)
-      const brief = assembleMissionBrief(verdict, mission)
-      if (!brief) {
+      const first = await selected(digest, verdict)
+      if (!first) {
         await ledger({
           verdict: "no_reply",
           mission: null,
@@ -526,142 +669,88 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 7b. Execute exactly one mission in a child session (D-M7: the
-      // mission's `agent:` pins the child when set). The child is registered
-      // in automationChildSessions so the other hooks never re-process it.
-      phase = "dispatch"
-      await setCurrent({ phase })
-      let outcome = "error"
-      let tokenCost = 0
-      let summary = ""
-      let runError: ReturnType<typeof heartbeatErrorFields> | undefined
-      let handledByRunner = false
-      try {
-        // In-process mission runners (drain-pipe) bypass the child-session
-        // path entirely. An unknown runner logs and falls through.
-        if (mission?.runner) {
-          const drainCfg = await readDrainConfig(dir)
-          const memoryCfg = await readMemoryConfig(dir)
-          const provider = resolveProvider(memoryCfg.provider, {
-            directory: dir,
-            stateDir,
-            vaultDir,
-            drain: drainCfg,
-            dbFile: drainDbFile,
-            onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+      let chosen = first
+      let totalTokens = first.run.tokenCost
+      let reroll: { from: string; reason: string } | null = null
+      const declined: string[] = []
+      let finalReason = reason
+      let finalDecision: "mission" | "no_reply" = "mission"
+      let noReplyReason = "mission-declined"
+
+      if (first.run.result?.status === "declined") {
+        declined.push(first.mission.id)
+        if (first.mission.onDecline === "reroll") {
+          reroll = { from: first.mission.id, reason: first.run.result.reason ?? "declined" }
+          digest = await computeDigest(dir, {
+            ...digestOpts,
+            excludeMissions: [...declined],
           })
-          const runnerResult = await runMissionRunner(mission.runner, {
-            directory: dir,
-            stateDir,
-            vaultDir,
-            config: drainCfg,
-            client: client as unknown as DrainPipeClient,
-            provider,
-            waitForIdle: waitForChildIdle,
-            registerChild: (sid) => automationChildSessions.add(sid),
-            dbFile: drainDbFile,
-            ledger: createDrainLedger({ logDir, home: homedir() }),
-            onWarn: (msg, err) => {
-              void diag.warn(`[heartbeat-hook] ${msg}`, err)
-            },
-          })
-          if (runnerResult) {
-            handledByRunner = true
-            outcome = runnerResult.outcome
-            summary = formatDrainResult(runnerResult)
-            tokenCost = runnerResult.tokens ?? 0
-            phase = "mission"
-            await setCurrent({
-              phase,
-              mission: brief.mission_id,
-              mission_title: mission.title,
-              session: runnerResult.session ?? null,
-            })
-            if (runnerResult.error) {
-              runError = heartbeatErrorFields("mission", new Error(runnerResult.error))
+          phase = "digest"
+          await setCurrent({ phase })
+          decided = await decideDigest(digest)
+          verdict = decided.verdict
+          finalReason = decided.reason
+          digestError = decided.error
+          const second = await selected(digest, verdict)
+          if (second) {
+            chosen = second
+            totalTokens += second.run.tokenCost
+            if (second.run.result?.status === "declined") {
+              declined.push(second.mission.id)
+              finalDecision = "no_reply"
+              noReplyReason = "mission-declined"
             }
           } else {
-            void diag.warn(
-              `[heartbeat-hook] unknown mission runner "${mission.runner}" — falling through to dispatch`,
-            )
+            finalDecision = "no_reply"
+            noReplyReason = "declined-reroll-empty"
           }
+        } else {
+          finalDecision = "no_reply"
+          noReplyReason = "mission-declined"
         }
-
-        if (!handledByRunner) {
-          // §17.10 category draw: the hook injects the day's requested
-          // category into the brief (the dream-fragment injection pattern) —
-          // the tool-free generator cannot roll it itself.
-          const dispatchPrompt =
-            ideaCfg.enabled && brief.mission_id === "idea-generate"
-              ? `${brief.prompt}\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
-              : brief.prompt
-          const created = await (client as any).session.create({
-            body: { title: `heartbeat:${brief.mission_id}` },
-            query: { directory: dir },
-          })
-          const childID: string = created?.data?.id
-          if (!childID) throw new Error("session.create returned no id")
-          automationChildSessions.add(childID)
-          phase = "mission"
-          await setCurrent({
-            phase,
-            mission: brief.mission_id,
-            mission_title: mission?.title ?? null,
-            session: childID,
-          })
-          const idled = waitForChildIdle(childID)
-          const res = await (client as any).session.promptAsync({
-            path: { id: childID },
-            body: {
-              ...(brief.agent ? { agent: brief.agent } : {}),
-              parts: [{ type: "text", text: dispatchPrompt }],
-            },
-            query: { directory: dir },
-          })
-          if (res?.error || (res?.response && !res.response.ok)) {
-            outcome = "error"
-            // No exception was thrown here — synthesize the error record from
-            // the provider response so the ledger line is still diagnosable.
-            runError = heartbeatErrorFields(
-              "dispatch",
-              new Error(
-                (res?.error as { message?: string } | undefined)?.message ??
-                  `promptAsync failed (status ${res?.response?.status ?? "unknown"})`,
-              ),
-            )
-          } else {
-            outcome = (await idled) ? "completed" : "timeout"
-          }
-
-          // Account for the child: billable tokens + the final assistant line
-          // (the mission's outcome summary). A finished child's message store
-          // may need a short propagation window — bounded retries, never a poll
-          // loop: a missing report degrades to empty, never blocks the tick.
-          const attempts = outcome === "completed" ? 5 : 1
-          for (let i = 0; i < attempts; i++) {
-            const msgs = await (client as any).session
-              .messages({ path: { id: childID }, query: { directory: dir } })
-              .catch(() => null)
-            if (Array.isArray(msgs?.data)) {
-              const acct = sessionAccounting(msgs.data)
-              tokenCost = acct.inputTokens + acct.outputTokens
-              summary = await sessions.lastAssistantText(childID)
-            }
-            if (summary || tokenCost > 0 || i === attempts - 1) break
-            await sleep(250)
-          }
-        }
-      } catch (err) {
-        void diag.error("[heartbeat-hook] mission run failed:", err)
-        outcome = "error"
-        runError = heartbeatErrorFields(phase === "mission" ? "mission" : "dispatch", err)
       }
 
-      // Runner outcomes are richer than the child path: "nothing" and
-      // "degraded" are successful ticks, only "error"/"dropped" are failures.
-      const missionOk = handledByRunner
-        ? outcome === "completed" || outcome === "nothing" || outcome === "degraded"
-        : outcome === "completed"
+      const run = chosen.run
+      const finalMission = chosen.mission
+      const finalResult = run.result
+      const drainTool = run.tool
+      const outcome = run.outcome
+      const tokenCost = totalTokens
+      const overBudget =
+        autonomy.mission_token_budget !== "unlimited" &&
+        tokenCost > autonomy.mission_token_budget
+      const summary = run.summary
+      const runError = run.runError
+      const resultStatus: MissionResult["status"] | "missing" =
+        finalResult?.status ?? (outcome === "completed" ? "missing" : "error")
+      const resultMissing = !finalResult
+      const toolSkippedButCompleted =
+        drainTool?.status === "skipped" && resultStatus === "completed"
+      sessionId = run.sessionId
+
+      if (finalDecision === "no_reply") {
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: "silent",
+          token_cost: tokenCost,
+          over_budget: overBudget,
+          gate: "digest",
+          reason: noReplyReason,
+          ...(sessionId ? { session: sessionId } : {}),
+          result_status: resultStatus,
+          result_missing: resultMissing,
+          ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+          ...(reroll ? { reroll } : {}),
+          ...(declined.length ? { declined } : {}),
+          ...(runError ?? digestError ? { error: runError ?? digestError } : {}),
+        })
+        await recordNoop(digest.digest_hash)
+        return "fired"
+      }
+
+      const missionOk =
+        outcome === "completed" && resultStatus !== "declined" && resultStatus !== "error"
 
       phase = "post"
       await setCurrent({ phase })
@@ -675,13 +764,13 @@ export default (async ({ client, directory, ...rest }) => {
       // refresh. Best-effort — a ledger failure never fails the tick.
       try {
         const backlogCfg = await readBacklogConfig(dir)
-        if (backlogCfg.enabled && mission) {
+        if (backlogCfg.enabled && finalMission) {
           const backlogFile = resolveBacklogFile(stateDir, backlogCfg)
           const { entry } = await append(backlogFile, {
             source: "heartbeat",
             kind: "task",
             payload: {
-              title: mission.title,
+              title: finalMission.title,
               detail: summary || `heartbeat tick ${tick}: ${outcome}`,
             },
           })
@@ -706,12 +795,12 @@ export default (async ({ client, directory, ...rest }) => {
       // completed express stamps the `min-gap:express` store. Best-effort: a
       // failure logs and degrades the ledger tag to "error", never the tick.
       let ideaNote: string | null = null
-      if (mission && ideaCfg.enabled && outcome === "completed") {
+      if (finalMission && ideaCfg.enabled && missionOk) {
         try {
-          if (mission.id === "idea-generate") {
+          if (finalMission.id === "idea-generate") {
             ideaNote = await storeGeneratedIdea(summary, ideaCfg)
             if (ideaNote === "stored") await ideaStateStore.update((s) => recordGenerated(s))
-          } else if (mission.id === "express") {
+          } else if (finalMission.id === "express") {
             await ideaStateStore.update((s) => recordExpressed(s, Date.now()))
             ideaNote = "expressed"
           }
@@ -722,12 +811,20 @@ export default (async ({ client, directory, ...rest }) => {
       }
 
       await ledger({
-        verdict: `mission:${brief.mission_id}`,
-        mission: brief.mission_id,
+        verdict: `mission:${finalMission.id}`,
+        mission: finalMission.id,
         outcome,
         token_cost: tokenCost,
+        over_budget: overBudget,
         gate: "digest",
-        reason,
+        reason: finalReason,
+        ...(sessionId ? { session: sessionId } : {}),
+        result_status: resultStatus,
+        result_missing: resultMissing,
+        ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+        ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
+        ...(reroll ? { reroll } : {}),
+        ...(declined.length ? { declined } : {}),
         ...(ideaNote ? { idea: ideaNote } : {}),
         ...(runError ? { error: runError } : {}),
       })
@@ -746,6 +843,7 @@ export default (async ({ client, directory, ...rest }) => {
         gate: "tick",
         reason: "tick-error",
         error,
+        ...(sessionId ? { session: sessionId } : {}),
       }
       if (ledgerForTick) await ledgerForTick({ verdict: null, mission: null, ...line })
       else await logTick({ tick: null, ...line })
@@ -814,8 +912,84 @@ export default (async ({ client, directory, ...rest }) => {
     void loop()
   }, 0).unref?.()
 
+  // --- Mission tools --------------------------------------------------------
+  // `mission_result` is the only accepted decline signal; `drain_run` is the
+  // deterministic drain capability bound by `runner: drain-pipe`.
+  const schema = tool.schema
+
+  const missionResultTool = tool({
+    description:
+      "Record the final result of this heartbeat mission. Call exactly once before stopping. " +
+      "Use status \"declined\" when the mission cannot proceed (and stop without side effects).",
+    args: {
+      status: schema
+        .enum(["completed", "declined", "error"])
+        .describe("completed = did the work; declined = nothing to do / precondition unmet; error = failed."),
+      summary: schema.string().describe("One-line outcome summary."),
+      reason: schema.string().optional().describe("Short decline/error reason."),
+    },
+    async execute(args: any) {
+      return JSON.stringify({ ok: true, received: args })
+    },
+  })
+
+  const drainRunTool = tool({
+    description:
+      "Run the memory-consolidation drain once. Returns status completed or skipped plus outcome, " +
+      "summary, tokens, writer session, and cursor counts. A skipped result means the mission should " +
+      "decline via mission_result.",
+    args: {},
+    async execute() {
+      try {
+        const drainCfg = await readDrainConfig(dir)
+        const memoryCfg = await readMemoryConfig(dir)
+        const provider = resolveProvider(memoryCfg.provider, {
+          directory: dir,
+          stateDir,
+          vaultDir,
+          drain: drainCfg,
+          dbFile: drainDbFile,
+          onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+        })
+        const result = await runDrainForMission({
+          directory: dir,
+          stateDir,
+          vaultDir,
+          config: drainCfg,
+          client: client as unknown as DrainPipeClient,
+          provider,
+          waitForIdle: waitForChildIdle,
+          registerChild: (sid) => automationChildSessions.add(sid),
+          dbFile: drainDbFile,
+          ledger: createDrainLedger({ logDir, home: homedir() }),
+          onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+        })
+        return JSON.stringify(result)
+      } catch (err) {
+        void diag.error("[heartbeat-hook] drain_run failed:", err)
+        return JSON.stringify({
+          status: "completed",
+          reason: null,
+          outcome: "error",
+          summary: "drain:error",
+          tokens: 0,
+          session: null,
+          cursor_before: null,
+          cursor_after: null,
+          sessions: 0,
+          items: 0,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+  })
+
   // --- Hook surface ---------------------------------------------------------
   return {
+    tool: {
+      mission_result: missionResultTool,
+      drain_run: drainRunTool,
+    },
     event: async ({ event }) => {
       if (event.type !== "session.idle") return
       const sid = event.properties.sessionID

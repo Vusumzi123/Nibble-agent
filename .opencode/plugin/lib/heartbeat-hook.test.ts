@@ -283,6 +283,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   const dir = await project([
     "autonomy:",
     "  level: 3",
+    "  mission_token_budget: 50",
     "",
     "decisions:",
     "  enabled: true",
@@ -297,9 +298,10 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.equal(client.calls.create, 1)
   const body = client.calls.prompts[0].body
   const text: string = body.parts[0].text
-  assert.ok(text.startsWith(HEARTBEAT_FIXED_PROMPT))
+  assert.ok(text.includes(HEARTBEAT_FIXED_PROMPT))
   assert.ok(text.includes("Verdict: mission:drain — Drain conversation backlog into the vault"))
   assert.ok(text.includes("Do the drain thing."))
+  assert.ok(text.includes("~50 tokens"), "the child is told the configured budget")
 
   // 2. The child idles → the tick completes.
   await hooks.event({
@@ -315,6 +317,8 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.equal(t.mission, "drain")
   assert.equal(t.outcome, "completed")
   assert.equal(t.token_cost, 160) // input 120 + output 40
+  assert.equal(t.over_budget, true, "160 measured tokens exceed the 50-token budget")
+  assert.equal(t.session, "ses_child", "the ledger carries the child session id")
   assert.equal(t.mood_event, null)
   assert.equal(t.reason, "none")
   assert.ok(t.candidates.some((c: string) => /^drain:1\.\d\d$/.test(c)), String(t.candidates))
@@ -346,10 +350,10 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   })
 })
 
-// The in-process drain runner: the heartbeat must not create a default child;
-// it dispatches the pipe, which spawns its own summarizer + rag-brain, and the
-// cursor advances only after the writer reports every item.
-test("mission runner: drain-pipe bypasses child dispatch and advances the cursor", async () => {
+// `runner: drain-pipe` is a tool binding, not an execution bypass: the hook
+// still spawns a child, and the child's drain_run + mission_result results are
+// read from its transcript.
+test("runner mission: drain-pipe binds drain_run; the child runs it", async () => {
   const dir = await project([
     "autonomy:",
     "  level: 3",
@@ -357,9 +361,6 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
     "decisions:",
     "  enabled: true",
     "  provider: openjev",
-    "",
-    "drain:",
-    "  initial_lookback_hours: 0",
   ])
   await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
   await writeFile(
@@ -371,30 +372,164 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
       "frequency: high",
       "menus: [day, night]",
       "min_level: 2",
-      "candidacy: turns-pending",
+      "candidacy: digest",
       "runner: drain-pipe",
+      "on_decline: reroll",
       "enabled: true",
       "---",
       "",
-      "Runner body.",
+      "Run the drain_run tool.",
       "",
     ].join("\n"),
     "utf8",
   )
 
-  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
-  const dbFile = join(dir, ".opencode", "state", "turns.db")
-  const db = new DatabaseSync(dbFile)
-  db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
-    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
-    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
-    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
-  `)
-  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run("top", null, dir, 2000)
-  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run("m1", "top", 2000, JSON.stringify({ role: "user" }))
-  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run("m1-p", "m1", JSON.stringify({ type: "text", text: "remember the drain test" }))
-  db.close()
+  const calls = { creates: [] as any[], prompts: [] as any[] }
+  const toolResult = {
+    status: "completed",
+    reason: null,
+    outcome: "completed",
+    summary: "drain:completed, 1 session(s), 1 item(s), 1 consolidated, 0 skipped",
+    tokens: 45,
+    session: "ses_writer",
+    cursor_before: 0,
+    cursor_after: 2000,
+    sessions: 1,
+    items: 1,
+  }
+  const client = {
+    ...mockClient(),
+    session: {
+      get: async () => ({ data: {} }),
+      create: async (args: any) => {
+        calls.creates.push(args)
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 20 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "drain_run",
+                state: { input: {}, output: JSON.stringify(toolResult) },
+              },
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "completed", summary: "drain complete" } },
+              },
+              { type: "text", text: "drain complete" },
+            ],
+          },
+        ],
+      }),
+    },
+  }
+
+  const hooks = await createHook({ client, directory: dir, spawner: missionSpawner } as any)
+  await waitFor(() => calls.prompts.length > 0)
+  assert.equal(calls.creates.length, 1)
+  assert.equal(calls.creates[0].body.title, "heartbeat:drain")
+  assert.ok(String(calls.prompts[0].body.parts[0].text).includes("Run the drain_run tool."))
+
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.mission, "drain")
+  assert.equal(tick.outcome, "completed")
+  assert.equal(tick.token_cost, 165, "child 120 + drain tool 45")
+  assert.equal(tick.session, "ses_child", "the mission child is the transcript")
+  assert.equal(tick.tool_session, "ses_writer")
+  assert.equal(tick.tool_status, "completed")
+  assert.equal(tick.result_status, "completed")
+  assert.equal(tick.result_missing, false)
+
+  const entries = await readBacklog(dir)
+  assert.equal(entries[0].status, "done")
+  assert.equal(entries[0].result.token_cost, 165)
+})
+
+function sequenceSpawner(values: string[]): { spawner: any; calls: () => number } {
+  let i = 0
+  return {
+    calls: () => i,
+    spawner: async () => {
+      const value = values[Math.min(i, values.length - 1)]
+      i++
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          kind: "choice",
+          value,
+          confidence: 0.9,
+          abstained: false,
+          provider: "openjev",
+          backend: "test",
+          latencyMs: 1,
+        }),
+        stderr: "",
+      }
+    },
+  }
+}
+
+test("declined mission with on_decline: reroll excludes it and runs the next verdict once", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "drain.md"),
+    [
+      "---",
+      "id: drain",
+      "title: Drain",
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: digest",
+      "runner: drain-pipe",
+      "on_decline: reroll",
+      "enabled: true",
+      "---",
+      "",
+      "Run the drain_run tool.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+  await writeFile(
+    join(dir, ".opencode", "missions", "staleness.md"),
+    [
+      "---",
+      "id: staleness",
+      "title: Staleness",
+      "frequency: mid",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: digest",
+      "enabled: true",
+      "---",
+      "",
+      "Refresh the stale notes.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
 
   const calls = { creates: [] as any[], prompts: [] as any[] }
   const client = {
@@ -403,13 +538,7 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
       get: async () => ({ data: {} }),
       create: async (args: any) => {
         calls.creates.push(args)
-        const title = args.body?.title
-        const id =
-          title === "drain-summarize"
-            ? "ses_sum"
-            : title === "knowledge-consolidate"
-              ? "ses_writer"
-              : "ses_other"
+        const id = args.body?.title === "heartbeat:drain" ? "ses_drain" : "ses_stale"
         return { data: { id } }
       },
       promptAsync: async (args: any) => {
@@ -417,70 +546,166 @@ test("mission runner: drain-pipe bypasses child dispatch and advances the cursor
         return { response: { ok: true, status: 200 } }
       },
       messages: async ({ path }: any) => {
-        if (path.id === "ses_sum") {
+        if (path.id === "ses_drain") {
           return {
             data: [
               {
-                info: { role: "assistant", tokens: { input: 10, output: 5 } },
+                info: { role: "assistant", id: "a1", tokens: { input: 10, output: 5 } },
                 parts: [
                   {
-                    type: "text",
-                    text: JSON.stringify({
-                      items: [
-                        { title: "Drain Test", summary: "Consolidated a turn.", tags: [], atoms: [] },
-                      ],
-                    }),
+                    type: "tool",
+                    tool: "mission_result",
+                    state: { input: { status: "declined", summary: "nothing to do", reason: "no work" } },
                   },
+                  { type: "text", text: "nothing to do" },
                 ],
               },
             ],
           }
         }
-        if (path.id === "ses_writer") {
-          return {
-            data: [
-              {
-                info: { role: "assistant", tokens: { input: 20, output: 10 }, cost: 0.001 },
-                parts: [{ type: "text", text: "```consolidated\n#1\n```" }],
-              },
-            ],
-          }
+        return {
+          data: [
+            {
+              info: { role: "assistant", id: "a2", tokens: { input: 20, output: 10 } },
+              parts: [
+                {
+                  type: "tool",
+                  tool: "mission_result",
+                  state: { input: { status: "completed", summary: "refreshed" } },
+                },
+                { type: "text", text: "refreshed" },
+              ],
+            },
+          ],
         }
-        return { data: [] }
       },
     },
   }
 
-  const hooks = await createHook({ client, directory: dir, drainDbFile: dbFile, spawner: missionSpawner } as any)
+  const seq = sequenceSpawner(["mission:drain", "mission:staleness"])
+  const hooks = await createHook({ client, directory: dir, spawner: seq.spawner } as any)
 
-  await waitFor(() => calls.prompts.some((p) => p.body.agent === "session-summarizer"))
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_sum" } } } as any)
+  await waitFor(() => calls.prompts.length === 1)
+  assert.equal(calls.creates[0].body.title, "heartbeat:drain")
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_drain" } } } as any)
 
-  await waitFor(() => calls.prompts.some((p) => p.body.agent === "rag-brain"))
-  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_writer" } } } as any)
+  await waitFor(() => calls.prompts.length === 2)
+  assert.equal(calls.creates[1].body.title, "heartbeat:staleness")
+  assert.equal(seq.calls(), 2, "the reroll re-runs the JEV once")
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_stale" } } } as any)
 
   await waitFor(async () => (await readTickLog(dir)).length > 0)
-
-  const titles = calls.creates.map((c) => c.body.title)
-  assert.ok(titles.includes("drain-summarize"))
-  assert.ok(titles.includes("knowledge-consolidate"))
-  assert.equal(titles.some((t) => String(t).startsWith("heartbeat:")), false)
-
   const [tick] = await readTickLog(dir)
-  assert.equal(tick.mission, "drain")
+  assert.equal(tick.verdict, "mission:staleness")
+  assert.equal(tick.mission, "staleness")
   assert.equal(tick.outcome, "completed")
-  assert.equal(tick.token_cost, 45, "summarizer 15 + writer 30")
-  assert.equal(typeof tick.pid, "number", "the tick records which instance ran it")
-
-  const cursor = JSON.parse(
-    await readFile(join(dir, ".opencode", "state", "drain-cursor.json"), "utf8"),
-  )
-  assert.equal(cursor.last_ts, 2000)
+  assert.equal(tick.result_status, "completed")
+  assert.equal(tick.token_cost, 45, "declined child 15 + next mission 30")
+  assert.deepEqual(tick.declined, ["drain"])
+  assert.deepEqual(tick.reroll, { from: "drain", reason: "no work" })
+  assert.equal(tick.session, "ses_stale")
 
   const entries = await readBacklog(dir)
-  assert.equal(entries[0].status, "done")
-  assert.match(entries[0].result.summary, /drain:completed/)
-  assert.equal(entries[0].result.token_cost, 45)
+  assert.equal(entries.length, 1, "the declined mission is not backlog-recorded")
+  assert.equal(entries[0].payload.title, "Staleness")
+})
+
+test("declined mission with on_decline: stop ends the tick silently", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "drain.md"),
+    [
+      "---",
+      "id: drain",
+      "title: Drain",
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: digest",
+      "on_decline: stop",
+      "enabled: true",
+      "---",
+      "",
+      "Run the drain_run tool.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+  await writeFile(
+    join(dir, ".opencode", "missions", "staleness.md"),
+    [
+      "---",
+      "id: staleness",
+      "title: Staleness",
+      "frequency: mid",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: digest",
+      "enabled: true",
+      "---",
+      "",
+      "Refresh.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+
+  const calls = { creates: 0, prompts: [] as any[] }
+  const client = {
+    ...mockClient(),
+    session: {
+      get: async () => ({ data: {} }),
+      create: async () => {
+        calls.creates++
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 10, output: 5 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "declined", summary: "nothing", reason: "in-sync" } },
+              },
+            ],
+          },
+        ],
+      }),
+    },
+  }
+
+  const hooks = await createHook({ client, directory: dir, spawner: missionSpawner } as any)
+  await waitFor(() => calls.prompts.length === 1)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_child" } } } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  await delay(100)
+  assert.equal(calls.creates, 1, "stop does not dispatch a second mission")
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.verdict, "no_reply")
+  assert.equal(tick.mission, null)
+  assert.equal(tick.outcome, "silent")
+  assert.equal(tick.reason, "mission-declined")
+  assert.equal(tick.result_status, "declined")
+  assert.deepEqual(tick.declined, ["drain"])
+
+  const entries = await readBacklog(dir)
+  assert.deepEqual(entries, [])
 })
 
 // A failed mission run: outcome error feeds `mission_failure` (shared mood
@@ -490,6 +715,7 @@ test("mission failure: outcome error feeds mission_failure and records a failed 
   const dir = await project([
     "autonomy:",
     "  level: 3",
+    "  mission_token_budget: 50",
     "",
     "decisions:",
     "  enabled: true",

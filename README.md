@@ -4,7 +4,7 @@ A barebone knowledge agent built on [opencode](https://opencode.ai) — a
 self-RAG loop over a local Obsidian-style markdown vault: retrieve when needed
 (`retrieval-hook` Brain-First gate → `rag-search`), write durable knowledge on
 request (`rag-brain`), and drain the conversation backlog into notes through the
-cursor-backed `drain-pipe` mission.
+cursor-backed `drain` mission (via the `drain_run` tool).
 
 **Status:** pre-1.0, under construction. M1–M4, M8, M9 migrated (self-RAG,
 vault guards, profile, web, audit, OS agents); M5–M7 (mail/telegram/idea) +
@@ -67,6 +67,26 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 3. **`SETUP.md`** — platform detection result the agent reads before touching
    your system.
 
+## Missions
+
+Missions live in `.opencode/missions/*.md`: the frontmatter is configuration
+(id, frequency, menus, level, candidacy, enabled, agent, runner, on_decline)
+and the body is the child-session prompt. `runner` binds a tool to the child
+(drain uses `drain_run`); it never bypasses the agent. Every mission ends by
+calling `mission_result`; `on_decline: reroll` lets the orchestrator exclude
+the mission and pick another one once in the same tick. See
+[`docs/missions.md`](docs/missions.md) and
+[`docs/heartbeat-mission-architecture.md`](docs/heartbeat-mission-architecture.md).
+
+## Modes
+
+Build is the default. **Chat** (`Tab` to switch) is a read-only conversational
+mode: it stays in the injected persona, answers in short prose, and can only
+look things up — brain knowledge through `rag-search`, the web through
+`safe-browser`. It cannot write files or run commands; writing and OS work
+stay in Build. Both modes share the same vault hooks, so conversations in Chat
+are still consolidated by the drain pipe.
+
 ## The self-RAG loop
 
 - **Retrieve:** on every user turn, `retrieval-hook` decides (fail-closed, JEV
@@ -74,10 +94,11 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
   `[brain-first]` directive and the main agent delegates to `rag-search`
   (read-only markdown-vault MCP).
 - **Remember:** vault writes go through the `rag-brain` sub-agent on explicit
-  request. The `drain-pipe` mission (heartbeat, cursor-backed) summarizes
-  un-consolidated turns and hands labelled items to `rag-brain`; the cursor
-  advances only when the writer reports every item. Un-consolidated turns stay
-  searchable through the read-only `memory-explorer`.
+  request. The `drain` mission (heartbeat, cursor-backed) calls the
+  `drain_run` tool, which summarizes un-consolidated turns and hands labelled
+  items to `rag-brain`; the cursor advances only when the writer reports every
+  item. Un-consolidated turns stay searchable through the read-only
+  `memory-explorer`.
 - **Memory provider:** the read plan, writer, pending count, tools, and guarded
   agents come from one active provider selected by `memory.provider` (`both`,
   `rag-brain`, `memory-explorer`, `none`). See

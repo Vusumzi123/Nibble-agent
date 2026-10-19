@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 
 import {
   DashboardError,
@@ -17,8 +18,10 @@ import {
   heartbeatSnapshot,
   isLoopback,
   listLedgers,
+  memoryPendingSnapshot,
   metricsSnapshot,
   missionsSnapshot,
+  resetMemoryPendingCache,
   renderYamlScalar,
   setMissionEnabled,
   tailLedger,
@@ -602,4 +605,160 @@ test("createCsrfStore: issue, verify, expiry, sweep", () => {
   clock += 1_001
   assert.equal(store.verify(token), false)
   assert.equal(store.size(), 0)
+})
+
+// --- memory pending snapshot ----------------------------------------------
+
+async function pendingProject(
+  opts: { enabled?: boolean; provider?: string; cursor?: number | null } = {},
+): Promise<{ dir: string; dbFile: string }> {
+  const dir = await project(
+    CONFIG +
+      `\ndrain:\n  enabled: ${opts.enabled ?? true}\n\nmemory:\n  provider: ${opts.provider ?? "rag-brain"}\n`,
+  )
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  if (opts.cursor !== null) {
+    await writeFile(
+      join(stateDir, "drain-cursor.json"),
+      JSON.stringify({ version: 1, last_ts: opts.cursor ?? 1000 }),
+      "utf8",
+    )
+  }
+  return { dir, dbFile: join(dir, "opencode.db") }
+}
+
+function pendingDb(file: string): DatabaseSync {
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE session (
+      id TEXT PRIMARY KEY,
+      parent_id TEXT,
+      directory TEXT NOT NULL,
+      time_updated INTEGER NOT NULL,
+      title TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE message (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      data TEXT NOT NULL
+    );
+    CREATE TABLE part (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      data TEXT NOT NULL
+    );
+    CREATE INDEX message_session_time_created_id_idx
+      ON message(session_id, time_created, id);
+  `)
+  return db
+}
+
+function addSession(
+  db: DatabaseSync,
+  id: string,
+  directory: string,
+  parent: string | null = null,
+  title = "",
+): void {
+  db.prepare(
+    "INSERT INTO session (id, parent_id, directory, time_updated, title) VALUES (?, ?, ?, ?, ?)",
+  ).run(id, parent, directory, 3_000, title)
+}
+
+function addTurn(
+  db: DatabaseSync,
+  id: string,
+  sessionID: string,
+  time: number,
+  text: string,
+  synthetic = false,
+): void {
+  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+    id,
+    sessionID,
+    time,
+    JSON.stringify({ role: "user" }),
+  )
+  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+    `${id}-p`,
+    id,
+    JSON.stringify({ type: "text", text, synthetic }),
+  )
+}
+
+function seedPendingDb(file: string, dir: string): void {
+  const db = pendingDb(file)
+  addSession(db, "top-1", dir)
+  addSession(db, "top-drain", dir, null, "knowledge-consolidate")
+  addSession(db, "child-1", dir, "top-1")
+  addSession(db, "other-1", "/work/other")
+
+  addTurn(db, "m1", "top-1", 2_000, "hello")
+  addTurn(db, "m2", "top-1", 500, "too old")
+  addTurn(db, "m3", "top-1", 3_000, "synthetic", true)
+  addTurn(db, "m4", "top-drain", 3_000, "drain child")
+  addTurn(db, "m5", "child-1", 3_000, "subagent")
+  addTurn(db, "m6", "other-1", 3_000, "other project")
+  addTurn(db, "m7", "top-1", 2_500, "second")
+  db.close()
+}
+
+test("memoryPendingSnapshot: counts unconsumed turns after the cursor", async () => {
+  resetMemoryPendingCache()
+  const { dir, dbFile } = await pendingProject()
+  seedPendingDb(dbFile, dir)
+  const snap = await memoryPendingSnapshot(dir, { dbFile, now: 10_000 })
+  assert.equal(snap.available, true)
+  assert.equal(snap.pending_turns, 2)
+  assert.equal(snap.enabled, true)
+  assert.equal(snap.provider, "rag-brain")
+  assert.equal(snap.writer, true)
+  assert.equal(snap.paused, false)
+  assert.equal(snap.cursor_last_ts, 1_000)
+  assert.equal(snap.seeded, false)
+})
+
+test("memoryPendingSnapshot: disabled drain still reports the backlog as paused", async () => {
+  resetMemoryPendingCache()
+  const { dir, dbFile } = await pendingProject({ enabled: false })
+  seedPendingDb(dbFile, dir)
+  const snap = await memoryPendingSnapshot(dir, { dbFile, now: 10_000 })
+  assert.equal(snap.pending_turns, 2)
+  assert.equal(snap.enabled, false)
+  assert.equal(snap.paused, true)
+})
+
+test("memoryPendingSnapshot: a provider without a writer is paused", async () => {
+  resetMemoryPendingCache()
+  const { dir, dbFile } = await pendingProject({ provider: "memory-explorer" })
+  seedPendingDb(dbFile, dir)
+  const snap = await memoryPendingSnapshot(dir, { dbFile, now: 10_000 })
+  assert.equal(snap.writer, false)
+  assert.equal(snap.paused, true)
+})
+
+test("memoryPendingSnapshot: unavailable database yields null, not 0", async () => {
+  resetMemoryPendingCache()
+  const { dir } = await pendingProject()
+  const snap = await memoryPendingSnapshot(dir, { dbFile: join(dir, "missing.db"), now: 10_000 })
+  assert.equal(snap.available, false)
+  assert.equal(snap.pending_turns, null)
+  assert.ok(snap.error)
+})
+
+test("memoryPendingSnapshot: a fresh cursor uses the initial lookback", async () => {
+  resetMemoryPendingCache()
+  const now = 10_000_000
+  const { dir, dbFile } = await pendingProject({ cursor: null })
+  const db = pendingDb(dbFile)
+  addSession(db, "top-1", dir)
+  addTurn(db, "m1", "top-1", now - 3_600_000, "within lookback")
+  addTurn(db, "m2", "top-1", now - 30 * 3_600_000, "before lookback")
+  db.close()
+  const snap = await memoryPendingSnapshot(dir, { dbFile, now })
+  assert.equal(snap.seeded, true)
+  assert.equal(snap.pending_turns, 1)
+  assert.equal(snap.cursor_last_ts, now - 24 * 3_600_000)
 })

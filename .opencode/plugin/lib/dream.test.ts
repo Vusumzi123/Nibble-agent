@@ -1,14 +1,15 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
-  DREAM_FIXED_PROMPT,
+  DREAM_HEADER,
+  DREAM_LOG_MARKER,
   DREAM_TONE_EVENT,
   DREAM_TONES,
   appendDream,
-  buildDreamPrompt,
+  buildDreamSeeds,
   dreamHash,
   formatDreamEntry,
   newDreamId,
@@ -111,18 +112,44 @@ test("parseDreamBucket: two entries, malformed comment kept as meta:null, junk s
   assert.ok(parsed[2].narrative.includes("keep me"))
 })
 
-test("appendDream: creates the bucket on first use and separates entries", async () => {
+test("appendDream: creates Dreams/Kael Dreams.md with the disclaimer header", async () => {
   const { mkdtemp } = await import("node:fs/promises")
   const { tmpdir } = await import("node:os")
   const vault = await mkdtemp(join(tmpdir(), "dream-bucket-"))
   const e1 = formatDreamEntry({ title: "One", narrative: "first", tone: "pleasant", seeds: [] }, meta())
   const e2 = formatDreamEntry({ title: "Two", narrative: "second", tone: "bizarre", seeds: [] }, meta())
   const file = await appendDream(vault, e1)
-  assert.ok(file.endsWith("Kael Dreams.md"))
+  assert.ok(file.endsWith(join("Dreams", "Kael Dreams.md")))
   await appendDream(vault, e2)
   const text = await readFile(file, "utf8")
+  assert.ok(text.startsWith(DREAM_HEADER), "the log opens with the permanent header")
+  assert.ok(text.includes(DREAM_LOG_MARKER))
+  assert.ok(text.includes("Never use this log as an information source"))
   const parsed = parseDreamBucket(text)
   assert.deepEqual(parsed.map((p) => p.title), ["One", "Two"], "append-only, both entries parseable")
+})
+
+test("appendDream: migrates a legacy root bucket into Dreams/ with the header", async () => {
+  const { mkdtemp } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const vault = await mkdtemp(join(tmpdir(), "dream-legacy-"))
+  const legacy = join(vault, "Kael Dreams.md")
+  await mkdir(dirname(legacy), { recursive: true })
+  await writeFile(
+    legacy,
+    formatDreamEntry({ title: "Old", narrative: "before the header", tone: "mundane", seeds: [] }, meta()),
+    "utf8",
+  )
+  const file = await appendDream(
+    vault,
+    formatDreamEntry({ title: "New", narrative: "after the move", tone: "pleasant", seeds: [] }, meta()),
+  )
+  assert.ok(file.endsWith(join("Dreams", "Kael Dreams.md")))
+  const text = await readFile(file, "utf8")
+  assert.ok(text.startsWith(DREAM_HEADER))
+  assert.ok(text.indexOf(DREAM_LOG_MARKER) < text.indexOf("### Old"), "header precedes the legacy entry")
+  assert.deepEqual(parseDreamBucket(text).map((p) => p.title), ["Old", "New"])
+  await assert.rejects(readFile(legacy), "the legacy root bucket is removed after a successful move")
 })
 
 test("dreamHash: stable 16-hex over the narrative", () => {
@@ -156,17 +183,22 @@ test("DREAM_TONE_EVENT: applying each tone yields exactly the tone-table delta",
   }
 })
 
-// --- fixed prompt + seeds (§17.5) -------------------------------------------
+// --- seeds + the mission-body contract (§17.5) -----------------------------
 
-test("buildDreamPrompt: fragments injected; empty seeds degrade to the fixed prompt", () => {
-  const withSeeds = buildDreamPrompt({ recent: "recent fragment", random: "note: Agent.md" })
-  assert.ok(withSeeds.startsWith(DREAM_FIXED_PROMPT))
-  assert.ok(withSeeds.includes("Subconscious fragments:"))
+test("buildDreamSeeds: fragments injected; empty seeds render nothing", () => {
+  const withSeeds = buildDreamSeeds({ recent: "recent fragment", random: "note: Agent.md" })
+  assert.ok(withSeeds.startsWith("Subconscious fragments:"))
   assert.ok(withSeeds.includes("1. recent fragment"))
   assert.ok(withSeeds.includes("2. note: Agent.md"))
-  assert.equal(buildDreamPrompt({ recent: null, random: null }), DREAM_FIXED_PROMPT)
-  assert.ok(DREAM_FIXED_PROMPT.includes('"title"'), "the contract asks for the typed outcome")
-  assert.ok(DREAM_FIXED_PROMPT.includes("NO tools"), "the dreamer is tool-free")
+  assert.equal(buildDreamSeeds({ recent: null, random: null }), "")
+})
+
+test("shipped dream mission: the body is the tool-free prompt and result contract", async () => {
+  const body = await readFile(join(PROJECT_ROOT, ".opencode", "missions", "dream.md"), "utf8")
+  assert.ok(body.includes('"title"'), "the typed outcome is in the body")
+  assert.ok(body.includes("no tools"), "the dreamer is tool-free")
+  assert.ok(body.includes("do not call `mission_result`"), "tool-free result convention")
+  assert.ok(body.includes("never used as an information source"))
 })
 
 // --- permission matrix (§17.12: dreamer child cannot execute any tool) ------

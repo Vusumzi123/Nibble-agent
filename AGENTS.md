@@ -35,8 +35,9 @@ You are not given an inventory here — explore what you have and choose:
 
 ## Session bootstrap
 
-- First action of every session: read `SETUP.md` in the project root (if it
-  exists) — the authoritative platform profile for this machine.
+- Before system-touching work (OS, package, or service changes), read
+  `SETUP.md` in the project root (if it exists) — the authoritative platform
+  profile for this machine. Conversational turns do not need it.
 
 ## Request classification (OS management)
 

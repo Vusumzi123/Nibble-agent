@@ -35,6 +35,11 @@ async function fixture(): Promise<string> {
   await write("meta/log.md", "Wireguard tunnel changelog")
   await write(".trash/Old.md", "Wireguard tunnel trash")
   await write("Notes/Wireguard.md", "Tunnel notes without frontmatter")
+  await write(
+    "Dreams/Kael Dreams.md",
+    "---\ntitle: Kael Dreams\ntype: dream-log\n---\nA wireguard tunnel turned into a dream.",
+  )
+  await write("Kael Dreams.md", "---\ntitle: Kael Dreams\n---\nLegacy wireguard tunnel dream.")
   return root
 }
 
@@ -51,6 +56,13 @@ test("candidate prefetch scores and filters the vault", async () => {
   assert.ok(found.every((c) => !c.path.startsWith("Raw")))
   assert.ok(found.every((c) => !c.path.startsWith("meta")))
   assert.ok(found.every((c) => !c.path.startsWith(".trash")))
+  assert.ok(found.every((c) => !c.path.startsWith("Dreams")), "dream logs are never candidates")
+  assert.ok(found.every((c) => c.path !== "Kael Dreams.md"), "the legacy root bucket is never a candidate")
+})
+
+test("Dreams/ is excluded even when the keyword only matches a dream", async () => {
+  const vaultDir = await fixture()
+  assert.deepEqual(await findCandidateNotes({ vaultDir, keywords: ["dreams"], limit: 5 }), [])
 })
 
 test("title-phrase match adds the +20 boost", async () => {

@@ -33,7 +33,7 @@
         "RERANK_ENABLED": "true",
         "RERANK_MODEL": "Xenova/ms-marco-MiniLM-L-6-v2",
         "RERANK_CANDIDATES": "10",
-        "INDEX_EXCLUDE_PREFIXES": "meta/,.trash/,.obsidian/",
+        "INDEX_EXCLUDE_PREFIXES": "meta/,.trash/,.obsidian/,Dreams/,Kael Dreams.md",
         "CHUNK_MAX_TOKENS": "512",
         "CHUNK_OVERLAP_TOKENS": "64"
       }

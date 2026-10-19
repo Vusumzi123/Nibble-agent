@@ -42,6 +42,7 @@ const FULL_FM = [
   "approval: per-item",
   "candidacy: min-gap:last_refresh",
   'agent: "profile-writer"',
+  "on_decline: reroll",
   "enabled: false",
   "---",
   "",
@@ -65,6 +66,7 @@ test("parseMissionFile parses a full frontmatter mission", () => {
     candidacy: "min-gap:last_refresh",
     agent: "profile-writer",
     runner: "",
+    onDecline: "reroll",
     enabled: false,
     body: "Do the thing.",
   })
@@ -91,6 +93,7 @@ test("parseMissionFile falls back to safe defaults for missing keys", () => {
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
   assert.equal(mission.agent, DEFAULT_MISSION.agent)
   assert.equal(mission.runner, DEFAULT_MISSION.runner)
+  assert.equal(mission.onDecline, "stop")
   assert.equal(mission.enabled, true)
   assert.equal(mission.body, "Body here.")
 })
@@ -127,6 +130,7 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
     "menus: [weekend]",
     "approval: yolo",
     "candidacy: whenever",
+    "on_decline: maybe",
     "enabled: maybe",
     "---",
     "b",
@@ -134,14 +138,24 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
   const { mission, issues } = parseMissionFile(content, "x")
   assert.deepEqual(
     issues.map((i) => i.key).sort(),
-    ["approval", "candidacy", "enabled", "frequency", "menus", "min_level"],
+    ["approval", "candidacy", "enabled", "frequency", "menus", "min_level", "on_decline"],
   )
   assert.equal(mission.frequency, DEFAULT_MISSION.frequency)
   assert.equal(mission.min_level, DEFAULT_MISSION.min_level)
   assert.deepEqual(mission.menus, DEFAULT_MISSION.menus)
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
+  assert.equal(mission.onDecline, DEFAULT_MISSION.onDecline)
   assert.equal(mission.enabled, true)
+})
+
+test("parseMissionFile reads on_decline", () => {
+  const { mission, issues } = parseMissionFile(
+    "---\nid: drain\non_decline: reroll\n---\nBody.\n",
+    "fallback",
+  )
+  assert.deepEqual(issues, [])
+  assert.equal(mission.onDecline, "reroll")
 })
 
 test("parseMissionFile never throws on garbage input", () => {
@@ -321,6 +335,7 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-
   assert.equal(drain.frequency, "high")
   // §17.3 night pre-gate: drain is offered iff unconsumed turns exist.
   assert.equal(drain.candidacy, "turns-pending")
+  assert.equal(drain.onDecline, "reroll")
 
   // Card G: dream is night-menu only, roll/cap-gated, runs tool-free.
   const dream = byId.get("dream")!

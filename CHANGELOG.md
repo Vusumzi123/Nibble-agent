@@ -1,5 +1,57 @@
 # Changelog
 
+## 2026-10-19
+
+### Changed
+
+- **Uniform mission architecture** — every mission now runs in a child
+  session; the mission body is the prompt. `runner` is a tool binding, not an
+  in-process bypass. The old drain-pipe runner path is retired; `drain.md`
+  instructs the child to call the `drain_run` tool.
+- **Structured mission results** — the new `mission_result` tool
+  (`completed | declined | error`) is the only decline signal. `on_decline:
+  reroll` makes the orchestrator exclude the mission, recompute the digest,
+  re-run the JEV once, and dispatch the next mission in the same tick.
+  `on_decline: stop` ends the tick silently.
+- **`roll-mission` skill** — the generic decline procedure for child missions.
+- **Dream executor** — the dream hook uses the same child executor. A
+  tool-capable night mission (drain) uses `mission_result`; a decline is a
+  silent tick (no dream reroll). The dream itself is tool-free and returns its
+  typed JSON.
+- **Drain status parity** — `lib/drain/status.ts` applies the pipe's
+  `initial_lookback_hours` seed, so the digest, dashboard, and `drain_run`
+  agree on “in sync”. The memory providers now use the same effective cursor.
+- **Ledger** — new `result_status`, `result_missing`, `over_budget`,
+  `tool_status`, `tool_session`, `reroll`, `declined`, and
+  `tool_skipped_but_completed` fields. One line per tick.
+- **Soft token budget in the brief** — the context preamble states
+  `mission_token_budget` (or `dream_token_budget` for dreams) as a scoping
+  hint; ticks now log `over_budget` when the measured child tokens exceed it.
+  There is still no mid-turn stop.
+- **Protected dream log** — dreams are written to
+  `Brain/Dreams/Kael Dreams.md`, created with a permanent "fictional; never
+  use as an information source" header. The folder is excluded from the vault
+  MCP index and the drain candidate prefetch; a legacy root bucket is migrated
+  on the first append.
+- **Dream mission conventions** — the dream mission body is the prompt (the
+  hook injects only the subconscious fragments); the tool-free typed JSON is
+  its result contract, and the ledger records `result_status: completed /
+  error` instead of `missing`.
+
+### Added
+
+- `drain_run` tool (status pre-check, pipe, tokens, writer session).
+- `mission_result` tool and `docs/heartbeat-mission-architecture.md` /
+  `docs/missions.md`.
+
+### Fixed
+
+- **Empty drain summaries are a no-op, not a failure** — a strict-JSON
+  `{"items":[]}` reply was treated as a malformed summarizer reply, logged as
+  a warning, and replaced with fabricated deterministic notes; the cursor also
+  refused to advance, so the same batch retried every tick. An empty item list
+  now advances the cursor, spawns no writer, and logs nothing.
+
 ## 2026-10-18
 
 ### Added
@@ -7,9 +59,23 @@
 - **Dashboard backend lifecycle script** — `scripts/dashboard-ctl.sh` wraps the
   dashboard server with a pid file, health polling, graceful stop, and adoption
   of a manually started instance, replacing ad-hoc `nohup`/`kill`.
+- **Pending-consolidation indicator** — `GET /api/memory/pending` reports the
+  drain's unconsumed-turn count (cursor-backed, read-only, 5 s cache) plus the
+  cursor and writer/paused state; the dashboard header renders it as an amber
+  `N to consolidate` pill, muted when in sync or paused, and `memory ?` when
+  the opencode database is unavailable.
+- **Tick transcripts** — heartbeat and dream ledger lines now carry the
+  child/writer `session` id; Recent ticks rows open a slide-over with that
+  session's transcript, rendered by the same component as Output & thoughts.
+  Ticks recorded before this change have no session id and stay non-clickable.
 
 ### Fixed
 
+- **`dashboard-ctl.sh` false "port busy" refusal** — curl prints `000` when the
+  connection fails, and the `|| printf '000'` fallback appended a second one
+  (`000000`), so `start` treated a free port as held. The probe now captures
+  the code once; the UI lookup also finds the sibling `../Nibble-dashboard`
+  build when the script runs from the agent project copy.
 - **The drain no longer consumes its own child sessions** — `drain-summarize`
   and `knowledge-consolidate` are top-level sessions (in-process runners have no
   parent session), so discovery re-ingested every run's transcripts and the

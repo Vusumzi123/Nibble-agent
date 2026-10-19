@@ -44,7 +44,11 @@ NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 CURL=(curl --noproxy '127.0.0.1,localhost' --max-time 3 -sS)
 
 http_code() {
-  "${CURL[@]}" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || printf '000'
+  # curl prints 000 via -w even when the connection fails; do not append a
+  # second fallback (that produced "000000" and looked like a live port).
+  local code
+  code="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null)" || true
+  printf '%s' "${code:-000}"
 }
 
 health_code() {
@@ -108,6 +112,8 @@ resolve_ui() {
   for cand in \
     "$TARGET/projects/Nibble-dashboard/dist/dashboard/browser" \
     "$TARGET/projects/Nibble-dashboard/dist/browser" \
+    "$TARGET/../Nibble-dashboard/dist/dashboard/browser" \
+    "$TARGET/../Nibble-dashboard/dist/browser" \
     "$TARGET/dashboard/static" \
     "$TARGET/dashboard/dist/dashboard/browser"; do
     if [ -f "$cand/index.html" ]; then
@@ -138,10 +144,13 @@ do_start() {
   fi
 
   code="$(health_code)"
-  if [ "$code" != "000" ]; then
-    echo "error: port $PORT already answers (HTTP $code) but no matching dashboard-server process; refusing to start" >&2
-    return 1
-  fi
+  case "$code" in
+    "" | "000") ;;
+    *)
+      echo "error: port $PORT already answers (HTTP $code) but no matching dashboard-server process; refusing to start" >&2
+      return 1
+      ;;
+  esac
 
   mkdir -p "$STATE_DIR" "$LOG_DIR"
   ui="$(resolve_ui)"
@@ -212,7 +221,7 @@ do_status() {
   if [ -n "$pid" ]; then
     echo "state:  running (pid $pid)"
     echo "health: HTTP $(health_code)"
-    proxy="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$SERVE_URL/" 2>/dev/null || printf '000')"
+    proxy="$(http_code "$SERVE_URL/")"
     echo "proxy:  $SERVE_URL (HTTP $proxy)"
   else
     code="$(health_code)"
@@ -221,7 +230,7 @@ do_status() {
     else
       echo "state:  stopped (port $PORT held by a foreign process, HTTP $code)"
     fi
-    proxy="$("${CURL[@]}" -o /dev/null -w '%{http_code}' "$SERVE_URL/" 2>/dev/null || printf '000')"
+    proxy="$(http_code "$SERVE_URL/")"
     echo "proxy:  $SERVE_URL (HTTP $proxy)"
   fi
 }

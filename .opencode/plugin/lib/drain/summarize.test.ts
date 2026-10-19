@@ -163,6 +163,26 @@ test("malformed replies fall back deterministically without throwing", async () 
   assert.equal(result.items[0].hash, hashContent(result.items[0].summary, result.items[0].atoms))
 })
 
+test("an empty items array is a clean no-op, not a malformed reply", async () => {
+  const warnings: string[] = []
+  const { client } = fakeClient({ reply: '{"items":[]}' })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    {
+      client,
+      directory: "/work",
+      maxItems: 6,
+      waitForIdle: async () => true,
+      onWarn: (message) => warnings.push(message),
+    },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.error, undefined)
+  assert.deepEqual(result.items, [])
+  assert.deepEqual(warnings, [])
+})
+
 test("timeouts and spawn errors degrade to the fallback", async () => {
   const timedOut = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },

@@ -24,7 +24,7 @@ config warn-once behaviour).
 | `paths:` | every reader below (via `lib/paths.ts`), plus `scoped-permissions.ts` |
 | `vault:` | `vault-readonly-guard.ts`, `wikilink-guard.ts` |
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
-| `drain:` | `heartbeat-hook.ts` / `dream-hook.ts` → `lib/drain/*` (drain-pipe); `lib/heartbeat.ts` (candidacy) |
+| `drain:` | `drain_run` tool → `lib/drain/*` (drain pipe); `lib/heartbeat.ts` (candidacy) |
 | `memory:` | `lib/memory/*` — `retrieval-hook.ts`, `memory-hook.ts`, `memory-guard.ts`, `heartbeat-hook.ts`, `dream-hook.ts`, `lib/heartbeat.ts`, `lib/drain/pipe.ts` |
 | `backlog:` | `heartbeat-hook.ts` / `dream-hook.ts` (mission + drain-fallback records) → `lib/backlog.ts` |
 | `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the retrieval / profile hooks and the drain config reader, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
@@ -122,7 +122,7 @@ reported exactly once.
 
 | Key | Meaning |
 | --- | ------- |
-| `enabled` | Master switch for the runner (`false` = the mission is a no-op). |
+| `enabled` | Master switch for the drain tool (`false` = the mission declines). |
 | `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the activity-time cursor (`last_ts`), the blocked counter, and per-session continuity summaries. |
 | `writer_model` | `rag-brain` writer model; `""` = the agent default. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |

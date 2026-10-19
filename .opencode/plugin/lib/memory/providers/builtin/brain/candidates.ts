@@ -28,7 +28,8 @@ export type CandidateQuery = {
 
 export type TagIndexEntry = { tag: string; count: number; notes: string[] }
 
-const SKIP_DIRS = new Set([".obsidian", ".trash", ".markdown_vault_mcp", "Raw", "meta"])
+const SKIP_DIRS = new Set([".obsidian", ".trash", ".markdown_vault_mcp", "Raw", "meta", "Dreams"])
+const SKIP_FILES = new Set(["Kael Dreams.md"])
 const MAX_SCANNED_FILES = 2000
 const MAX_NOTE_BYTES = 65536
 const SNIPPET_MAX = 240
@@ -48,6 +49,7 @@ export async function* walkMarkdown(dir: string): AsyncGenerator<string> {
       if (SKIP_DIRS.has(entry.name)) continue
       yield* walkMarkdown(full)
     } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      if (SKIP_FILES.has(entry.name)) continue
       yield full
     }
   }
