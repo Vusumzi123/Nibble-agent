@@ -180,6 +180,28 @@ test("discovery and the pending count skip the pipeline's own child sessions", a
   await source.close()
 })
 
+test("discovery skips autonomous mission sessions", async () => {
+  const file = await tmpDb()
+  seed(file)
+  const db = new DatabaseSync(file)
+  addSession(db, "hb-stale", PROJECT, 1100, null, "heartbeat:staleness")
+  addSession(db, "hb-drain", PROJECT, 1200, null, "heartbeat:drain")
+  addSession(db, "dream-run", PROJECT, 1300, null, "dream:dream")
+  addMessage(db, "m-hb-stale", "hb-stale", 1100, "assistant", {
+    type: "text",
+    text: "Refreshed Agent.md",
+  })
+  addMessage(db, "m-hb-drain", "hb-drain", 1200, "assistant", { type: "text", text: "Drained 3 sessions" })
+  addMessage(db, "m-dream", "dream-run", 1300, "assistant", { type: "text", text: "A dream" })
+  db.close()
+
+  const source = await openDrainSource({ projectDir: PROJECT, dbFile: file })
+  const sessions = await source.discover(LAST_TS, 10)
+  assert.deepEqual(sessions.map((s) => s.id), ["top-1"])
+  assert.equal(await source.unconsumedCount(LAST_TS), 2)
+  await source.close()
+})
+
 test("fetch keeps only newer, non-synthetic text and respects the cap", async () => {
   const file = await tmpDb()
   seed(file)
@@ -283,6 +305,13 @@ function mockClient(): DrainSdkClient {
               title: WRITER_SESSION_TITLE,
               directory: PROJECT,
               time: { updated: 1500 },
+            },
+            {
+              id: "s-mission",
+              parentID: null,
+              title: "heartbeat:staleness",
+              directory: PROJECT,
+              time: { updated: 1600 },
             },
             { id: "s-child", parentID: "s-top", directory: PROJECT, time: { updated: 3000 } },
             { id: "s-other", parentID: null, directory: OTHER, time: { updated: 2000 } },

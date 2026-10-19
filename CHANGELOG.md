@@ -54,6 +54,11 @@
 - **Malformed summarizer replies get one retry** — a strict-JSON slip now
   triggers a second attempt with a correction note before falling back to the
   deterministic items, so a single model error no longer degrades the run.
+- **Mission sessions are excluded from consolidation** — the drain now skips
+  top-level `heartbeat:<mission>` and `dream:<mission>` child sessions in both
+  the SQLite discovery/count queries and the SDK fallback. Those missions
+  (e.g. `staleness`) already write their outcomes to the vault and the tick
+  ledger, so re-summarizing their transcripts only produced redundant notes.
 
 ## 2026-10-18
 
