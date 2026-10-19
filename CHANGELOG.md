@@ -2,6 +2,13 @@
 
 ## 2026-10-19
 
+### Added
+
+- **Free-run mission** — `free-run` (day menu, `roll:0.1`, L3) gives the agent
+  one self-chosen action per landing, using the full toolset. The security
+  matrix and the soft token budget still apply; a decline rerolls another
+  mission in the same tick.
+
 ### Changed
 
 - **Uniform mission architecture** — every mission now runs in a child

@@ -319,14 +319,14 @@ test("loadMissions with no config overlay leaves missions untouched", async () =
 // ---------------------------------------------------------------------------
 // Shipped built-ins (the real .opencode/missions/ in this repo)
 
-test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-generate/express", async () => {
+test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-generate/express/free-run", async () => {
   const missions = await loadMissions(PROJECT_ROOT, {
     onReject: (e) => assert.fail(`unexpected reject: ${e.path} ${e.reason}`),
   })
   const byId = new Map(missions.map((m) => [m.id, m]))
   assert.deepEqual(
     [...byId.keys()].sort(),
-    ["drain", "dream", "express", "idea-generate", "notify", "research", "staleness"],
+    ["drain", "dream", "express", "free-run", "idea-generate", "notify", "research", "staleness"],
   )
 
   const drain = byId.get("drain")!
@@ -364,6 +364,15 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-
   assert.equal(express.candidacy, "min-gap:express") // §17.10 deterministic gate
   assert.equal(express.min_level, 1)
   assert.ok(express.body.length > 0)
+
+  // Free run: one self-chosen action, day-only, ~10% roll, Working level.
+  const freeRun = byId.get("free-run")!
+  assert.equal(freeRun.enabled, true)
+  assert.deepEqual(freeRun.menus, ["day"])
+  assert.equal(freeRun.candidacy, "roll:0.1")
+  assert.equal(freeRun.min_level, 3)
+  assert.equal(freeRun.onDecline, "reroll")
+  assert.ok(freeRun.body.length > 0)
 
   for (const id of ["staleness", "research"]) {
     const m = byId.get(id)!
