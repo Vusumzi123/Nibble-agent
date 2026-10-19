@@ -1,5 +1,6 @@
 ---
 description: Read-only search over the un-consolidated conversation lane. Returns recent evidence from turns that are not yet vault notes. No writes, no vault access, no narration.
+model: deepseek/deepseek-flash
 mode: subagent
 color: "#9CCC65"
 steps: 4

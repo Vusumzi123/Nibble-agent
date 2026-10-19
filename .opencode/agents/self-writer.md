@@ -1,5 +1,6 @@
 ---
 description: Internal generation-only agent. Redrafts the agent's first-person Soul note and writes one journal entry from the recent journal + a session excerpt. Invoked by the soul-hook plugin; returns both outputs between markers and uses no tools.
+model: deepseek/deepseek-flash
 mode: subagent
 color: "#7C4DFF"
 permission:

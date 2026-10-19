@@ -1,5 +1,6 @@
 ---
 description: Tool-free session summarizer for the drain pipe. Turns one rendered session delta into strict-JSON durable knowledge items. Uses no tools.
+model: deepseek/deepseek-flash
 mode: subagent
 color: "#8BC34A"
 permission:

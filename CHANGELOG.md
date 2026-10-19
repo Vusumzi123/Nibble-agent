@@ -11,6 +11,10 @@
 
 ### Changed
 
+- **Subagents pinned to `deepseek/deepseek-flash`** — every project agent with
+  `mode: subagent` declares the model, and the built-in `explore`/`general`
+  subagents are overridden in `opencode.json`. The primary `chat` agent keeps
+  the session default; `drain.writer_model` can still override the writer.
 - **Uniform mission architecture** — every mission now runs in a child
   session; the mission body is the prompt. `runner` is a tool binding, not an
   in-process bypass. The old drain-pipe runner path is retired; `drain.md`

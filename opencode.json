@@ -46,6 +46,12 @@
     "mcp_timeout": 60000
   },
   "agent": {
+    "explore": {
+      "model": "deepseek/deepseek-flash"
+    },
+    "general": {
+      "model": "deepseek/deepseek-flash"
+    },
     "security-locks": {
       "mode": "subagent",
       "color": "#FF4444",

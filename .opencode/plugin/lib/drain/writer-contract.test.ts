@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
+import { readFile, readdir } from "node:fs/promises"
 
 const AGENT = new URL("../../../agents/rag-brain.md", import.meta.url)
 const REFERENCE = new URL("../../../../reference/writer-tools.md", import.meta.url)
@@ -9,9 +9,9 @@ async function agent(): Promise<string> {
   return readFile(AGENT, "utf8")
 }
 
-test("the writer carries no model pin and has a step budget", async () => {
+test("the writer is pinned to deepseek-flash and has a step budget", async () => {
   const text = await agent()
-  assert.equal(/^model:/m.test(text), false)
+  assert.match(text, /^model:\s*deepseek\/deepseek-flash$/m)
   assert.match(text, /^steps:\s*\d+$/m)
 })
 
@@ -42,4 +42,14 @@ test("the tool matrix and cheat sheet live in the on-demand reference", async ()
   assert.match(reference, /## Tool Reference/)
   assert.match(reference, /## Search Strategy Cheat Sheet/)
   assert.match(reference, /markdown-vault_edit/)
+})
+
+test("every project subagent is pinned to deepseek-flash", async () => {
+  const dir = new URL("../../../agents/", import.meta.url)
+  for (const name of await readdir(dir)) {
+    if (!name.endsWith(".md")) continue
+    const text = await readFile(new URL(name, dir), "utf8")
+    if (!/^mode:\s*subagent$/m.test(text)) continue
+    assert.match(text, /^model:\s*deepseek\/deepseek-flash$/m, name)
+  }
 })
