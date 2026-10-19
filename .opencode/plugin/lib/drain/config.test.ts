@@ -15,6 +15,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
       "  poison_attempts: 0",
+      "  exclude_missions: [drain, staleness]",
       "  unknown_key: 1",
     ].join("\n"),
   )
@@ -24,7 +25,34 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
   assert.equal(parsed.poison_attempts, 0)
+  assert.deepEqual(parsed.exclude_missions, ["drain", "staleness"])
   assert.equal("unknown_key" in parsed, false)
+})
+
+test("exclude_missions accepts inline lists and empty means none", () => {
+  assert.deepEqual(
+    parseDrainConfig("drain:\n  exclude_missions: [drain, staleness]").exclude_missions,
+    ["drain", "staleness"],
+  )
+  assert.deepEqual(parseDrainConfig("drain:\n  exclude_missions: []").exclude_missions, [])
+  assert.equal(
+    parseDrainConfig("drain:\n  exclude_missions: [drain,").exclude_missions,
+    undefined,
+    "a malformed list is dropped so the default applies",
+  )
+})
+
+test("readDrainConfig reads exclude_missions from the drain section", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "sysop-config.yaml"),
+    ["drain:", "  exclude_missions: [drain, staleness, research]"].join("\n"),
+    "utf8",
+  )
+
+  const cfg = await readDrainConfig(dir)
+  assert.deepEqual(cfg.exclude_missions, ["drain", "staleness", "research"])
 })
 
 test("missing config yields defaults", async () => {

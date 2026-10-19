@@ -55,12 +55,13 @@
   triggers a second attempt with a correction note before falling back to the
   deterministic items, so a single model error no longer degrades the run.
 - **Drain and staleness mission sessions are excluded from consolidation** —
-  the drain now skips top-level `heartbeat:drain`, `dream:drain`,
-  `heartbeat:staleness`, and `dream:staleness` child sessions in both the
-  SQLite discovery/count queries and the SDK fallback. Those missions already
-  write their outcomes to the vault and the tick ledger, so re-summarizing
-  their transcripts only produced redundant notes. Other mission transcripts
-  remain eligible.
+  `drain.exclude_missions` in `sysop-config.yaml` (default
+  `[drain, staleness]`) lists the mission ids whose `heartbeat:<id>` and
+  `dream:<id>` child sessions the drain skips, in both the SQLite
+  discovery/count queries and the SDK fallback. Those missions already write
+  their outcomes to the vault and the tick ledger, so re-summarizing their
+  transcripts only produced redundant notes. Other mission transcripts remain
+  eligible.
 
 ## 2026-10-18
 

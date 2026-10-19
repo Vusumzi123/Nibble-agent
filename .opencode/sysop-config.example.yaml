@@ -47,6 +47,7 @@ drain:
   continuity_sessions: 20      # prior summaries kept for long-lived sessions
   poison_attempts: 3           # failed runs at one boundary before dropping
   drain_prompt_max_bytes: 60000
+  exclude_missions: [drain, staleness]  # mission transcripts not drained
 
 memory:
   # One active memory provider (docs/knowledge-memory-modularization.md).

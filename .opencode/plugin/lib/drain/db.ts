@@ -14,7 +14,10 @@
 // Loaded via relative import only.
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { AUTOMATION_SESSION_TITLES, isAutomationSessionTitle } from "./automation.ts"
+import {
+  automationSessionTitles,
+  isAutomationSessionTitle,
+} from "./automation.ts"
 import { openReadOnlyDb, type SqliteDatabase } from "./sqlite.ts"
 
 export type DrainSession = {
@@ -74,6 +77,7 @@ export type MemorySearchOptions = {
   session?: string
   tags?: string[]
   dbFile?: string
+  excludeMissions?: readonly string[]
   onWarn?: DrainWarn
 }
 
@@ -90,12 +94,15 @@ export type OpenDrainSourceOptions = {
   dbFile?: string
   home?: string
   env?: NodeJS.ProcessEnv
+  /** Mission ids whose `heartbeat:`/`dream:` child sessions are skipped. */
+  excludeMissions?: readonly string[]
   onWarn?: DrainWarn
 }
 
 // The agent's own children are top-level sessions; excluding them by title is
 // what keeps the drain from consuming its own transcripts and mission reports.
-const AUTOMATION_TITLE_PARAMS = AUTOMATION_SESSION_TITLES.map(() => "?").join(", ")
+// The configured mission list is substituted at source-open time.
+const TITLE_PLACEHOLDER = "__AUTOMATION_TITLES__"
 
 const DISCOVER_SQL = `
   SELECT id, directory, time_updated
@@ -103,7 +110,7 @@ const DISCOVER_SQL = `
   WHERE parent_id IS NULL
     AND directory = ?
     AND time_updated > ?
-    AND title NOT IN (${AUTOMATION_TITLE_PARAMS})
+    AND title NOT IN (${TITLE_PLACEHOLDER})
   ORDER BY time_updated ASC
   LIMIT ?`
 
@@ -129,7 +136,7 @@ const COUNT_SQL = `
   WHERE s.parent_id IS NULL
     AND s.directory = ?
     AND m.time_created > ?
-    AND s.title NOT IN (${AUTOMATION_TITLE_PARAMS})
+    AND s.title NOT IN (${TITLE_PLACEHOLDER})
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
     AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
@@ -198,10 +205,19 @@ function turnFromRow(row: Record<string, unknown>): DrainTurn {
   }
 }
 
-function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
-  const discover = db.prepare(DISCOVER_SQL)
+function withTitles(sql: string, titles: readonly string[]): string {
+  return sql.replace(TITLE_PLACEHOLDER, titles.map(() => "?").join(", "))
+}
+
+function sqliteSource(
+  db: SqliteDatabase,
+  projectDir: string,
+  excludeMissions: readonly string[],
+): DrainSource {
+  const titles = automationSessionTitles(excludeMissions)
+  const discover = db.prepare(withTitles(DISCOVER_SQL, titles))
   const fetch = db.prepare(FETCH_SQL)
-  const count = db.prepare(COUNT_SQL)
+  const count = db.prepare(withTitles(COUNT_SQL, titles))
 
   return {
     kind: "sqlite",
@@ -209,7 +225,7 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
       const rows = discover.all(
         projectDir,
         lastTs,
-        ...AUTOMATION_SESSION_TITLES,
+        ...titles,
         limit,
       ) as Array<Record<string, unknown>>
       return rows.map((row) => ({
@@ -223,7 +239,7 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
       return rows.map(turnFromRow)
     },
     async unconsumedCount(lastTs) {
-      const row = count.get(projectDir, lastTs, ...AUTOMATION_SESSION_TITLES) as
+      const row = count.get(projectDir, lastTs, ...titles) as
         | { n?: unknown }
         | undefined
       return Number(row?.n ?? 0)
@@ -256,6 +272,7 @@ function sdkSource(
   client: DrainSdkClient,
   projectDir: string,
   degraded: DrainDegraded,
+  excludeMissions: readonly string[],
 ): DrainSource {
   const listSessions = async (): Promise<SdkSession[]> => {
     if (typeof client.session.list !== "function") {
@@ -277,7 +294,7 @@ function sdkSource(
     const rows = await listSessions()
     return rows
       .filter((s) => !s.parentID)
-      .filter((s) => !isAutomationSessionTitle(s.title))
+      .filter((s) => !isAutomationSessionTitle(s.title, excludeMissions))
       .filter((s) => typeof s.directory !== "string" || s.directory === projectDir)
       .map((s) => ({
         id: String(s.id ?? ""),
@@ -343,6 +360,7 @@ export async function countUnconsumed(opts: {
   client?: DrainSdkClient
   home?: string
   env?: NodeJS.ProcessEnv
+  excludeMissions?: readonly string[]
   onWarn?: DrainWarn
 }): Promise<number> {
   const source = await openDrainSource({
@@ -351,6 +369,7 @@ export async function countUnconsumed(opts: {
     dbFile: opts.dbFile,
     home: opts.home,
     env: opts.env,
+    excludeMissions: opts.excludeMissions,
     onWarn: opts.onWarn,
   })
   try {
@@ -393,6 +412,7 @@ export async function searchUnconsumed(opts: MemorySearchOptions): Promise<Memor
   const source = await openDrainSource({
     projectDir: opts.projectDir,
     dbFile: opts.dbFile,
+    excludeMissions: opts.excludeMissions,
     onWarn: opts.onWarn,
   })
   try {
@@ -458,7 +478,7 @@ export async function openDrainSource(opts: OpenDrainSourceOptions): Promise<Dra
   } catch (err) {
     warn(`drain db: cannot open ${dbFile}; falling back to the SDK`, err)
     if (!opts.client) throw new Error(`drain db unavailable at ${dbFile}`, { cause: err })
-    return sdkSource(opts.client, opts.projectDir, "sdk-fallback")
+    return sdkSource(opts.client, opts.projectDir, "sdk-fallback", opts.excludeMissions ?? [])
   }
 
   const schema = checkSchema(db)
@@ -470,8 +490,8 @@ export async function openDrainSource(opts: OpenDrainSourceOptions): Promise<Dra
     }
     warn(`drain db: schema mismatch (${schema.reason}); falling back to the SDK`)
     if (!opts.client) throw new Error(`drain db schema mismatch: ${schema.reason}`)
-    return sdkSource(opts.client, opts.projectDir, "schema-mismatch")
+    return sdkSource(opts.client, opts.projectDir, "schema-mismatch", opts.excludeMissions ?? [])
   }
 
-  return sqliteSource(db, opts.projectDir)
+  return sqliteSource(db, opts.projectDir, opts.excludeMissions ?? [])
 }

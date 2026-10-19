@@ -199,7 +199,11 @@ test("discovery skips only the drain and staleness mission sessions", async () =
   addMessage(db, "m-dream", "dream-run", 1400, "assistant", { type: "text", text: "A dream" })
   db.close()
 
-  const source = await openDrainSource({ projectDir: PROJECT, dbFile: file })
+  const source = await openDrainSource({
+    projectDir: PROJECT,
+    dbFile: file,
+    excludeMissions: ["drain", "staleness"],
+  })
   const sessions = await source.discover(LAST_TS, 10)
   assert.deepEqual(
     sessions.map((s) => s.id),
@@ -289,6 +293,7 @@ test("SDK fallback applies the same filters and ordering", async () => {
     projectDir: PROJECT,
     dbFile: "/nonexistent/opencode.db",
     client: mockClient(),
+    excludeMissions: ["drain", "staleness"],
   })
   const sessions = await source.discover(LAST_TS, 10)
   assert.deepEqual(sessions.map((s) => s.id), ["s-top", "s-research", "s-dream"])

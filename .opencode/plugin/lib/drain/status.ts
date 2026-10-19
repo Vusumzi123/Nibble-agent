@@ -79,6 +79,7 @@ export async function readDrainStatus(opts: {
       projectDir: opts.directory,
       lastTs,
       dbFile: opts.dbFile,
+      excludeMissions: opts.config.exclude_missions,
     })
     const inSync = pending === 0
     return {

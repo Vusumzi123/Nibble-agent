@@ -5,7 +5,7 @@
 // never throws.
 //
 // Loaded via relative import only.
-import { parseFlatBlock, readSection, sectionCoercer } from "../config.ts"
+import { parseFlatBlock, parseInlineList, readSection, sectionCoercer } from "../config.ts"
 
 export type DrainConfig = {
   enabled: boolean
@@ -23,6 +23,8 @@ export type DrainConfig = {
   continuity_sessions: number
   poison_attempts: number
   drain_prompt_max_bytes: number
+  /** Mission ids whose child transcripts are already represented elsewhere. */
+  exclude_missions: string[]
 }
 
 export const DEFAULT_DRAIN: DrainConfig = {
@@ -41,6 +43,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   continuity_sessions: 20,
   poison_attempts: 3,
   drain_prompt_max_bytes: 60000,
+  exclude_missions: ["drain", "staleness"],
 }
 
 const BOOL_KEYS = new Set(["enabled"])
@@ -65,11 +68,43 @@ const DRAIN_COERCE = sectionCoercer({
   stringMode: "pair-quotes",
 })
 
+const MISSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/
+
+function normalizeMissionIds(values: readonly string[]): string[] {
+  const out: string[] = []
+  for (const raw of values) {
+    const id = raw.trim()
+    if (MISSION_ID_RE.test(id) && !out.includes(id)) out.push(id)
+  }
+  return out
+}
+
+/** Parse the `exclude_missions` value: inline list (`[a, b]`) or comma list. */
+function coerceMissionList(raw: unknown): string[] | null {
+  if (Array.isArray(raw)) {
+    return normalizeMissionIds(raw.filter((v): v is string => typeof v === "string"))
+  }
+  if (typeof raw !== "string") return null
+  const text = raw.trim()
+  if (text.startsWith("[")) {
+    const parsed = parseInlineList(text)
+    return parsed ? normalizeMissionIds(parsed) : null
+  }
+  if (!text) return null
+  return normalizeMissionIds(text.split(","))
+}
+
 export function parseDrainConfig(yamlText: string): Partial<DrainConfig> {
-  return parseFlatBlock(yamlText, "drain", {
+  const parsed = parseFlatBlock(yamlText, "drain", {
     knownKeys: KNOWN_KEYS,
     coerce: DRAIN_COERCE,
-  }) as Partial<DrainConfig>
+  }) as Record<string, unknown>
+  if ("exclude_missions" in parsed) {
+    const list = coerceMissionList(parsed.exclude_missions)
+    if (list) parsed.exclude_missions = list
+    else delete parsed.exclude_missions
+  }
+  return parsed as Partial<DrainConfig>
 }
 
 function atLeast(value: number, min: number, fallback: number): number {
@@ -124,6 +159,8 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   }
   if (typeof cfg.writer_model !== "string") cfg.writer_model = DEFAULT_DRAIN.writer_model
   if (typeof cfg.summarize_model !== "string") cfg.summarize_model = DEFAULT_DRAIN.summarize_model
+  cfg.exclude_missions =
+    coerceMissionList(cfg.exclude_missions) ?? [...DEFAULT_DRAIN.exclude_missions]
 
   return cfg
 }

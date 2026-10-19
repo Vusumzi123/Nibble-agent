@@ -57,6 +57,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
       projectDir: deps.directory,
       lastTs,
       dbFile: deps.dbFile,
+      excludeMissions: deps.drain.exclude_missions,
     })
   }
 

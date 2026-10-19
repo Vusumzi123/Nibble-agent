@@ -732,6 +732,7 @@ export async function memoryPendingSnapshot(
         projectDir: directory,
         lastTs,
         ...(opts.dbFile === undefined ? {} : { dbFile: opts.dbFile }),
+        excludeMissions: drain.exclude_missions,
       })
       return {
         ...base,

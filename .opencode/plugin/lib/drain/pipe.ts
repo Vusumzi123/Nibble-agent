@@ -199,6 +199,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       projectDir: deps.directory,
       client: deps.client,
       dbFile: deps.dbFile,
+      excludeMissions: cfg.exclude_missions,
       onWarn: deps.onWarn,
     })
   } catch (err) {

@@ -73,6 +73,7 @@ function memorySearchTool(factory: MemoryToolFactory, deps: ExplorerProviderDeps
           session: args.session,
           tags: args.tags,
           dbFile: deps.dbFile,
+          excludeMissions: deps.drain.exclude_missions,
         })
         return JSON.stringify({ lane: "unconsolidated", cursor: cursor.last_ts, hits })
       } catch (err) {
@@ -96,6 +97,7 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
       projectDir: deps.directory,
       lastTs,
       dbFile: deps.dbFile,
+      excludeMissions: deps.drain.exclude_missions,
     })
   }
 
@@ -125,6 +127,7 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
         session: req.session,
         tags: req.tags,
         dbFile: deps.dbFile,
+        excludeMissions: deps.drain.exclude_missions,
       })
     },
 
@@ -144,6 +147,7 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
           query: "",
           topK: 1,
           dbFile: deps.dbFile,
+          excludeMissions: deps.drain.exclude_missions,
         })
         if (!last?.excerpt) return null
         return `recent turn: ${last.excerpt.replace(/\s+/g, " ").trim().slice(0, 300)}`
