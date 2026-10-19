@@ -51,6 +51,9 @@
   a warning, and replaced with fabricated deterministic notes; the cursor also
   refused to advance, so the same batch retried every tick. An empty item list
   now advances the cursor, spawns no writer, and logs nothing.
+- **Malformed summarizer replies get one retry** — a strict-JSON slip now
+  triggers a second attempt with a correction note before falling back to the
+  deterministic items, so a single model error no longer degrades the run.
 
 ## 2026-10-18
 

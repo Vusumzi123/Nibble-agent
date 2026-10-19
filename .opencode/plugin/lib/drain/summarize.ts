@@ -270,63 +270,74 @@ export async function summarizeSession(
     }
   }
 
-  let childID = ""
   try {
-    const created = await deps.client.session.create({
-      body: { title: SUMMARIZER_SESSION_TITLE },
-      query: { directory: deps.directory },
-    })
-    childID = String(created?.data?.id ?? "")
-    if (!childID) return fallback("session.create returned no id", Date.now() - started)
-    deps.registerChild?.(childID)
+    const ask = async (text: string): Promise<{ rows: unknown[]; reply: string }> => {
+      const created = await deps.client.session.create({
+        body: { title: SUMMARIZER_SESSION_TITLE },
+        query: { directory: deps.directory },
+      })
+      const childID = String(created?.data?.id ?? "")
+      if (!childID) throw new Error("session.create returned no id")
+      deps.registerChild?.(childID)
 
-    const res = await deps.client.session.promptAsync({
-      path: { id: childID },
-      body: {
-        agent: "session-summarizer",
-        ...(deps.model ? { model: deps.model } : {}),
-        parts: [{ type: "text", text: prompt }],
-      },
-      query: { directory: deps.directory },
-    })
-    if (res?.error || (res?.response && !res.response.ok)) {
-      return fallback("promptAsync failed", Date.now() - started)
+      const res = await deps.client.session.promptAsync({
+        path: { id: childID },
+        body: {
+          agent: "session-summarizer",
+          ...(deps.model ? { model: deps.model } : {}),
+          parts: [{ type: "text", text }],
+        },
+        query: { directory: deps.directory },
+      })
+      if (res?.error || (res?.response && !res.response.ok)) throw new Error("promptAsync failed")
+
+      const idled = await deps.waitForIdle(childID)
+      if (!idled) throw new Error("summarizer timed out")
+
+      const messages = await deps.client.session.messages({
+        path: { id: childID },
+        query: { directory: deps.directory },
+      })
+      const rows = Array.isArray(messages?.data) ? messages.data : []
+      return { rows, reply: lastAssistantText(rows) }
     }
 
-    const idled = await deps.waitForIdle(childID)
-    if (!idled) return fallback("summarizer timed out", Date.now() - started)
+    // Strict JSON occasionally slips even on a strong model. One retry with a
+    // correction note is far cheaper than discarding the batch to fallback.
+    for (let attempt = 1; ; attempt++) {
+      const text =
+        attempt === 1
+          ? prompt
+          : `${prompt}\n\nYour previous reply was not valid JSON. Return ONLY the JSON object, with no prose and no markdown fences.`
+      const { rows, reply } = await ask(text)
+      const tokens = usageTokens(rows)
 
-    const messages = await deps.client.session.messages({
-      path: { id: childID },
-      query: { directory: deps.directory },
-    })
-    const rows = Array.isArray(messages?.data) ? messages.data : []
-    const reply = lastAssistantText(rows)
+      const raw = parseSummaryReply(reply)
+      if (!raw) {
+        if (attempt < 2) continue
+        return fallback("malformed summarizer reply", Date.now() - started)
+      }
+      if (raw.length === 0) {
+        // Valid strict JSON with no durable items: a clean no-op, not a failure.
+        return {
+          items: [],
+          model: deps.model || null,
+          promptBytes,
+          wallMs: Date.now() - started,
+          tokens,
+        }
+      }
 
-    const raw = parseSummaryReply(reply)
-    if (!raw) {
-      return fallback("malformed summarizer reply", Date.now() - started)
-    }
-    if (raw.length === 0) {
-      // Valid strict JSON with no durable items: a clean no-op, not a failure.
+      const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)
+      if (items.length === 0) return fallback("no valid items", Date.now() - started)
+
       return {
-        items: [],
+        items,
         model: deps.model || null,
         promptBytes,
         wallMs: Date.now() - started,
-        tokens: usageTokens(rows),
+        tokens,
       }
-    }
-
-    const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)
-    if (items.length === 0) return fallback("no valid items", Date.now() - started)
-
-    return {
-      items,
-      model: deps.model || null,
-      promptBytes,
-      wallMs: Date.now() - started,
-      tokens: usageTokens(rows),
     }
   } catch (err) {
     return fallback(err instanceof Error ? err.message : String(err), Date.now() - started)

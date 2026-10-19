@@ -28,6 +28,8 @@ function rendered(): RenderedSession {
 
 type FakeOptions = {
   reply?: string
+  /** Sequenced replies: one per summarizer attempt (last one repeats). */
+  replies?: string[]
   failCreate?: boolean
   failPrompt?: boolean
   failMessages?: boolean
@@ -39,6 +41,7 @@ function fakeClient(opts: FakeOptions = {}): {
   calls: { create: any[]; prompt: any[]; messages: any[] }
 } {
   const calls = { create: [] as any[], prompt: [] as any[], messages: [] as any[] }
+  let replyIndex = 0
   const client: SummarizerClient = {
     session: {
       async create(args) {
@@ -54,11 +57,14 @@ function fakeClient(opts: FakeOptions = {}): {
       async messages(args) {
         calls.messages.push(args)
         if (opts.failMessages) throw new Error("messages failed")
+        const text = opts.replies
+          ? opts.replies[Math.min(replyIndex++, opts.replies.length - 1)] ?? "{}"
+          : opts.reply ?? "{}"
         return {
           data: [
             {
               info: { role: "assistant", tokens: opts.tokens ?? { input: 10, output: 5, reasoning: 1 } },
-              parts: [{ type: "text", text: opts.reply ?? "{}" }],
+              parts: [{ type: "text", text }],
             },
           ],
         }
@@ -180,6 +186,28 @@ test("an empty items array is a clean no-op, not a malformed reply", async () =>
   assert.equal(result.degraded, undefined)
   assert.equal(result.error, undefined)
   assert.deepEqual(result.items, [])
+  assert.deepEqual(warnings, [])
+})
+
+test("a malformed reply is retried once with a correction note", async () => {
+  const warnings: string[] = []
+  const { client, calls } = fakeClient({ replies: ["not json", REPLY] })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    {
+      client,
+      directory: "/work",
+      maxItems: 6,
+      waitForIdle: async () => true,
+      onWarn: (message) => warnings.push(message),
+    },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.items.length, 2)
+  assert.equal(calls.create.length, 2, "one fresh summarizer session per attempt")
+  assert.equal(calls.prompt.length, 2)
+  assert.match(calls.prompt[1].body.parts[0].text, /previous reply was not valid JSON/)
   assert.deepEqual(warnings, [])
 })
 
