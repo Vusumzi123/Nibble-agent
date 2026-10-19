@@ -14,11 +14,7 @@
 // Loaded via relative import only.
 import { homedir } from "node:os"
 import { join } from "node:path"
-import {
-  AUTOMATION_SESSION_PREFIXES,
-  AUTOMATION_SESSION_TITLES,
-  isAutomationSessionTitle,
-} from "./automation.ts"
+import { AUTOMATION_SESSION_TITLES, isAutomationSessionTitle } from "./automation.ts"
 import { openReadOnlyDb, type SqliteDatabase } from "./sqlite.ts"
 
 export type DrainSession = {
@@ -100,10 +96,6 @@ export type OpenDrainSourceOptions = {
 // The agent's own children are top-level sessions; excluding them by title is
 // what keeps the drain from consuming its own transcripts and mission reports.
 const AUTOMATION_TITLE_PARAMS = AUTOMATION_SESSION_TITLES.map(() => "?").join(", ")
-const AUTOMATION_PREFIX_PARAMS = AUTOMATION_SESSION_PREFIXES.map(() => "title NOT LIKE ?").join(
-  " AND ",
-)
-const AUTOMATION_PREFIX_PATTERNS = AUTOMATION_SESSION_PREFIXES.map((prefix) => `${prefix}%`)
 
 const DISCOVER_SQL = `
   SELECT id, directory, time_updated
@@ -112,7 +104,6 @@ const DISCOVER_SQL = `
     AND directory = ?
     AND time_updated > ?
     AND title NOT IN (${AUTOMATION_TITLE_PARAMS})
-    AND ${AUTOMATION_PREFIX_PARAMS}
   ORDER BY time_updated ASC
   LIMIT ?`
 
@@ -139,7 +130,6 @@ const COUNT_SQL = `
     AND s.directory = ?
     AND m.time_created > ?
     AND s.title NOT IN (${AUTOMATION_TITLE_PARAMS})
-    AND ${AUTOMATION_PREFIX_PARAMS.replaceAll("title NOT LIKE", "s.title NOT LIKE")}
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
     AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
@@ -220,7 +210,6 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
         projectDir,
         lastTs,
         ...AUTOMATION_SESSION_TITLES,
-        ...AUTOMATION_PREFIX_PATTERNS,
         limit,
       ) as Array<Record<string, unknown>>
       return rows.map((row) => ({
@@ -234,12 +223,7 @@ function sqliteSource(db: SqliteDatabase, projectDir: string): DrainSource {
       return rows.map(turnFromRow)
     },
     async unconsumedCount(lastTs) {
-      const row = count.get(
-        projectDir,
-        lastTs,
-        ...AUTOMATION_SESSION_TITLES,
-        ...AUTOMATION_PREFIX_PATTERNS,
-      ) as
+      const row = count.get(projectDir, lastTs, ...AUTOMATION_SESSION_TITLES) as
         | { n?: unknown }
         | undefined
       return Number(row?.n ?? 0)

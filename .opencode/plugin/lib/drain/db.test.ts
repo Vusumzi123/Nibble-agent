@@ -180,25 +180,32 @@ test("discovery and the pending count skip the pipeline's own child sessions", a
   await source.close()
 })
 
-test("discovery skips autonomous mission sessions", async () => {
+test("discovery skips only the drain and staleness mission sessions", async () => {
   const file = await tmpDb()
   seed(file)
   const db = new DatabaseSync(file)
   addSession(db, "hb-stale", PROJECT, 1100, null, "heartbeat:staleness")
   addSession(db, "hb-drain", PROJECT, 1200, null, "heartbeat:drain")
-  addSession(db, "dream-run", PROJECT, 1300, null, "dream:dream")
+  addSession(db, "dream-drain", PROJECT, 1250, null, "dream:drain")
+  addSession(db, "hb-research", PROJECT, 1300, null, "heartbeat:research")
+  addSession(db, "dream-run", PROJECT, 1400, null, "dream:dream")
   addMessage(db, "m-hb-stale", "hb-stale", 1100, "assistant", {
     type: "text",
     text: "Refreshed Agent.md",
   })
   addMessage(db, "m-hb-drain", "hb-drain", 1200, "assistant", { type: "text", text: "Drained 3 sessions" })
-  addMessage(db, "m-dream", "dream-run", 1300, "assistant", { type: "text", text: "A dream" })
+  addMessage(db, "m-dream-drain", "dream-drain", 1250, "assistant", { type: "text", text: "Drained 2 sessions" })
+  addMessage(db, "m-hb-research", "hb-research", 1300, "assistant", { type: "text", text: "Research notes" })
+  addMessage(db, "m-dream", "dream-run", 1400, "assistant", { type: "text", text: "A dream" })
   db.close()
 
   const source = await openDrainSource({ projectDir: PROJECT, dbFile: file })
   const sessions = await source.discover(LAST_TS, 10)
-  assert.deepEqual(sessions.map((s) => s.id), ["top-1"])
-  assert.equal(await source.unconsumedCount(LAST_TS), 2)
+  assert.deepEqual(
+    sessions.map((s) => s.id),
+    ["top-1", "hb-research", "dream-run"],
+  )
+  assert.equal(await source.unconsumedCount(LAST_TS), 4)
   await source.close()
 })
 
@@ -284,7 +291,7 @@ test("SDK fallback applies the same filters and ordering", async () => {
     client: mockClient(),
   })
   const sessions = await source.discover(LAST_TS, 10)
-  assert.deepEqual(sessions.map((s) => s.id), ["s-top"])
+  assert.deepEqual(sessions.map((s) => s.id), ["s-top", "s-research", "s-dream"])
 
   const turns = await source.fetch("s-top", LAST_TS, 10)
   assert.deepEqual(turns.map((t) => t.text), ["hello", "hi"])
@@ -312,6 +319,20 @@ function mockClient(): DrainSdkClient {
               title: "heartbeat:staleness",
               directory: PROJECT,
               time: { updated: 1600 },
+            },
+            {
+              id: "s-research",
+              parentID: null,
+              title: "heartbeat:research",
+              directory: PROJECT,
+              time: { updated: 1700 },
+            },
+            {
+              id: "s-dream",
+              parentID: null,
+              title: "dream:dream",
+              directory: PROJECT,
+              time: { updated: 1800 },
             },
             { id: "s-child", parentID: "s-top", directory: PROJECT, time: { updated: 3000 } },
             { id: "s-other", parentID: null, directory: OTHER, time: { updated: 2000 } },
