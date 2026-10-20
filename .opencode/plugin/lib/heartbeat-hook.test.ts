@@ -853,5 +853,6 @@ test("B7 backoff: identical-digest no_reply streaks stretch the cadence; a missi
   state = await readTickState(dir)
   assert.equal(state.noop_streak, 0, "an executed mission resets the B7 streak")
   assert.equal(state.noop_hash, null)
+  assert.equal((state as any).last_mission, "drain", "the dispatched mission is recorded")
   assert.equal(client.calls.create, 1, "exactly one mission child across the whole test")
 })

@@ -529,6 +529,26 @@ test("computeDigest: brain-stale candidacy follows the oldest reference note", a
   assert.deepEqual(fresh.candidates, [], "newest reference note is under 30 days")
 })
 
+test("computeDigest: the last staleness run keeps staleness out of the next menu", async () => {
+  const mission = (id: string, title: string): string =>
+    ["---", `id: ${id}`, `title: ${title}`, "menus: [day]", "min_level: 2", "candidacy: digest", "enabled: true", "---", "Body.", ""].join("\n")
+  const ref = `---\ntitle: Old\ntype: reference\nupdated: 2026-08-01\n---\n\nBody.\n`
+  const dir = await tmpProject({
+    ".opencode/sysop-config.yaml": 'autonomy:\n  level: 2\n  quiet:\n    window: "23:00-08:00"\n',
+    ".opencode/missions/staleness.md": mission("staleness", "Stale"),
+    ".opencode/missions/research.md": mission("research", "Research"),
+    ".opencode/state/heartbeat.json": JSON.stringify({ last_mission: "staleness" }),
+    "Brain/AI/Old.md": ref,
+  })
+
+  const digest = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
+  assert.deepEqual(digest.candidates.map((c) => c.id), ["research"])
+
+  await writeFile(join(dir, ".opencode/state/heartbeat.json"), JSON.stringify({ last_mission: "research" }))
+  const next = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
+  assert.ok(next.candidates.some((c) => c.id === "staleness"), "a different last mission frees staleness again")
+})
+
 test("computeDigest: reads backlog, memory, audit, quiet window and missions end to end", async () => {
   const dir = await tmpProject({
     ".opencode/sysop-config.yaml": [

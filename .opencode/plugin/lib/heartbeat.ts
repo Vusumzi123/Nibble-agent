@@ -365,6 +365,25 @@ export type ComputeDigestOpts = {
 }
 
 /**
+ * Missions that must not be offered on two consecutive ticks. Staleness can
+ * leave the same note looking stale after a refresh attempt (unverifiable
+ * facts, or a new oldest note), so re-offering it every tick loops.
+ */
+const NO_REPEAT_MISSION_IDS = new Set(["staleness"])
+
+/** Last mission dispatched by the heartbeat hook (`heartbeat.json`). */
+async function readLastMission(stateDir: string): Promise<string | null> {
+  const text = await atomicRead(join(stateDir, HEARTBEAT_STATE_FILE))
+  if (!text) return null
+  try {
+    const state = JSON.parse(text) as { last_mission?: unknown }
+    return typeof state.last_mission === "string" ? state.last_mission : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Compute the full deterministic digest for a project. Hot-reads every config
  * and state file; a missing/broken input degrades to a silent signal, never a
  * throw. Zero LLM calls anywhere in this path.
@@ -457,6 +476,10 @@ export async function computeDigest(
     missions = await loadMissions(directory)
   } catch {
     missions = []
+  }
+  const lastMission = await readLastMission(stateDir)
+  if (lastMission && NO_REPEAT_MISSION_IDS.has(lastMission)) {
+    missions = missions.filter((m) => m.id !== lastMission)
   }
   const excluded = new Set(opts.excludeMissions ?? [])
   if (excluded.size > 0) missions = missions.filter((m) => !excluded.has(m.id))

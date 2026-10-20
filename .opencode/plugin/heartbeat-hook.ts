@@ -167,7 +167,14 @@ export default (async ({ client, directory, ...rest }) => {
     ticks: number
     noop_hash: string | null
     noop_streak: number
-  }>(join(stateDir, HEARTBEAT_STATE_FILE), { last_tick: 0, ticks: 0, noop_hash: null, noop_streak: 0 })
+    last_mission: string | null
+  }>(join(stateDir, HEARTBEAT_STATE_FILE), {
+    last_tick: 0,
+    ticks: 0,
+    noop_hash: null,
+    noop_streak: 0,
+    last_mission: null,
+  })
 
   // B7 bookkeeping: a no_reply tick on the SAME digest extends the streak, a
   // changed digest restarts it at 1; an executed mission clears it (§17.8
@@ -640,6 +647,10 @@ export default (async ({ client, directory, ...rest }) => {
         const mission = all.find((m) => m.id === id)
         const brief = assembleMissionBrief(v, mission, undefined, contextFor(d))
         if (!brief || !mission) return null
+        // Record the attempt before dispatch: a declined mission still counts
+        // as the last mission, so a no-repeat mission is not re-offered next
+        // tick (the digest reads this back through `last_mission`).
+        await stateStore.update((s) => ({ ...s, last_mission: mission.id }))
         const extra =
           ideaCfg.enabled && brief.mission_id === "idea-generate"
             ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
