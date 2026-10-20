@@ -458,6 +458,112 @@ test("runner mission: drain-pipe binds drain_run; the child runs it", async () =
   assert.equal(entries[0].result.token_cost, 165)
 })
 
+// A pipe failure is reported by `drain_run` as `status: "completed"` with
+// `outcome: "error"`. Even when the child reports mission_result(completed),
+// the hook must record a failed mission and a failed backlog entry.
+test("drain pipe failure overrides a completed mission result", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "drain.md"),
+    [
+      "---",
+      "id: drain",
+      "title: Drain conversation backlog into the vault",
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      "candidacy: digest",
+      "runner: drain-pipe",
+      "on_decline: reroll",
+      "enabled: true",
+      "---",
+      "",
+      "Run the drain_run tool.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+
+  const calls = { creates: [] as any[], prompts: [] as any[] }
+  const toolResult = {
+    status: "completed",
+    reason: null,
+    outcome: "error",
+    summary: "drain:error, 3 session(s), 11 item(s), 0 consolidated, 0 skipped, error:invalid report: no report fence",
+    tokens: 45,
+    session: "ses_writer",
+    cursor_before: 1000,
+    cursor_after: 1000,
+    sessions: 3,
+    items: 11,
+    error: "invalid report: no report fence",
+  }
+  const client = {
+    ...mockClient(),
+    session: {
+      get: async () => ({ data: {} }),
+      create: async (args: any) => {
+        calls.creates.push(args)
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 20 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "drain_run",
+                state: { input: {}, output: JSON.stringify(toolResult) },
+              },
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "completed", summary: "drain complete" } },
+              },
+              { type: "text", text: "drain complete" },
+            ],
+          },
+        ],
+      }),
+    },
+  }
+
+  const hooks = await createHook({ client, directory: dir, spawner: missionSpawner } as any)
+  await waitFor(() => calls.prompts.length > 0)
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.mission, "drain")
+  assert.equal(tick.outcome, "completed")
+  assert.equal(tick.result_status, "completed")
+  assert.equal(tick.tool_status, "completed")
+  assert.equal(tick.tool_outcome, "error")
+  assert.equal(tick.tool_error, "invalid report: no report fence")
+  assert.equal(tick.tool_failed_but_completed, true)
+  assert.equal(tick.mood_event, "mission_failure")
+
+  const entries = await readBacklog(dir)
+  assert.equal(entries[0].status, "failed")
+  assert.equal(entries[0].result.ok, false)
+  assert.ok(String(entries[0].result.summary).includes("drain:error"))
+})
+
 function sequenceSpawner(values: string[]): { spawner: any; calls: () => number } {
   let i = 0
   return {

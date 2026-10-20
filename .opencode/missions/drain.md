@@ -16,7 +16,10 @@ Run the `drain_run` tool once.
 - If it returns `status: "skipped"`, load the `roll-mission` skill and follow
   it: call `mission_result` with `status: "declined"` and the returned reason,
   then stop. Do not consolidate manually.
-- If it returns `status: "completed"`, call `mission_result` with
+- If it returns `outcome: "error"` or `outcome: "dropped"`, call
+  `mission_result` with `status: "error"` and the returned summary, then stop.
+- Otherwise (`status: "completed"` with `outcome: "completed"`,
+  `"degraded"`, or `"nothing"`), call `mission_result` with
   `status: "completed"` and a one-line summary of what was consolidated, then
   stop.
 

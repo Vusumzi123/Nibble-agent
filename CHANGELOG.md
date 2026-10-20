@@ -57,6 +57,15 @@
 
 ### Fixed
 
+- **Drain pipe failures can no longer be recorded as successful missions** —
+  `drain_run` reports an `outcome: "error" | "dropped"` while its `status`
+  stays `"completed"`, so a child that followed the old two-branch prompt
+  could report `mission_result(completed)` for a failed pipe. The heartbeat
+  and dream hooks now treat the observed tool outcome as authoritative: a
+  failed drain is a failed mission (mood wobble, `failed` backlog entry), even
+  if the child reports completed or declined. `drain.md` now has an explicit
+  error branch, and tick ledgers carry `tool_outcome`, `tool_error`, and
+  `tool_failed_but_completed` for diagnosis.
 - **Empty drain summaries are a no-op, not a failure** — a strict-JSON
   `{"items":[]}` reply was treated as a malformed summarizer reply, logged as
   a warning, and replaced with fabricated deterministic notes; the cursor also

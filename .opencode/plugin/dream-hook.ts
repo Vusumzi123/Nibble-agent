@@ -440,8 +440,12 @@ export default (async ({ client, directory, ...rest }) => {
       let resultStatus: MissionResult["status"] | "missing" =
         result?.status ?? (outcome === "completed" ? "missing" : "error")
       let resultMissing = !result
+      // `drain_run` reports pipe failures as `status: "completed"` with
+      // `outcome: "error" | "dropped"`; the observed outcome wins.
+      const drainFailed = drainTool?.outcome === "error" || drainTool?.outcome === "dropped"
+      if (drainFailed && drainTool?.summary) summary = drainTool.summary
 
-      if (result?.status === "declined") {
+      if (result?.status === "declined" && !drainFailed) {
         await ledger({
           verdict: "no_reply",
           mission: null,
@@ -452,7 +456,14 @@ export default (async ({ client, directory, ...rest }) => {
           ...(sessionId ? { session: sessionId } : {}),
           result_status: resultStatus,
           result_missing: resultMissing,
-          ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+          ...(drainTool
+            ? {
+                tool_status: drainTool.status,
+                tool_session: drainTool.session,
+                tool_outcome: drainTool.outcome,
+                ...(drainTool.error ? { tool_error: drainTool.error } : {}),
+              }
+            : {}),
         })
         await afterTick(false)
         return "fired"
@@ -502,7 +513,7 @@ export default (async ({ client, directory, ...rest }) => {
         }
       } else {
         // Non-dream night missions record exactly like a heartbeat run (§7).
-        const missionOk = outcome === "completed" && resultStatus !== "error"
+        const missionOk = outcome === "completed" && resultStatus !== "error" && !drainFailed
         if (!missionOk) {
           await moodFeed.apply("mission_failure")
           moodEvent = "mission_failure"
@@ -539,11 +550,12 @@ export default (async ({ client, directory, ...rest }) => {
       // dream_token_budget is config-validated and journaled as an overrun
       // flag (no mid-flight cap exists on the child-session path — noted as
       // an open gap; mission_token_budget is enforced nowhere either).
-      const tickOk = outcome === "completed" && resultStatus !== "error"
+      const tickOk = outcome === "completed" && resultStatus !== "error" && !drainFailed
       const budget = isDream ? q.dream_token_budget : autonomy.mission_token_budget
       const overBudget = budget !== "unlimited" && tokenCost > budget
       const toolSkippedButCompleted =
         drainTool?.status === "skipped" && resultStatus === "completed"
+      const toolFailedButCompleted = drainFailed && resultStatus === "completed"
       await ledger({
         verdict: `mission:${brief.mission_id}`,
         mission: brief.mission_id,
@@ -555,8 +567,16 @@ export default (async ({ client, directory, ...rest }) => {
         ...(sessionId ? { session: sessionId } : {}),
         result_status: resultStatus,
         result_missing: resultMissing,
-        ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+        ...(drainTool
+          ? {
+              tool_status: drainTool.status,
+              tool_session: drainTool.session,
+              tool_outcome: drainTool.outcome,
+              ...(drainTool.error ? { tool_error: drainTool.error } : {}),
+            }
+          : {}),
         ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
+        ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
       })
       await afterTick(tickOk)
       return "fired"

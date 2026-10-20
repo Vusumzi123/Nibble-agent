@@ -296,6 +296,95 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
   assert.equal(sleep.noop_streak, 0, "an executed mission resets the streak (§17.8)")
 })
 
+// Night parity: a drain pipe error overrides a completed mission_result, so the
+// tick is recorded as a failed mission and the backlog entry is `failed`.
+test("night drain pipe failure overrides a completed mission result", async () => {
+  const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
+  await writeNightMissions(dir)
+  await writeSleep(dir)
+  const dbFile = await writePendingTurn(dir)
+  const calls = { create: 0, prompts: [] as any[] }
+  const toolResult = {
+    status: "completed",
+    reason: null,
+    outcome: "error",
+    summary: "drain:error, 3 session(s), 11 item(s), 0 consolidated, 0 skipped, error:invalid report: no report fence",
+    tokens: 45,
+    session: "ses_writer",
+    cursor_before: 1000,
+    cursor_after: 1000,
+    sessions: 3,
+    items: 11,
+    error: "invalid report: no report fence",
+  }
+  const client = {
+    calls,
+    session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 50 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "drain_run",
+                state: { input: {}, output: JSON.stringify(toolResult) },
+              },
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "completed", summary: "drain complete" } },
+              },
+              { type: "text", text: "drain complete" },
+            ],
+          },
+        ],
+      }),
+      create: async () => {
+        calls.create++
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+    },
+  }
+  const { spawner } = countingSpawner()
+  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
+
+  const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      if (await fn()) return
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error("waitFor timeout")
+  }
+  await waitFor(() => Promise.resolve(calls.prompts.length > 0))
+  await idle(hooks)
+  await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
+
+  const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
+  assert.equal(t.mission, "drain")
+  assert.equal(t.outcome, "completed")
+  assert.equal(t.result_status, "completed")
+  assert.equal(t.tool_status, "completed")
+  assert.equal(t.tool_outcome, "error")
+  assert.equal(t.tool_error, "invalid report: no report fence")
+  assert.equal(t.tool_failed_but_completed, true)
+
+  const entries = await readBacklog(dir)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].status, "failed")
+  assert.equal(entries[0].result.ok, false)
+  assert.ok(String(entries[0].result.summary).includes("drain:error"))
+
+  const sleep = await readSleep(dir)
+  assert.equal(sleep.noop_streak, 1, "a failed mission does not reset the streak")
+})
+
 // §17.12 acceptance #3: a passed roll dispatches the dreamer tool-free child;
 // the hook parses the typed outcome, appends Brain/Dreams/Kael Dreams.md with
 // parseable metadata, and applies the tone-table mood delta itself.

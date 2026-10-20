@@ -688,7 +688,11 @@ export default (async ({ client, directory, ...rest }) => {
       let finalDecision: "mission" | "no_reply" = "mission"
       let noReplyReason = "mission-declined"
 
-      if (first.run.result?.status === "declined") {
+      // A drain that failed at the pipe level must not be laundered into a
+      // decline (which would reroll or silence the tick without a failure).
+      const firstDrainFailed =
+        first.run.tool?.outcome === "error" || first.run.tool?.outcome === "dropped"
+      if (first.run.result?.status === "declined" && !firstDrainFailed) {
         declined.push(first.mission.id)
         if (first.mission.onDecline === "reroll") {
           reroll = { from: first.mission.id, reason: first.run.result.reason ?? "declined" }
@@ -706,7 +710,9 @@ export default (async ({ client, directory, ...rest }) => {
           if (second) {
             chosen = second
             totalTokens += second.run.tokenCost
-            if (second.run.result?.status === "declined") {
+            const secondDrainFailed =
+              second.run.tool?.outcome === "error" || second.run.tool?.outcome === "dropped"
+            if (second.run.result?.status === "declined" && !secondDrainFailed) {
               declined.push(second.mission.id)
               finalDecision = "no_reply"
               noReplyReason = "mission-declined"
@@ -730,11 +736,16 @@ export default (async ({ client, directory, ...rest }) => {
       const overBudget =
         autonomy.mission_token_budget !== "unlimited" &&
         tokenCost > autonomy.mission_token_budget
-      const summary = run.summary
       const runError = run.runError
       const resultStatus: MissionResult["status"] | "missing" =
         finalResult?.status ?? (outcome === "completed" ? "missing" : "error")
       const resultMissing = !finalResult
+      // The drain tool reports pipe failures as `status: "completed"` with
+      // `outcome: "error" | "dropped"`, so the mission result alone cannot be
+      // trusted: the observed tool outcome is the authoritative signal.
+      const drainFailed = drainTool?.outcome === "error" || drainTool?.outcome === "dropped"
+      const toolFailedButCompleted = drainFailed && resultStatus === "completed"
+      const summary = drainFailed && drainTool?.summary ? drainTool.summary : run.summary
       const toolSkippedButCompleted =
         drainTool?.status === "skipped" && resultStatus === "completed"
       sessionId = run.sessionId
@@ -751,7 +762,15 @@ export default (async ({ client, directory, ...rest }) => {
           ...(sessionId ? { session: sessionId } : {}),
           result_status: resultStatus,
           result_missing: resultMissing,
-          ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+          ...(drainTool
+            ? {
+                tool_status: drainTool.status,
+                tool_session: drainTool.session,
+                tool_outcome: drainTool.outcome,
+                ...(drainTool.error ? { tool_error: drainTool.error } : {}),
+              }
+            : {}),
+          ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
           ...(reroll ? { reroll } : {}),
           ...(declined.length ? { declined } : {}),
           ...(runError ?? digestError ? { error: runError ?? digestError } : {}),
@@ -761,7 +780,10 @@ export default (async ({ client, directory, ...rest }) => {
       }
 
       const missionOk =
-        outcome === "completed" && resultStatus !== "declined" && resultStatus !== "error"
+        outcome === "completed" &&
+        resultStatus !== "declined" &&
+        resultStatus !== "error" &&
+        !drainFailed
 
       phase = "post"
       await setCurrent({ phase })
@@ -832,8 +854,16 @@ export default (async ({ client, directory, ...rest }) => {
         ...(sessionId ? { session: sessionId } : {}),
         result_status: resultStatus,
         result_missing: resultMissing,
-        ...(drainTool ? { tool_status: drainTool.status, tool_session: drainTool.session } : {}),
+        ...(drainTool
+          ? {
+              tool_status: drainTool.status,
+              tool_session: drainTool.session,
+              tool_outcome: drainTool.outcome,
+              ...(drainTool.error ? { tool_error: drainTool.error } : {}),
+            }
+          : {}),
         ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
+        ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
         ...(reroll ? { reroll } : {}),
         ...(declined.length ? { declined } : {}),
         ...(ideaNote ? { idea: ideaNote } : {}),
