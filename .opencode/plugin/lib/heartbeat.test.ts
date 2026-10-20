@@ -274,6 +274,19 @@ test("candidacy: turns-pending passes only with unconsumed turns (§17.3 drain g
   assert.equal(candidacyPasses(m, { ...CAND, unconsumedTurns: 3 }), true)
 })
 
+test("candidacy: brain-stale gates on the oldest reference note age", () => {
+  const note = (ageHours: number) => ({ path: "AI/Old.md", title: "Old", updated: "2026-08-01", ageHours })
+  const m = mission({ candidacy: "brain-stale:720" })
+  assert.equal(candidacyPasses(m, CAND), false, "absent signal fails closed")
+  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: note(719) }), false)
+  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: note(720) }), true)
+  assert.equal(
+    candidacyPasses(mission({ candidacy: "brain-stale" }), { ...CAND, brainOldest: note(720) }),
+    true,
+    "bare brain-stale defaults to 30 days",
+  )
+})
+
 test("candidacy: dream-gate needs dreaming status, cap headroom and a passed roll (§17.3)", () => {
   const m = mission({ candidacy: "dream-gate" })
   const dreaming = { status: "dreaming" as const, chance: 0.5, dreamsTonight: 0, nightlyCap: 3 }
@@ -480,6 +493,40 @@ test("computeDigest: no config, no state -> silent signals, all-quiet, shipped s
   assert.deepEqual(digest.candidates, [], "no missions dir -> no candidates")
   assert.equal(digest.digest_hash.length, 16)
   assert.equal(digest.bias.dispatch_influence, true, "default dial")
+})
+
+test("computeDigest: brain-stale candidacy follows the oldest reference note", async () => {
+  const mission = [
+    "---",
+    "id: staleness",
+    "title: Refresh stale notes",
+    "menus: [day]",
+    "min_level: 2",
+    "candidacy: brain-stale:720",
+    "enabled: true",
+    "---",
+    "Body.",
+    "",
+  ].join("\n")
+  const ref = (title: string, updated: string): string =>
+    `---\ntitle: ${title}\ntype: reference\nupdated: ${updated}\n---\n\nBody.\n`
+  const dir = await tmpProject({
+    ".opencode/sysop-config.yaml": 'autonomy:\n  level: 2\n  quiet:\n    window: "23:00-08:00"\n',
+    ".opencode/missions/staleness.md": mission,
+    "Brain/AI/Old.md": ref("Old", "2026-08-01"),
+    "Brain/AI/Recent.md": ref("Recent", "2026-10-01"),
+    "Brain/AI/Log.md": "---\ntitle: Log\ntype: log\nupdated: 2020-01-01\n---\n\nBody.\n",
+  })
+
+  const stale = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
+  assert.equal(stale.signals.brain_oldest?.path, "AI/Old.md")
+  assert.equal(stale.all_quiet, false, "an old reference note is work")
+  assert.deepEqual(stale.candidates.map((c) => c.id), ["staleness"])
+
+  await rm(join(dir, "Brain/AI/Old.md"))
+  const fresh = await computeDigest(dir, { now: at(12, 0), dbFile: missingDb(dir) })
+  assert.equal(fresh.signals.brain_oldest?.path, "AI/Recent.md")
+  assert.deepEqual(fresh.candidates, [], "newest reference note is under 30 days")
 })
 
 test("computeDigest: reads backlog, memory, audit, quiet window and missions end to end", async () => {
@@ -721,6 +768,7 @@ test("buildDigestChoiceRequest: choice over no_reply + mission:<id>, capped stat
   const req = buildDigestChoiceRequest(digest, "pick a mission")
   assert.equal(req.kind, "choice")
   assert.equal(req.criteria, "pick a mission")
+  assert.equal(req.allow_abstain, false, "the digest has an explicit no_reply, so it must not abstain")
   assert.deepEqual(req.candidates, ["no_reply", "mission:drain", "mission:research"])
   const state = String(req.state)
   assert.ok(state.includes("drain"), "state carries candidate ids")

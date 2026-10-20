@@ -30,6 +30,7 @@ import type { DecisionRequest, DecisionResult } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
 import { readDrainConfig } from "./drain/config.ts"
+import { readDrainStatus } from "./drain/status.ts"
 import { readMemoryConfig } from "./memory/config.ts"
 import { resolveProvider } from "./memory/registry.ts"
 import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts"
@@ -37,6 +38,8 @@ import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { readProfileConfig, resolveProfileFile } from "./profile.ts"
 import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
+import { DEFAULT_BRAIN_STALE_HOURS, oldestReferenceNote, type BrainNoteAge } from "./vault-stale.ts"
+import { parseReadonlyDirs, readVaultPolicy } from "./vault-policy.ts"
 import { errText, nowIso } from "./util.ts"
 
 // ---------------------------------------------------------------------------
@@ -91,6 +94,8 @@ export type HeartbeatSignals = {
   audit_failures: number
   /** Hours since mtime per tracked reference file (missing files omitted). */
   staleness: Record<string, number>
+  /** Oldest `type: reference` vault note by its `updated:` frontmatter. */
+  brain_oldest?: BrainNoteAge | null
   /** isQuietNow() over autonomy.quiet.window. */
   quiet: boolean
 }
@@ -106,6 +111,7 @@ export function isAllQuiet(
   if (signals.backlog_pending > 0) return false
   if (signals.unconsumed_turns > 0) return false
   if (signals.audit_failures > 0) return false
+  if ((signals.brain_oldest?.ageHours ?? 0) >= DEFAULT_BRAIN_STALE_HOURS) return false
   return Object.values(signals.staleness).every((h) => h < staleAfterHours)
 }
 
@@ -124,6 +130,13 @@ export function digestHash(signals: HeartbeatSignals): string {
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         .map(([k, h]) => [k, Math.floor(h)]),
     ),
+    brain_oldest: signals.brain_oldest
+      ? {
+          path: signals.brain_oldest.path,
+          updated: signals.brain_oldest.updated,
+          age_hours: Math.floor(signals.brain_oldest.ageHours),
+        }
+      : null,
     quiet: signals.quiet,
   })
   return createHash("sha256").update(canonical).digest("hex").slice(0, 16)
@@ -167,6 +180,8 @@ export type CandidacyContext = {
   nowMs: number
   /** Unconsumed turns in the temporal buffer (`turns-pending`; §17.3 drain gate). */
   unconsumedTurns?: number
+  /** Oldest refreshable reference note (`brain-stale`; absent = fail closed). */
+  brainOldest?: BrainNoteAge | null
   /** Sleep state + dream dials (`dream-gate`); absent = fail closed. */
   sleep?: SleepGateCtx
   /** state-key → last-run epoch ms (`min-gap:` predicates; cards 6/7a own the store). */
@@ -188,6 +203,16 @@ export function candidacyPasses(mission: Mission, ctx: CandidacyContext): boolea
   if (c === "digest" || c === "always") return true
   if (c === "backlog-pending") return ctx.backlogPending > 0
   if (c === "turns-pending") return (ctx.unconsumedTurns ?? 0) > 0
+  if (c === "brain-stale" || c.startsWith("brain-stale:")) {
+    const note = ctx.brainOldest
+    if (!note) return false
+    const hours =
+      c === "brain-stale"
+        ? DEFAULT_BRAIN_STALE_HOURS
+        : parseFloat(c.slice("brain-stale:".length))
+    if (!Number.isFinite(hours)) return false
+    return note.ageHours >= hours
+  }
   if (c === "idea-roll") {
     const d = ctx.ideaDay
     if (!d) return false // idea pipeline off (or state unreadable) — fail closed
@@ -373,9 +398,9 @@ export async function computeDigest(
   }
   if (drainCfg.enabled) {
     try {
-      // Cursor-backed candidacy lives behind the active provider: `none` and a
-      // Brain-only writer expose no pending count, so the drain mission cannot
-      // fire from a provider that does not own the lane.
+      // Same eligibility snapshot the tool uses: pending work only counts when
+      // the active provider can actually consume it (writer present, lane
+      // enabled). A paused/read-only provider is not "out of sync".
       const memoryCfg = await readMemoryConfig(directory)
       const provider = resolveProvider(memoryCfg.provider, {
         directory,
@@ -384,7 +409,15 @@ export async function computeDigest(
         drain: drainCfg,
         dbFile: opts.dbFile,
       })
-      unconsumed_turns = (await provider.pending?.()) ?? 0
+      const status = await readDrainStatus({
+        directory,
+        stateDir,
+        config: drainCfg,
+        provider,
+        dbFile: opts.dbFile,
+        now: nowMs,
+      })
+      unconsumed_turns = status.pending ?? 0
     } catch {
       /* silent */
     }
@@ -405,11 +438,17 @@ export async function computeDigest(
   )
 
   const quiet = isQuietNow(autonomy.quiet.window, now)
+  const vaultPolicy = await readVaultPolicy(directory)
+  const brainOldest = await oldestReferenceNote(vaultDir, {
+    nowMs,
+    excludeDirs: parseReadonlyDirs(vaultPolicy.readonly),
+  })
   const signals: HeartbeatSignals = {
     backlog_pending,
     unconsumed_turns,
     audit_failures,
     staleness,
+    brain_oldest: brainOldest,
     quiet,
   }
 
@@ -430,6 +469,7 @@ export async function computeDigest(
     candidacy: {
       backlogPending: backlog_pending,
       unconsumedTurns: unconsumed_turns,
+      brainOldest,
       sleep: {
         status: sleep.status,
         chance: autonomy.quiet.dream_chance,
@@ -526,6 +566,7 @@ export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/lib/heartbeat.ts",
   ".opencode/plugin/lib/missions.ts",
   ".opencode/plugin/lib/mission-result.ts",
+  ".opencode/plugin/lib/vault-stale.ts",
   ".opencode/plugin/lib/drain/status.ts",
   ".opencode/plugin/lib/drain/tool.ts",
 ]
@@ -559,6 +600,11 @@ export function candidateWarrant(candidate: DigestCandidate, signals: HeartbeatS
   const c = candidate.candidacy
   if (c === "turns-pending") return `unconsumed_turns=${signals.unconsumed_turns}`
   if (c === "backlog-pending") return `backlog_pending=${signals.backlog_pending}`
+  if (c === "brain-stale" || c.startsWith("brain-stale:")) {
+    const note = signals.brain_oldest
+    if (!note) return "brain_stale=no-reference-notes"
+    return `brain_stale=${Math.round(note.ageHours / 24)}d path=${note.path}`
+  }
   if (c === "dream-gate") return "dream gate passed"
   if (c === "idea-roll") return "idea quota open"
   if (c.startsWith("min-gap:")) return `min-gap ${c.slice("min-gap:".length)} due`
@@ -583,6 +629,13 @@ export function digestStateSummary(digest: HeartbeatDigest): string {
       staleness: Object.fromEntries(
         Object.entries(digest.signals.staleness).map(([k, h]) => [k, Math.round(h)]),
       ),
+      brain_oldest: digest.signals.brain_oldest
+        ? {
+            path: digest.signals.brain_oldest.path,
+            updated: digest.signals.brain_oldest.updated,
+            age_hours: Math.round(digest.signals.brain_oldest.ageHours),
+          }
+        : null,
     },
     bias: digest.bias,
     candidates: digest.candidates.map((c) => ({
@@ -606,6 +659,11 @@ export function buildDigestChoiceRequest(digest: HeartbeatDigest, criteria: stri
     state: digestStateSummary(digest),
     candidates: ["no_reply", ...digest.candidates.map((c) => `mission:${c.id}`)],
     criteria,
+    // `no_reply` is already an explicit candidate, so a low-confidence top
+    // choice must not be turned into an abstain: with N candidates the top
+    // probability sits near 1/N and the 0.45 threshold would silence every
+    // judgment tick. Let the model choose no_reply when it means it.
+    allow_abstain: false,
     // Ledger-only: the exact state the JEV saw, so a no_reply is diagnosable.
     trace: { digest_state: digestStateSummary(digest) },
   }
@@ -650,9 +708,12 @@ export function missionContextHeader(
   const stale = Object.entries(ctx.signals.staleness)
     .map(([key, hours]) => `${key}=${Math.round(hours)}h`)
     .join(",")
+  const brain = ctx.signals.brain_oldest
+    ? `, brain_oldest=${ctx.signals.brain_oldest.path} (updated ${ctx.signals.brain_oldest.updated}, ${Math.round(ctx.signals.brain_oldest.ageHours / 24)}d old)`
+    : ""
   const lines = [
     `Mission context — tick ${ctx.tick}, level ${ctx.level}, ${new Date(ctx.nowMs).toISOString()}, quiet=${ctx.signals.quiet}, digest=${ctx.digestHash}.`,
-    `Signals: backlog_pending=${ctx.signals.backlog_pending}, unconsumed_turns=${ctx.signals.unconsumed_turns}, audit_failures=${ctx.signals.audit_failures}${stale ? `, staleness=${stale}` : ""}.`,
+    `Signals: backlog_pending=${ctx.signals.backlog_pending}, unconsumed_turns=${ctx.signals.unconsumed_turns}, audit_failures=${ctx.signals.audit_failures}${stale ? `, staleness=${stale}` : ""}${brain}.`,
   ]
   if (typeof opts.tokenBudget === "number" && Number.isFinite(opts.tokenBudget)) {
     const contract =

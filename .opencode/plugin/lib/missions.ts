@@ -54,11 +54,13 @@ export type MissionCandidacy =
   | "always"
   | "backlog-pending"
   | "turns-pending"
+  | "brain-stale"
+  | `brain-stale:${string}`
   | "dream-gate"
   | "idea-roll"
   | `min-gap:${string}`
   | `roll:${string}`
-const CANDIDACY_BASE = new Set(["digest", "always", "backlog-pending", "turns-pending", "dream-gate", "idea-roll"])
+const CANDIDACY_BASE = new Set(["digest", "always", "backlog-pending", "turns-pending", "brain-stale", "dream-gate", "idea-roll"])
 
 export type Mission = {
   id: string
@@ -162,6 +164,7 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
     case "candidacy": {
       const v = stripPairQuotes(raw)
       if (CANDIDACY_BASE.has(v)) return v
+      if (/^brain-stale:\d+(?:\.\d+)?$/.test(v)) return v
       if (/^min-gap:\S+$/.test(v)) return v
       if (/^roll:\d+(?:\.\d+)?$/.test(v)) return v
       return undefined
