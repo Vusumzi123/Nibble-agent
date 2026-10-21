@@ -45,6 +45,12 @@ def _set(cfg: str, block: str, key: str, value: str, anchor: str = "") -> None:
     subprocess.run(args, check=True)
 
 
+def _unset(cfg: str, block: str, key: str) -> None:
+    script = 'source "$1"; unset_block_key "$2" "$3" "$4"'
+    args = ["bash", "-c", script, "_", HELPER, cfg, block, key]
+    subprocess.run(args, check=True)
+
+
 class BlockScopeTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -85,6 +91,37 @@ class BlockScopeTest(unittest.TestCase):
     def test_existing_value_keeps_comment(self) -> None:
         _set(self.cfg, "decisions", "provider", "openjev")
         self.assertIn("provider: openjev", self._text())
+
+    def test_clef_cloud_clears_local_base_url(self) -> None:
+        # Mirrors apply_decisions_backend clef-openrouter openrouter/cloudflare/clef
+        _set(self.cfg, "decisions", "provider", "openjev")
+        _set(self.cfg, "decisions", "backend", "clef", "provider")
+        _set(self.cfg, "decisions", "model", "clef-flash-2k", "backend")
+        _set(self.cfg, "decisions", "base_url", "http://127.0.0.1:11434", "model")
+        _set(self.cfg, "decisions", "backend", "clef-openrouter", "provider")
+        _set(self.cfg, "decisions", "model", "openrouter/cloudflare/clef", "backend")
+        _unset(self.cfg, "decisions", "base_url")
+
+        decisions = _block(self._text(), "decisions")
+        self.assertEqual(decisions["backend"], "clef-openrouter")
+        self.assertEqual(decisions["model"], "openrouter/cloudflare/clef")
+        self.assertNotIn("base_url", decisions)
+
+    def test_cloud_model_clears_local_backend(self) -> None:
+        # Mirrors apply_decisions_model: switching to a plain openjev model must
+        # drop a stale local backend/base_url, or the model is ignored.
+        _set(self.cfg, "decisions", "provider", "openjev")
+        _set(self.cfg, "decisions", "backend", "clef")
+        _set(self.cfg, "decisions", "model", "clef-flash-2k")
+        _set(self.cfg, "decisions", "base_url", "http://127.0.0.1:11434")
+        _set(self.cfg, "decisions", "model", "deepseek/deepseek-flash", "provider")
+        _unset(self.cfg, "decisions", "backend")
+        _unset(self.cfg, "decisions", "base_url")
+
+        decisions = _block(self._text(), "decisions")
+        self.assertEqual(decisions["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("backend", decisions)
+        self.assertNotIn("base_url", decisions)
 
     def test_missing_block_fails(self) -> None:
         with self.assertRaises(subprocess.CalledProcessError):

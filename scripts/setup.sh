@@ -244,22 +244,31 @@ apply_decisions_model() { # provider/model
   # openjev now links to opencode: `model` is an opencode spec and the endpoint
   # + credential are resolved from opencode at runtime, so backend/base_url/
   # api_key_file stay commented as advanced overrides. Never writes a secret.
+  # Clear a previous local backend so the cloud model actually takes effect.
   set_block_key "$CONFIG" decisions provider openjev
   set_block_key "$CONFIG" decisions model "$1" provider
+  unset_block_key "$CONFIG" decisions backend
+  unset_block_key "$CONFIG" decisions base_url
 }
 
 apply_decisions_rules() { # force the deterministic provider
   set_block_key "$CONFIG" decisions provider rules
 }
 
-apply_decisions_backend() { # backend model [base_url] — local Ollama backends
+apply_decisions_backend() { # backend model [base_url] — local Ollama / hosted Clef
   # provider stays openjev (the TS bridge path); `backend` + `model` steer
   # openjevserver.py. backend: clef uses Ollama's System One /v1/systemone
-  # decision API; backend: ollama uses native /api/chat first-token logprobs.
+  # decision API; backend: ollama uses native /api/chat first-token logprobs;
+  # backend: clef-openrouter uses OpenRouter's hosted /api/alpha/decisions
+  # (same typed contract, no local VRAM, endpoint derived from the catalog).
   set_block_key "$CONFIG" decisions provider openjev
   set_block_key "$CONFIG" decisions backend "$1" provider
   set_block_key "$CONFIG" decisions model "$2" backend
-  if [ -n "${3-}" ]; then set_block_key "$CONFIG" decisions base_url "$3" model; fi
+  if [ "$1" = "clef-openrouter" ]; then
+    unset_block_key "$CONFIG" decisions base_url
+  elif [ -n "${3-}" ]; then
+    set_block_key "$CONFIG" decisions base_url "$3" model
+  fi
 }
 
 ollama_available() { command -v ollama >/dev/null 2>&1; }
@@ -290,12 +299,13 @@ ensure_clef_model() { # ensure clef-flash + a VRAM-lean variant; echoes the tag
   printf '%s' "$TAG"
 }
 
-configure_decision_gate() { # interactive: rules / openjev / clef / ollama
+configure_decision_gate() { # interactive: rules / openjev / clef / ollama / clef-cloud
   echo "  decision gate provider:" >&2
   echo "    1) rules — deterministic, no model (default)" >&2
   echo "    2) openjev — cloud model already connected in opencode" >&2
   echo "    3) clef — local decision model via Ollama /v1/systemone (fast, calibrated)" >&2
   echo "    4) ollama — local chat model via Ollama /api/chat (first-token logprobs)" >&2
+  echo "    5) clef-cloud — OpenRouter typed decisions (no local VRAM)" >&2
   local D BM TAG
   D="$(ask 'Choose' 1)"
   case "$D" in
@@ -333,6 +343,22 @@ configure_decision_gate() { # interactive: rules / openjev / clef / ollama
         apply_decisions_backend ollama "$BM" "http://127.0.0.1:11434"
         echo "  decisions = ollama chat ($BM)"
         echo "  note: small chat models are weaker judges on nuanced noul questions than clef"
+      fi
+      ;;
+    5)
+      BM="$(ask 'Clef model on OpenRouter' 'cloudflare/clef')"
+      [ -n "$BM" ] || { echo "  no model chosen — decisions unchanged"; return 0; }
+      case "$BM" in
+        openrouter/*) ;;
+        */*) BM="openrouter/$BM" ;;
+        *) BM="openrouter/cloudflare/$BM" ;;
+      esac
+      if [ "$DRY" -eq 1 ]; then
+        echo "  [dry-run] decisions: provider=openjev backend=clef-openrouter model=$BM"
+      else
+        apply_decisions_backend clef-openrouter "$BM"
+        echo "  decisions = OpenRouter clef ($BM)"
+        echo "  requires an OpenRouter credential in opencode; /api/alpha is experimental"
       fi
       ;;
     2)

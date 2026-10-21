@@ -21,6 +21,7 @@ import {
   candidateWarrant,
   computeDigest,
   computeWakeDelayMs,
+  deterministicDigestFallback,
   digestHash,
   digestStateSummary,
   digestVerdictFromResult,
@@ -150,6 +151,17 @@ test("isAllQuiet: staleness under the threshold stays quiet; over it does not", 
   assert.equal(isAllQuiet(signals({ staleness: { "Agent.md": 10, "SETUP.md": 100 } })), false)
 })
 
+test("isAllQuiet: an old reference note is a work signal at 30 days", () => {
+  assert.equal(
+    isAllQuiet(signals({ brain_oldest: { ...OLD_NOTE, ageHours: 719 } })),
+    true,
+  )
+  assert.equal(
+    isAllQuiet(signals({ brain_oldest: { ...OLD_NOTE, ageHours: 720 } })),
+    false,
+  )
+})
+
 test("isAllQuiet: the quiet window alone is not a work signal", () => {
   assert.equal(isAllQuiet(signals({ quiet: true })), true)
 })
@@ -170,6 +182,10 @@ test("digestHash changes when any signal changes", () => {
   assert.notEqual(base, digestHash(signals({ backlog_pending: 1, audit_failures: 1 })))
   assert.notEqual(base, digestHash(signals({ backlog_pending: 1, quiet: true })))
   assert.notEqual(base, digestHash(signals({ backlog_pending: 1, staleness: { "Agent.md": 80 } })))
+  assert.notEqual(
+    base,
+    digestHash(signals({ backlog_pending: 1, brain_oldest: { ...OLD_NOTE, ageHours: 100 } })),
+  )
 })
 
 test("digestHash buckets staleness to whole hours (stable within an hour)", () => {
@@ -274,14 +290,23 @@ test("candidacy: turns-pending passes only with unconsumed turns (§17.3 drain g
   assert.equal(candidacyPasses(m, { ...CAND, unconsumedTurns: 3 }), true)
 })
 
+const OLD_NOTE = {
+  path: "AI/Old Reference.md",
+  title: "Old Reference",
+  updated: "2026-01-01",
+  ageHours: 0,
+}
+
 test("candidacy: brain-stale gates on the oldest reference note age", () => {
-  const note = (ageHours: number) => ({ path: "AI/Old.md", title: "Old", updated: "2026-08-01", ageHours })
   const m = mission({ candidacy: "brain-stale:720" })
-  assert.equal(candidacyPasses(m, CAND), false, "absent signal fails closed")
-  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: note(719) }), false)
-  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: note(720) }), true)
+  assert.equal(candidacyPasses(m, CAND), false, "no signal -> fail closed")
+  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: { ...OLD_NOTE, ageHours: 719 } }), false)
+  assert.equal(candidacyPasses(m, { ...CAND, brainOldest: { ...OLD_NOTE, ageHours: 720 } }), true)
   assert.equal(
-    candidacyPasses(mission({ candidacy: "brain-stale" }), { ...CAND, brainOldest: note(720) }),
+    candidacyPasses(mission({ candidacy: "brain-stale" }), {
+      ...CAND,
+      brainOldest: { ...OLD_NOTE, ageHours: 721 },
+    }),
     true,
     "bare brain-stale defaults to 30 days",
   )
@@ -362,6 +387,62 @@ test("soleDeterministicVerdict: one min-gap candidate dispatches without a JEV c
     null,
     "the stochastic idea-roll is not a time gate",
   )
+})
+
+test("deterministicDigestFallback: pending work wins over judgment candidates", () => {
+  const digest = digestFixture({
+    candidates: [
+      digestCandidate("judge", "digest", 10),
+      digestCandidate("drain", "turns-pending", 1),
+    ],
+  })
+  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "drain" })
+})
+
+test("deterministicDigestFallback: a backlog-pending candidate is pending work", () => {
+  const digest = digestFixture({
+    candidates: [
+      digestCandidate("judge", "digest", 10),
+      digestCandidate("queue", "backlog-pending", 1),
+    ],
+  })
+  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "queue" })
+})
+
+test("deterministicDigestFallback: highest weight among pending candidates wins", () => {
+  const digest = digestFixture({
+    candidates: [
+      digestCandidate("drain", "turns-pending", 1),
+      digestCandidate("queue", "backlog-pending", 2.5),
+      digestCandidate("judge", "digest", 99),
+    ],
+  })
+  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "queue" })
+})
+
+test("deterministicDigestFallback: equal weights break ties by id ascending", () => {
+  const digest = digestFixture({
+    candidates: [
+      digestCandidate("zeta", "turns-pending", 1),
+      digestCandidate("alpha", "backlog-pending", 1),
+    ],
+  })
+  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "alpha" })
+})
+
+test("deterministicDigestFallback: no pending-work candidate returns null", () => {
+  const digest = digestFixture({
+    candidates: [
+      digestCandidate("judge", "digest", 10),
+      digestCandidate("always", "always", 10),
+      digestCandidate("express", "min-gap:express", 10),
+      digestCandidate("roll", "roll:0.5", 10),
+      digestCandidate("dream", "dream-gate", 10),
+      digestCandidate("idea", "idea-roll", 10),
+    ],
+  })
+  assert.equal(deterministicDigestFallback(digest), null)
+  assert.equal(deterministicDigestFallback(digestFixture({ candidates: [] })), null)
 })
 
 // ---------------------------------------------------------------------------
@@ -726,6 +807,24 @@ test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (car
 // ---------------------------------------------------------------------------
 // JEV digest decision (card C) — typed verdict, request shape, brief assembly
 
+function digestCandidate(
+  id: string,
+  candidacy: DigestCandidate["candidacy"],
+  weight: number,
+): DigestCandidate {
+  return {
+    id,
+    title: id,
+    frequency: "mid",
+    min_level: 1,
+    menus: ["day"],
+    candidacy,
+    frequency_weight: weight,
+    mood_bias: 1,
+    weight,
+  }
+}
+
 function digestFixture(over: Partial<HeartbeatDigest> = {}): HeartbeatDigest {
   return {
     ts: "2026-10-13T12:00:00.000Z",
@@ -813,6 +912,17 @@ test("candidateWarrant: one line per candidacy predicate", () => {
     candidateWarrant({ ...base, candidacy }, sig)
   assert.equal(w("turns-pending"), "unconsumed_turns=930")
   assert.equal(w("backlog-pending"), "backlog_pending=2")
+  assert.equal(
+    candidateWarrant(
+      { ...base, candidacy: "brain-stale:720" },
+      signals({ brain_oldest: { ...OLD_NOTE, ageHours: 744 } }),
+    ),
+    "brain_stale=31d path=AI/Old Reference.md",
+  )
+  assert.equal(
+    candidateWarrant({ ...base, candidacy: "brain-stale" }, signals()),
+    "brain_stale=no-reference-notes",
+  )
   assert.equal(w("dream-gate"), "dream gate passed")
   assert.equal(w("idea-roll"), "idea quota open")
   assert.equal(w("min-gap:express"), "min-gap express due")

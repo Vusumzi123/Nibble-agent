@@ -1,6 +1,6 @@
 ---
 description: Tool-free session summarizer for the drain pipe. Turns one rendered session delta into strict-JSON durable knowledge items. Uses no tools.
-model: opencode/deepseek-v4.1-flash-free
+model: openrouter/qwen/qwen3.8-omni-flash
 mode: subagent
 color: "#8BC34A"
 permission:

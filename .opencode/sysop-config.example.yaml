@@ -75,6 +75,10 @@ decisions:
   enabled: true               # master on/off — gates only when true
   mode: gate                   # shadow | gate
   provider: rules              # rules | openjev
+  # Typed Clef: backend: clef (local Ollama /v1/systemone) or
+  # backend: clef-openrouter (hosted OpenRouter /api/alpha/decisions).
+  # backend: clef-openrouter
+  # model: openrouter/cloudflare/clef
   temperature_scaling: 1.00    # identity for clef; must stay 1.0 for self-reported tiers
   abstain_threshold: 0.45
   noul_threshold: 0.80         # gates skip only when model p >= this

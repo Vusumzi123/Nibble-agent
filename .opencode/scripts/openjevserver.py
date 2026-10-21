@@ -8,7 +8,12 @@ Two transports are available for the same per-decision candidate log-probs:
 * any **OpenAI-compatible hosted provider** the user already configured in
   opencode — the endpoint + credential are resolved from opencode's own
   ``models.json`` / ``auth.json`` from an opencode ``<provider>/<model>`` spec
-  (see :func:`resolve_opencode_provider`).
+  (see :func:`resolve_opencode_provider`), and
+
+* a **Clef typed-decision API** — either the local Ollama
+  ``/v1/systemone`` (``backend: clef``) or OpenRouter's hosted
+  ``/api/alpha/decisions`` (``backend: clef-openrouter``); both take
+  ``{model, state, questions}`` and return native per-option probabilities.
 
 The llama.cpp path implements the three Jev decision primitives
 (choice / noul / score) on top of llama.cpp's *native* ``POST /completion``
@@ -55,7 +60,7 @@ DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "mode": "shadow",              # shadow | gate
     "provider": "openjev",         # openjev | rules
-    "backend": "",                 # "" = auto opencode provider; "llamacpp" = local
+    "backend": "",                 # "" = auto opencode provider; clef-openrouter = hosted typed API
     "transport": "chat",           # chat | completion (see LlamaCppBackend)
     "think": False,                # backend: ollama — allow thinking (first-token logprobs need think: false)
     "base_url": "",                # override: pin an endpoint (no /v1 suffix)
@@ -84,6 +89,25 @@ DEFAULT_LLAMACPP_URL = "http://127.0.0.1:8090"
 # Ollama endpoint used by `backend: ollama` (native /api/chat logprobs) and
 # `backend: clef` (native /v1/systemone decision API).
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+
+# OpenRouter hosts Clef's typed decision API under /api, not the /api/v1 chat
+# root. The endpoint takes the same body as Ollama's /v1/systemone.
+DEFAULT_OPENROUTER_API = "https://openrouter.ai/api"
+DEFAULT_OPENROUTER_DECISIONS_PATH = "/alpha/decisions"
+DEFAULT_OPENROUTER_CLEF_MODEL = "cloudflare/clef"
+
+
+def _openrouter_api_root(base_url: str) -> str:
+    """Normalize an OpenRouter base to the ``/api`` root used by decisions.
+
+    The catalog advertises ``https://openrouter.ai/api/v1``; the typed endpoint
+    lives at ``/api/alpha/decisions``. A caller-supplied ``base_url`` may be
+    either form (or omit the suffix entirely).
+    """
+    base = (base_url or DEFAULT_OPENROUTER_API).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base or DEFAULT_OPENROUTER_API
 
 # Default noul criteria for the System One (clef) backend: the two descriptions
 # are what the TRUE / FALSE sides mean for an assertion-style question. Matches
@@ -585,7 +609,13 @@ class OllamaChatBackend:
 
 
 class SystemOneBackend:
-    """Ollama System One decision API (`/v1/systemone`) backed by a Clef model.
+    """Clef typed-decision API backed by a model.
+
+    Serves both transports of the same contract:
+
+    - ``backend: clef`` -> Ollama's local ``/v1/systemone``;
+    - ``backend: clef-openrouter`` -> OpenRouter's hosted
+      ``/api/alpha/decisions`` (Bearer auth).
 
     Unlike the logprobs tiers, every answer arrives as a probability vector, so
     `decide_*` keeps its aggregation math while skipping prompt construction:
@@ -595,17 +625,23 @@ class SystemOneBackend:
     supports_systemone = True
     supports_logprobs = False
 
-    def __init__(self, base_url: str, model: str, timeout_ms: int = 30000):
+    def __init__(self, base_url: str, model: str, timeout_ms: int = 30000,
+                 *, path: str = "/v1/systemone", api_key: str = ""):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.path = path if path.startswith("/") else "/" + path
+        self.api_key = api_key.strip()
         self.timeout = max(1.0, float(timeout_ms) / 1000.0)
 
     def _score(self, questions: dict[str, Any], state: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         body = {"model": self.model, "state": _as_text(state) if not isinstance(state, (dict, list)) else state,
                 "questions": questions}
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer " + self.api_key
         req = urllib.request.Request(
-            self.base_url + "/v1/systemone", data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST")
+            self.base_url + self.path, data=json.dumps(body).encode("utf-8"),
+            headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             out = json.loads(resp.read().decode("utf-8"))
         answers = out.get("answers") or {}
@@ -656,6 +692,12 @@ class SystemOneBackend:
         raise RuntimeError("SystemOneBackend answers through decide_*, not _probe")
 
     def health(self) -> dict[str, Any]:
+        if self.api_key:
+            # Liveness only: the credential and endpoint are exercised by the
+            # first decide_* call, and safe_dispatch fail-opens to rules.
+            return {"status": "ok", "backend": "clef-openrouter",
+                    "model": self.model, "base_url": self.base_url,
+                    "capability": "systemone"}
         ok, detail = _ollama_model_present(self.base_url, self.model, self.timeout)
         return {"status": "ok" if ok else "unreachable", "backend": "clef",
                 "model": self.model, "base_url": self.base_url,
@@ -718,6 +760,8 @@ def make_backend(cfg: dict[str, Any]) -> Any:
       (a small local chat model; ``model`` is the Ollama tag, e.g. qwen2.5:3b).
     - ``backend: clef`` -> Ollama's System One decision API (/v1/systemone)
       backed by a local Clef decision model (``model`` = Ollama tag).
+    - ``backend: clef-openrouter`` -> OpenRouter's hosted Clef decisions API
+      (/api/alpha/decisions), same typed contract, no local model/VRAM.
     - otherwise resolve an opencode provider (endpoint + credential) and build an
       ``OpenAICompatBackend``.
     - on resolution failure: a set ``base_url`` falls back to the llama.cpp path,
@@ -741,6 +785,22 @@ def make_backend(cfg: dict[str, Any]) -> Any:
         cfg["backend"] = "clef"
         return SystemOneBackend(base_url or DEFAULT_OLLAMA_URL, model,
                                 timeout_ms=cfg.get("timeout_ms", 30000))
+    if backend in ("clef-openrouter", "clef-remote", "openrouter-decisions"):
+        model = str(cfg.get("model") or DEFAULT_OPENROUTER_CLEF_MODEL).strip()
+        if model.startswith("openrouter/"):
+            model = model[len("openrouter/"):]
+        provider_id = str(cfg.get("api_provider") or "openrouter").strip()
+        try:
+            api_key = resolve_api_key(cfg, provider_id)
+            base = base_url or resolve_base_url(cfg, provider_id)
+        except ProviderResolveError as exc:
+            return UnavailableBackend(str(exc))
+        cfg["backend"] = "clef-openrouter"
+        cfg["model"] = model
+        return SystemOneBackend(
+            _openrouter_api_root(base), model,
+            timeout_ms=cfg.get("timeout_ms", 30000),
+            path=DEFAULT_OPENROUTER_DECISIONS_PATH, api_key=api_key)
     try:
         resolved = resolve_opencode_provider(cfg)
     except ProviderResolveError as exc:
@@ -1254,7 +1314,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"sysop-config.yaml to read the decisions: block from (default: {DEFAULT_CONFIG})")
     p.add_argument("--base-url", help="endpoint override (llama.cpp or OpenAI-compatible)")
     p.add_argument("--model", help="opencode spec <provider>/<model> (overrides config)")
-    p.add_argument("--backend", help='"" = auto opencode provider; "llamacpp" = local')
+    p.add_argument("--backend",
+                   help='"" = auto opencode provider; "llamacpp" = local; '
+                        '"clef" = local typed; "clef-openrouter" = hosted typed')
     p.add_argument("--api-provider", help="provider id when the model has no <provider>/ prefix")
     p.add_argument("--api-key-file", help="path to a chmod-600 API key file (overrides provider)")
     p.add_argument("--auth-file", help="override path to opencode auth.json")

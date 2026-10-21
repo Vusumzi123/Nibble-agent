@@ -225,7 +225,7 @@ Fail-open / fail-closed semantics are per-hook — see the `retrieval:` block.
 | `provider` | Notes |
 | ---------- | ----- |
 | `rules` (default in the template) | deterministic TypeScript heuristics, no external process, works out of the box. |
-| `openjev` | model-backed. Pick a model from `opencode models`; endpoint and API key are resolved from opencode's own `models.json` / `auth.json`, so no `base_url` / `api_key_file` is needed. `setup.sh` prompts for the model. |
+| `openjev` | model-backed. Pick a model from `opencode models`; endpoint and API key are resolved from opencode's own `models.json` / `auth.json`, so no `base_url` / `api_key_file` is needed. `setup.sh` prompts for the model. For the typed Clef path use `backend: clef-openrouter` — Clef is rejected on OpenRouter's chat/completions endpoint. |
 
 ### Optional keys (not set by default)
 
@@ -235,7 +235,7 @@ is the prefix before the first `/` in `model`.
 | Key | Meaning |
 | --- | ------- |
 | `api_provider` | provider id when `model` has no `<provider>/` prefix. |
-| `backend` | `llamacpp` forces the local llama.cpp backend; `ollama` uses Ollama native `/api/chat` first-token logprobs; `clef` uses Ollama's System One decision API (`/v1/systemone`) with a Clef decision model. |
+| `backend` | `llamacpp` forces the local llama.cpp backend; `ollama` uses Ollama native `/api/chat` first-token logprobs; `clef` uses Ollama's System One decision API (`/v1/systemone`) with a local Clef model; `clef-openrouter` uses OpenRouter's hosted typed decisions API (`/api/alpha/decisions`). |
 | `base_url` | pin an endpoint (no `/v1` suffix). Default `http://127.0.0.1:11434` for Ollama. |
 | `transport` | `chat` \| `completion` (llama.cpp only). |
 | `api_key_file` | chmod-600 key file instead of opencode `auth.json`. |
@@ -251,6 +251,26 @@ is the prefix before the first `/` in `model`.
 - `backend: clef` — Ollama's System One decision API with a Clef decision model
   (`setup.sh` creates the lean `clef-flash-2k` variant). Answers arrive as
   native per-option probabilities — the calibrated choice, ~0.2–0.6 s local.
+
+**Hosted Clef** (`backend: clef-openrouter`; `setup.sh` option 5):
+
+OpenRouter exposes Clef through `POST /api/alpha/decisions`, which accepts the
+same `{model, state, questions}` body as `/v1/systemone` and returns the same
+per-option probabilities. The endpoint and key resolve from opencode's
+`openrouter` credential (override with `api_provider`); no `base_url` is needed
+and no local model or VRAM is used.
+
+```yaml
+decisions:
+  provider: openjev
+  backend: clef-openrouter
+  model: openrouter/cloudflare/clef        # or cloudflare/clef-flash
+```
+
+`model` may carry the `openrouter/` prefix or be the bare slug. `/api/alpha` is
+experimental: keep `fallback: rules` and retain the local `backend: clef` path
+as the offline fallback. Latency is ~0.4–0.5 s from the ZMG link; cost is
+~$0.00004–0.00007 per gate-size decision.
 
 ### Tuning keys
 

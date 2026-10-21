@@ -1,6 +1,6 @@
 ---
 description: Read-only retrieval from the Brain Obsidian vault (./Brain/) via the markdown-vault MCP. Invoke for ALL vault reads — Brain-First relevance searches, user knowledge questions, watchlist lookups. Never writes; rag-brain owns all storage.
-model: opencode/deepseek-v4.1-flash-free
+model: deepseek/deepseek-flash
 mode: subagent
 color: "#FFD700"
 ---

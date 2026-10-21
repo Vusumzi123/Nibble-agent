@@ -253,21 +253,36 @@ test("a valid value after a fix stops generating rejects", async () => {
 // Live config + invariants
 
 test("readAutonomyConfig overlays the real sysop-config.yaml on defaults", async () => {
-  const cfg = await readAutonomyConfig(PROJECT_ROOT, { onReject: () => assert.fail("live config rejects") })
-  assert.equal(cfg.level, 3)
-  assert.equal(cfg.heartbeat.frequency, "12h")
-  assert.equal(cfg.mission_token_budget, 32000)
-  assert.deepEqual(cfg.root_classes, [])
-  assert.equal(cfg.chatter.enabled, false)
-  assert.equal(cfg.quiet.window, "23:00-08:00")
+  let raw: string | null = null
+  try {
+    raw = await readFile(join(PROJECT_ROOT, ".opencode", "sysop-config.yaml"), "utf8")
+  } catch {
+    raw = null
+  }
+  const events: string[] = []
+  const cfg = await readAutonomyConfig(PROJECT_ROOT, { onReject: (e) => events.push(e.path) })
+  assert.deepEqual(events, [], "the live config must parse without rejects")
 
-  const comms = await readCommsConfig(PROJECT_ROOT, { onReject: () => assert.fail("live config rejects") })
-  assert.equal(comms.default_channel, "telegram")
-  assert.equal(comms.email.account, "kaelsysop")
+  if (raw === null) {
+    // Repo checkout without a generated sysop-config.yaml: pure defaults.
+    assert.equal(cfg.level, DEFAULT_AUTONOMY.level)
+  } else {
+    // Live instance: the overlay must agree with the file it came from.
+    const fileLevel = Number(/^ {2}level: (\d+)/m.exec(raw)?.[1] ?? NaN)
+    assert.equal(cfg.level, fileLevel)
+    assert.ok(cfg.level >= 0 && cfg.level <= 4)
+    assert.ok(cfg.mission_token_budget === "unlimited" || Number.isFinite(cfg.mission_token_budget))
+    assert.ok(typeof cfg.heartbeat.frequency === "string" || cfg.heartbeat.frequency === null)
+    assert.ok(/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(cfg.quiet.window), cfg.quiet.window)
 
-  const dash = await readDashboardConfig(PROJECT_ROOT, { onReject: () => assert.fail("live config rejects") })
-  assert.equal(dash.bind_address, "127.0.0.1")
-  assert.equal(dash.auth.mode, "off")
+    const comms = await readCommsConfig(PROJECT_ROOT, { onReject: (e) => events.push(e.path) })
+    assert.ok(typeof comms.default_channel === "string" && comms.default_channel.length > 0)
+
+    const dash = await readDashboardConfig(PROJECT_ROOT, { onReject: (e) => events.push(e.path) })
+    assert.equal(dash.bind_address, "127.0.0.1")
+    assert.ok([...AUTH_MODES].includes(dash.auth.mode))
+  }
+  assert.deepEqual(events, [])
 })
 
 test("defaults match the plan §11 / §17.11 tables", () => {

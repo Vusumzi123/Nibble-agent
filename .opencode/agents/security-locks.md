@@ -1,6 +1,6 @@
 ---
 description: Enforces all 7 security locks before any destructive OS operation. Invoke BEFORE any command that needs root, modifies system files, removes packages, stops services, or writes to protected paths. Returns APPROVED_DRY_RUN, APPROVED_LIVE, or DENIED with a reason.
-model: opencode/deepseek-v4.1-flash-free
+model: deepseek/deepseek-flash
 mode: subagent
 color: "#FF4444"
 permission:
