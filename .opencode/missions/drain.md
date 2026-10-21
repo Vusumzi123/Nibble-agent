@@ -7,7 +7,8 @@ min_level: 2
 approval: writes-follow-dial
 candidacy: turns-pending
 runner: drain-pipe
-on_decline: reroll
+lane: side
+on_decline: stop
 enabled: true
 ---
 

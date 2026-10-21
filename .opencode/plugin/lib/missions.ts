@@ -46,6 +46,12 @@ export const MISSION_APPROVALS = ["n/a", "per-item", "writes-follow-dial", "alwa
 export type MissionDeclinePolicy = "reroll" | "stop"
 export const MISSION_DECLINE_POLICIES = ["reroll", "stop"] as const
 
+/** Dispatch lane (docs/heartbeat-lanes.md): `primary` missions are chosen by
+ *  the JEV digest one per tick; `side` missions ride the status-fed lane
+ *  queue (strict FIFO, one per tick, never JEV-picked). */
+export type MissionLane = "primary" | "side"
+export const MISSION_LANES = ["primary", "side"] as const
+
 /** D-M8 named candidacy predicates (cards 6/G added `turns-pending` and
  *  `dream-gate` for the night pre-gate, plan §17.3; card 7a added `idea-roll`
  *  for the day-rollover draw, §17.10). */
@@ -80,6 +86,8 @@ export type Mission = {
   /** Same-tick reroll policy after mission_result says declined. */
   onDecline: MissionDeclinePolicy
   enabled: boolean
+  /** Dispatch lane: `primary` (JEV-picked) or `side` (status queue). */
+  lane: MissionLane
   /** Workflow prose after the frontmatter — the mission brief body. */
   body: string
 }
@@ -98,6 +106,7 @@ export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
   runner: "",
   onDecline: "stop",
   enabled: true,
+  lane: "primary",
 }
 
 const FREQUENCY_RANK: Record<string, number> = { high: 2, mid: 1, low: 0 }
@@ -175,6 +184,10 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
       if (v === "false") return false
       return undefined
     }
+    case "lane": {
+      const v = stripPairQuotes(raw)
+      return (MISSION_LANES as readonly string[]).includes(v) ? v : undefined
+    }
     default:
       return undefined
   }
@@ -192,6 +205,7 @@ const MISSION_KEYS = new Set([
   "runner",
   "on_decline",
   "enabled",
+  "lane",
 ])
 
 /**
@@ -247,6 +261,7 @@ export function parseMissionFile(
     runner: typeof parsed.runner === "string" ? parsed.runner : DEFAULT_MISSION.runner,
     onDecline: (parsed.on_decline as MissionDeclinePolicy) ?? DEFAULT_MISSION.onDecline,
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_MISSION.enabled,
+    lane: (parsed.lane as MissionLane) ?? DEFAULT_MISSION.lane,
     body: body.trim(),
   }
   return { mission, issues }

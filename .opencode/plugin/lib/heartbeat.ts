@@ -3,7 +3,8 @@
 //
 // Everything here is zero-LLM and fail-open: counts and ages read from files
 // the other libs already own (backlog.ndjson, memory.json, audit.log,
-// profile-note mtimes), the quiet-window predicate, the candidate-list build
+// profile-note mtimes, reference-note `updated:` dates), the quiet-window
+// predicate, the candidate-list build
 // (enabled ∧ menus.contains(now) ∧ level ≥ min_level ∧ D-M8 candidacy), the
 // bounded frequency × mood bias, and a stable `digest_hash` over the signal
 // set (B7 groundwork — repeated identical digests drive adaptive backoff).
@@ -38,9 +39,9 @@ import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { readProfileConfig, resolveProfileFile } from "./profile.ts"
 import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
+import { errText, nowIso } from "./util.ts"
 import { DEFAULT_BRAIN_STALE_HOURS, oldestReferenceNote, type BrainNoteAge } from "./vault-stale.ts"
 import { parseReadonlyDirs, readVaultPolicy } from "./vault-policy.ts"
-import { errText, nowIso } from "./util.ts"
 
 // ---------------------------------------------------------------------------
 // Quiet-window predicate (plan §17.1 — "one window concept, three consumers";
@@ -280,6 +281,9 @@ export function buildCandidates(missions: Mission[], ctx: CandidateCtx): DigestC
   const moodBias = moodDispatchBias(ctx.mood, ctx.dispatchInfluence)
   const out: DigestCandidate[] = []
   for (const m of missions) {
+    // Side-lane missions never reach the JEV digest (docs/heartbeat-lanes.md):
+    // they ride the status-fed side queue instead.
+    if (m.lane === "side") continue
     if (!m.enabled) continue
     if (!m.menus.includes(window)) continue
     if (ctx.level < m.min_level) continue
@@ -367,9 +371,10 @@ export type ComputeDigestOpts = {
 /**
  * Missions that must not be offered on two consecutive ticks. Staleness can
  * leave the same note looking stale after a refresh attempt (unverifiable
- * facts, or a new oldest note), so re-offering it every tick loops.
+ * facts, or a new oldest note), so re-offering it every tick loops. The lane
+ * producers apply the same suppression to side-lane collection.
  */
-const NO_REPEAT_MISSION_IDS = new Set(["staleness"])
+export const NO_REPEAT_MISSION_IDS = new Set(["staleness"])
 
 /** Last mission dispatched by the heartbeat hook (`heartbeat.json`). */
 async function readLastMission(stateDir: string): Promise<string | null> {
@@ -456,12 +461,13 @@ export async function computeDigest(
     nowMs,
   )
 
-  const quiet = isQuietNow(autonomy.quiet.window, now)
   const vaultPolicy = await readVaultPolicy(directory)
   const brainOldest = await oldestReferenceNote(vaultDir, {
     nowMs,
     excludeDirs: parseReadonlyDirs(vaultPolicy.readonly),
   })
+
+  const quiet = isQuietNow(autonomy.quiet.window, now)
   const signals: HeartbeatSignals = {
     backlog_pending,
     unconsumed_turns,
@@ -580,6 +586,27 @@ export function soleDeterministicVerdict(candidates: readonly DigestCandidate[])
   return null
 }
 
+/** Pending-work fallback for a failed/abstained JEV digest: pending work is
+ *  warranted regardless of the model's confidence, so dispatch the
+ *  highest-weight candidate whose candidacy is `turns-pending` or
+ *  `backlog-pending`. Tie-break by weight descending, then id ascending.
+ *  Anything else (judgment, min-gap, roll, dream/idea gates) returns null so
+ *  the caller keeps its `no_reply`. */
+export function deterministicDigestFallback(digest: HeartbeatDigest): DigestVerdict | null {
+  let best: DigestCandidate | null = null
+  for (const c of digest.candidates) {
+    if (c.candidacy !== "turns-pending" && c.candidacy !== "backlog-pending") continue
+    if (
+      !best ||
+      c.weight > best.weight ||
+      (c.weight === best.weight && c.id < best.id)
+    ) {
+      best = c
+    }
+  }
+  return best ? { kind: "mission", id: best.id } : null
+}
+
 /** Core plugin files whose on-disk mtime must not postdate the running
  *  process: when they do, this instance loaded stale code and must not run
  *  the heartbeat scheduler (a pre-warrant instance silently answered
@@ -590,6 +617,8 @@ export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/lib/missions.ts",
   ".opencode/plugin/lib/mission-result.ts",
   ".opencode/plugin/lib/vault-stale.ts",
+  ".opencode/plugin/lib/lanes/queue.ts",
+  ".opencode/plugin/lib/lanes/producers.ts",
   ".opencode/plugin/lib/drain/status.ts",
   ".opencode/plugin/lib/drain/tool.ts",
 ]
@@ -939,6 +968,10 @@ export type HeartbeatCurrent = {
   mission_title: string | null
   /** Child session id the mission runs in, or null. */
   session: string | null
+  /** Side-lane mission running concurrently (docs/heartbeat-lanes.md), or null. */
+  side_mission?: string | null
+  side_mission_title?: string | null
+  side_session?: string | null
   /** ISO timestamp the tick transitioned to in-flight; null when idle. */
   started_at: string | null
   /** ISO timestamp of the last marker write. */
@@ -955,6 +988,9 @@ export function idleHeartbeatCurrent(now: string = nowIso()): HeartbeatCurrent {
     mission: null,
     mission_title: null,
     session: null,
+    side_mission: null,
+    side_mission_title: null,
+    side_session: null,
     started_at: null,
     updated_at: now,
     level: null,
@@ -1044,7 +1080,7 @@ export async function readHeartbeatConfig(directory: string): Promise<HeartbeatC
 // a failing tick records WHERE it failed and the full error, so the ledger is
 // a troubleshooting surface, not just an outcome counter.
 
-export const HEARTBEAT_PHASES = ["pre-gate", "digest", "dispatch", "mission", "post"] as const
+export const HEARTBEAT_PHASES = ["pre-gate", "queues", "digest", "dispatch", "mission", "post"] as const
 export type HeartbeatPhase = (typeof HEARTBEAT_PHASES)[number]
 
 export type HeartbeatError = {

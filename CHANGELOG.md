@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-10-20
+
+### Added
+
+- **Heartbeat lane queues** — a tick now drains a persistent work queue
+  (`state/lanes.json`) instead of running exactly one mission. The
+  `tick` producer feeds the **primary** lane (JEV picks one per tick; items
+  survive a `no_reply` until a 24 h expiry); status producers feed the
+  **side** lane (`turns-pending` → drain, `brain-stale` → staleness): strict
+  FIFO, exactly one side item per tick, never offered to the JEV, no expiry.
+  Side and primary run in the same tick (side first, so the lanes never race
+  on vault writes). Empty queues make a silent no-action tick with zero LLM
+  calls — the JEV is also skipped outright on an empty candidate list. A
+  timed-out run re-enqueues at the queue tail with the reason recorded
+  (max 3 requeues); error/declined drop. New frontmatter key `lane:
+  primary|side` (drain and staleness ship as `side`); ledger gains `runs[]`,
+  `side_*`, and `queues`; `heartbeat.current.json` gains the side marker
+  fields. Producer registry in `lib/lanes/producers.ts` is the extension seam
+  for future sources (telegram, email, calendar) — see
+  `docs/heartbeat-lanes.md` for the architecture and the how-to.
+- **Hosted Clef decision backend** — `backend: clef-openrouter` in
+  `openjevserver.py` targets OpenRouter's typed `POST /api/alpha/decisions`
+  (same `{model, state, questions}` contract as Ollama's `/v1/systemone`).
+  `model: openrouter/cloudflare/clef`; endpoint and key resolve from the
+  `openrouter` credential, so the gate keeps calibrated per-option
+  probabilities with no local VRAM. `setup.sh` option 5 configures it; docs
+  updated.
+
+### Changed
+
+- **Repo reconciled with the deployed harness state** — brain-stale candidacy,
+  vault-stale scan, drain-failure tool outcomes, and the deterministic digest
+  fallback now live in the repo (they had only existed on the instances), and
+  the deployed subagent model pins are recorded in the writer-contract tests
+  (`deepseek-flash`; `qwen3.8-omni-flash` for the tool-free
+  session-summarizer/self-writer).
+- **Decision backend switching clears stale keys** — `setup.sh` now removes a
+  previous `backend`/`base_url` when switching to a plain openjev model, and
+  removes `base_url` when selecting `clef-openrouter`.
+
 ## 2026-10-19
 
 ### Added
@@ -11,6 +51,11 @@
 
 ### Changed
 
+- **Staleness gated on note age** — new `brain-stale` candidacy scans
+  `type: reference` notes by their `updated:` frontmatter (not file mtime).
+  `staleness` now runs only when the oldest reference note is ≥30 days old
+  (`brain-stale:720`); the brief names the note to refresh. Drain was already
+  gated by `turns-pending` plus the `drain_run` in-sync pre-check.
 - **Subagents pinned to the free model `opencode/deepseek-v4.1-flash-free`** — every project agent with
   `mode: subagent` declares the model, and the built-in `explore`/`general`
   subagents are overridden in `opencode.json`. The primary `chat` agent keeps

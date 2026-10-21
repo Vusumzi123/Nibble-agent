@@ -52,6 +52,109 @@ async function writeMission(dir: string): Promise<void> {
   )
 }
 
+async function writeMissionWithCandidacy(
+  dir: string,
+  id: string,
+  title: string,
+  candidacy: string,
+): Promise<void> {
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", `${id}.md`),
+    [
+      "---",
+      `id: ${id}`,
+      `title: ${title}`,
+      "frequency: high",
+      "menus: [day, night]",
+      "min_level: 2",
+      'agent: ""',
+      `candidacy: ${candidacy}`,
+      "enabled: true",
+      "---",
+      "",
+      "Do the mission thing.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+}
+
+// Seed the default opencode DB (under the test HOME) with one unconsumed turn
+// owned by `dir`, so `computeDigest` reports turns-pending.
+async function seedTurns(dir: string, tag: string): Promise<void> {
+  const dataDir = join(TEST_HOME, ".local", "share", "opencode")
+  await mkdir(dataDir, { recursive: true })
+  const db = new DatabaseSync(join(dataDir, "opencode.db"))
+  const now = Date.now()
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+  `)
+  const sid = `s_${tag}`
+  const mid = `m_${tag}`
+  db.prepare("INSERT OR REPLACE INTO session (id, parent_id, directory, time_updated, title) VALUES (?, ?, ?, ?, ?)").run(
+    sid,
+    null,
+    dir,
+    now,
+    "s",
+  )
+  db.prepare("INSERT OR REPLACE INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+    mid,
+    sid,
+    now - 60_000,
+    JSON.stringify({ role: "user" }),
+  )
+  db.prepare("INSERT OR REPLACE INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+    `${mid}-p`,
+    mid,
+    JSON.stringify({ type: "text", text: "pending turn" }),
+  )
+  db.close()
+}
+
+async function writePendingBacklog(dir: string): Promise<void> {
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+  const now = new Date().toISOString()
+  await writeFile(
+    join(dir, ".opencode", "state", "backlog.ndjson"),
+    JSON.stringify({
+      id: "bl-1",
+      created: now,
+      updated: now,
+      source: "conversation",
+      kind: "task",
+      payload: { title: "t", detail: "", commands: [], files: [] },
+      level_required: 2,
+      priority: 0,
+      status: "pending",
+      channel_notified: null,
+      awaiting_reply: false,
+      jev_decision: null,
+      result: null,
+      view_ref: null,
+      links: [],
+    }) + "\n",
+    "utf8",
+  )
+}
+
+const abstainingSpawner = async () => ({
+  code: 0,
+  stdout: JSON.stringify({
+    kind: "choice",
+    value: null,
+    confidence: 0,
+    abstained: true,
+    provider: "openjev",
+    backend: "test",
+    latencyMs: 1,
+  }),
+  stderr: "",
+})
+
 async function readTickLog(dir: string): Promise<any[]> {
   try {
     const raw = await readFile(join(dir, ".opencode", "logs", "heartbeat.log"), "utf8")
@@ -860,9 +963,10 @@ test("mission failure: outcome error feeds mission_failure and records a failed 
 })
 
 // A tick whose gap since the previous tick is ≥ long_silence_factor ×
-// frequency feeds `long_silence` through the shared feed; with decisions
-// disabled the verdict is no_reply and `reason` says why (no silent guessing).
-test("long_silence: a 36h gap feeds the mood event; decisions-disabled no_reply is labelled", async () => {
+// frequency feeds `long_silence` through the shared feed; with an empty lane
+// queue the tick is a silent no-action tick (`gate: "queues"`) and creates no
+// session — the queue emptiness is decided before any JEV call.
+test("long_silence: a 36h gap feeds the mood event; an empty queue ticks silently", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
   const stateDir = join(dir, ".opencode", "state")
   await mkdir(stateDir, { recursive: true })
@@ -882,12 +986,41 @@ test("long_silence: a 36h gap feeds the mood event; decisions-disabled no_reply 
   assert.equal(t.mood_event, "long_silence")
   assert.equal(t.verdict, "no_reply")
   assert.equal(t.outcome, "silent")
-  assert.equal(t.reason, "decisions-disabled")
-  assert.equal(t.gate, "digest")
+  assert.equal(t.reason, "empty")
+  assert.equal(t.gate, "queues")
 
   // The shared feed persisted the arousal dip (0.3 → 0.2).
   const mood = await readMood(dir)
   assert.ok((mood.arousal ?? 1) < 0.3)
+  assert.equal(client.calls.create, 0)
+})
+
+// With work queued but the decision gate off, the no_reply must still be
+// labelled with WHY (no silent guessing) — and never create a session.
+test("decisions-disabled no_reply with queued work is labelled", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  await writeMission(dir)
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(
+    join(stateDir, "heartbeat.json"),
+    JSON.stringify({ last_tick: Date.now() - 13 * HOUR, ticks: 0 }),
+    "utf8",
+  )
+
+  const client = mockClient()
+  await createHook({ client, directory: dir } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const [t] = await readTickLog(dir)
+  assert.equal(t.verdict, "no_reply")
+  assert.equal(t.outcome, "silent")
+  assert.equal(t.reason, "decisions-disabled")
+  assert.equal(t.gate, "digest")
+  // The queued primary item survives the JEV's silence (expiry owns its end).
+  const lanes = JSON.parse(await readFile(join(stateDir, "lanes.json"), "utf8"))
+  assert.equal(lanes.primary.length, 1)
+  assert.equal(lanes.primary[0].id, "mission:drain")
   assert.equal(client.calls.create, 0)
 })
 
@@ -961,4 +1094,308 @@ test("B7 backoff: identical-digest no_reply streaks stretch the cadence; a missi
   assert.equal(state.noop_hash, null)
   assert.equal((state as any).last_mission, "drain", "the dispatched mission is recorded")
   assert.equal(client.calls.create, 1, "exactly one mission child across the whole test")
+})
+
+// A provider abstain is a fallback, not a verdict: pending work must still
+// dispatch. The ledger names the fallback so the decision is attributable.
+test("digest fallback: abstain with pending turns dispatches the mission (abstain:pending-work)", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await writeMissionWithCandidacy(dir, "drain", "Drain", "turns-pending")
+  await seedTurns(dir, "abstain-pending")
+
+  const client = missionClient()
+  const hooks = await createHook({ client, directory: dir, spawner: abstainingSpawner } as any)
+
+  await waitFor(() => client.calls.prompts.length > 0)
+  assert.equal(client.calls.create, 1, "pending work dispatches despite the abstain")
+
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.verdict, "mission:drain")
+  assert.equal(tick.mission, "drain")
+  assert.equal(tick.gate, "digest")
+  assert.equal(tick.reason, "abstain:pending-work")
+})
+
+// No pending-work candidate: the fallback stays out of the way and the tick
+// ends silent exactly as before.
+test("digest fallback: abstain with only judgment candidates stays no_reply", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await writeMission(dir) // candidacy defaults to digest (judgment)
+  await writePendingBacklog(dir) // keeps all-quiet from short-circuiting
+
+  const client = missionClient()
+  await createHook({ client, directory: dir, spawner: abstainingSpawner } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.verdict, "no_reply")
+  assert.equal(tick.mission, null)
+  assert.equal(tick.reason, "abstain")
+  assert.equal(client.calls.create, 0, "no mission was invented")
+})
+
+// A confident model no_reply is not a fallback: it must never be overridden
+// by pending-work candidacy.
+test("digest fallback: confident no_reply still ends no_reply despite pending turns", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+  ])
+  await writeMissionWithCandidacy(dir, "drain", "Drain", "turns-pending")
+  await seedTurns(dir, "confident-no-reply")
+
+  const confident = async () => ({
+    code: 0,
+    stdout: JSON.stringify({
+      kind: "choice",
+      value: "no_reply",
+      confidence: 0.9,
+      abstained: false,
+      provider: "openjev",
+      backend: "test",
+      latencyMs: 1,
+    }),
+    stderr: "",
+  })
+
+  const client = missionClient()
+  await createHook({ client, directory: dir, spawner: confident } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.verdict, "no_reply")
+  assert.equal(tick.mission, null)
+  assert.equal(tick.reason, "jev-no-reply")
+  assert.equal(client.calls.create, 0, "confident silence is respected")
+})
+
+// ---------------------------------------------------------------------------
+// Lane queues (docs/heartbeat-lanes.md): the side lane runs status-fed
+// maintenance next to the JEV-picked primary, in the SAME tick.
+
+// A client with distinct session ids per child so two children in one tick
+// can idle independently (missionClient's fixed id would collide).
+function laneClient() {
+  const calls = { create: 0, creates: [] as any[], prompts: [] as any[], ids: [] as string[] }
+  return {
+    calls,
+    session: {
+      get: async () => ({ data: {} }),
+      create: async (args: any) => {
+        calls.create++
+        calls.creates.push(args)
+        const id = `ses_lane_${calls.create}`
+        calls.ids.push(id)
+        return { data: { id } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 20 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "completed", summary: "done" } },
+              },
+              { type: "text", text: "done" },
+            ],
+          },
+        ],
+      }),
+    },
+  }
+}
+
+function writeLaneMission(
+  dir: string,
+  id: string,
+  opts: { lane: string; candidacy: string; menus?: string },
+): Promise<void> {
+  return mkdir(join(dir, ".opencode", "missions"), { recursive: true }).then(() =>
+    writeFile(
+      join(dir, ".opencode", "missions", `${id}.md`),
+      [
+        "---",
+        `id: ${id}`,
+        `title: ${id}`,
+        "frequency: high",
+        `menus: ${opts.menus ?? "[day, night]"}`,
+        "min_level: 2",
+        'agent: ""',
+        `candidacy: ${opts.candidacy}`,
+        `lane: ${opts.lane}`,
+        "enabled: true",
+        "---",
+        "",
+        `Do the ${id} thing.`,
+        "",
+      ].join("\n"),
+      "utf8",
+    ),
+  )
+}
+
+test("side lane and primary both run in one tick", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await writeLaneMission(dir, "research", { lane: "primary", candidacy: "digest" })
+  await seedTurns(dir, "lanes-together")
+
+  const client = laneClient()
+  const { spawner, calls: jevCalls } = sequenceSpawner(["mission:research"])
+  const hooks = await createHook({ client, directory: dir, spawner } as any)
+
+  // Side child runs first, to completion…
+  await waitFor(() => client.calls.prompts.length === 1)
+  assert.match(String(client.calls.prompts[0].body.parts[0].text), /Verdict: mission:drain/)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  // …then the JEV picks the primary and its child runs.
+  await waitFor(() => client.calls.prompts.length === 2)
+  assert.match(String(client.calls.prompts[1].body.parts[0].text), /Verdict: mission:research/)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[1] } } } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_mission, "drain")
+  assert.equal(tick.side_outcome, "completed")
+  assert.equal(tick.mission, "research")
+  assert.equal(tick.outcome, "completed")
+  assert.equal(tick.token_cost, 240, "both children accounted: 120 + 120")
+  assert.equal(tick.over_budget, false)
+  assert.equal(tick.runs.length, 2)
+  assert.deepEqual(tick.runs.map((r: any) => `${r.lane}:${r.mission}`).sort(), [
+    "primary:research",
+    "side:drain",
+  ])
+  assert.equal(tick.side_requeued, false)
+  assert.equal(jevCalls(), 1, "one JEV call for the primary pick")
+
+  // Both items left the queues (completed → drop).
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
+  assert.deepEqual(lanes, { primary: [], side: [] })
+})
+
+test("the side lane dequeues one item per tick; the rest wait", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+  ])
+  // Two status-fed side missions, no primary work at all.
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await writeLaneMission(dir, "drain2", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "lanes-fifo")
+
+  const client = laneClient()
+  let jevCalls = 0
+  const spawner = async () => {
+    jevCalls++
+    return {
+      code: 0,
+      stdout: JSON.stringify({ kind: "choice", value: "no_reply", confidence: 0.9, abstained: false, provider: "openjev", backend: "test", latencyMs: 1 }),
+      stderr: "",
+    }
+  }
+  const hooks = await createHook({ client, directory: dir, wakeCapMs: 25, spawner } as any)
+
+  // Tick 1: exactly one side child, and no JEV call (zero primary candidates).
+  await waitFor(() => client.calls.prompts.length === 1)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length >= 1)
+  const [t1] = await readTickLog(dir)
+  assert.ok(["drain", "drain2"].includes(t1.side_mission), `one side mission, got ${t1.side_mission}`)
+  assert.equal(t1.mission, null)
+  assert.equal(t1.reason, "no-candidates")
+  assert.equal(jevCalls, 0, "an empty primary lane never calls the JEV")
+
+  // Tick 2: the other side mission runs; FIFO order is by enqueue time.
+  // (Force the clock: the next tick is due one frequency after tick 1.)
+  {
+    const file = join(dir, ".opencode", "state", "heartbeat.json")
+    const cur = JSON.parse(await readFile(file, "utf8").catch(() => "{}"))
+    await writeFile(file, JSON.stringify({ ...cur, last_tick: Date.now() - 13 * HOUR }), "utf8")
+  }
+  await waitFor(() => client.calls.prompts.length === 2)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[1] } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length >= 2)
+  const [_, t2] = await readTickLog(dir)
+  assert.ok(["drain", "drain2"].includes(t2.side_mission))
+  assert.notEqual(t2.side_mission, t1.side_mission, "the second item waited its turn")
+  assert.deepEqual([t1.side_mission, t2.side_mission].sort(), ["drain", "drain2"])
+  assert.equal(client.calls.create, 2, "one side child per tick")
+})
+
+test("a timed-out side run is re-enqueued at the tail with the reason", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "lanes-timeout")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  // 50 ms child budget, and the test never sends session.idle → timeout.
+  await createHook({ client, directory: dir, spawner, tickTimeoutMs: 50 } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_mission, "drain")
+  assert.equal(tick.side_outcome, "timeout")
+  assert.equal(tick.side_requeued, true)
+  assert.equal(tick.runs.length, 1)
+  assert.equal(tick.runs[0].requeued, true)
+  assert.equal(tick.runs[0].lane, "side")
+
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
+  assert.equal(lanes.side.length, 1, "the item is back in the queue")
+  assert.equal(lanes.side[0].id, "mission:drain")
+  assert.equal(lanes.side[0].requeue_count, 1)
+  assert.equal(lanes.side[0].requeue_reason, "timeout")
+  assert.ok(lanes.side[0].payload.original_enqueued_ms < lanes.side[0].enqueued_ms, "tail = fresh timestamp")
 })

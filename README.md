@@ -70,12 +70,19 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 ## Missions
 
 Missions live in `.opencode/missions/*.md`: the frontmatter is configuration
-(id, frequency, menus, level, candidacy, enabled, agent, runner, on_decline)
-and the body is the child-session prompt. `runner` binds a tool to the child
-(drain uses `drain_run`); it never bypasses the agent. Every mission ends by
-calling `mission_result`; `on_decline: reroll` lets the orchestrator exclude
-the mission and pick another one once in the same tick. See
-[`docs/missions.md`](docs/missions.md) and
+(id, frequency, menus, level, candidacy, lane, enabled, agent, runner,
+on_decline) and the body is the child-session prompt. `runner` binds a tool to
+the child (drain uses `drain_run`); it never bypasses the agent. Every mission
+ends by calling `mission_result`; `on_decline: reroll` lets the orchestrator
+exclude the mission and pick another one once in the same tick.
+
+Work reaches missions through **lane queues** ([`docs/heartbeat-lanes.md`](docs/heartbeat-lanes.md)):
+a tick drains a persistent work queue instead of running one thing. `lane:
+primary` missions are picked by the JEV digest (one per tick); `lane: side`
+missions (drain, staleness) are status-fed, ride a strict-FIFO side queue, and
+run **alongside** the primary in the same tick — one side item per tick, no
+expiry. Empty queues make a tick a silent no-action tick with zero LLM calls.
+See [`docs/missions.md`](docs/missions.md) and
 [`docs/heartbeat-mission-architecture.md`](docs/heartbeat-mission-architecture.md).
 
 ## Modes
@@ -142,6 +149,12 @@ Ships fully deterministic out of the box; two features are opt-in:
   model from `opencode models`) in `.opencode/sysop-config.yaml` — the endpoint
   and API key are resolved from opencode's own credentials, so no separate
   `base_url`/`api_key_file` is needed. Requires `python3`.
+  For the typed Clef path set `decisions.backend: clef-openrouter` and
+  `decisions.model: openrouter/cloudflare/clef`: OpenRouter's
+  `/api/alpha/decisions` returns the same calibrated probabilities as the local
+  model without occupying VRAM (requires an OpenRouter credential).
+  `scripts/setup.sh` option 5 writes it; `backend: clef` keeps the local/offline
+  variant.
 - **Profile auto-writes** — `profile.writer_model` is empty by default, so the
   agent inherits the session model. Set it to a registered `provider/model` to
   pin the writer; a missing or failed model is a logged no-op and never blocks

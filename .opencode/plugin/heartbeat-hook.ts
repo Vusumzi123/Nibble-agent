@@ -24,6 +24,7 @@ import {
   buildDigestChoiceRequest,
   computeDigest,
   computeWakeDelayMs,
+  deterministicDigestFallback,
   digestVerdictFromResult,
   effectiveFrequencyMs,
   frequencyToMs,
@@ -65,6 +66,27 @@ import { sessionAccounting } from "./lib/transcript.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions, type Mission } from "./lib/missions.ts"
+import {
+  LANES_FILE,
+  type QueueItem,
+  dequeuePrimary,
+  dequeueSide,
+  enqueueItems,
+  loadQueues,
+  pruneQueues,
+  queueDepth,
+  queuesEmpty,
+  requeueTail,
+  saveQueues,
+} from "./lib/lanes/queue.ts"
+import {
+  type ProducerCtx,
+  collectItems,
+  itemRunnable,
+  itemStillDue,
+  missionIdOf,
+  missionItemId,
+} from "./lib/lanes/producers.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
@@ -229,6 +251,9 @@ export default (async ({ client, directory, ...rest }) => {
   // several due cycles (B7 backoff) without waiting out real minutes.
   // Production input never carries it.
   const wakeCapMs = (rest as { wakeCapMs?: number }).wakeCapMs ?? HEARTBEAT_WAKE_CAP_MS
+  // Test-injection seam: shrink the 15 min child budget so a timeout (and the
+  // lane-queue requeue path) is testable. Production input never carries it.
+  const tickTimeoutMs = (rest as { tickTimeoutMs?: number }).tickTimeoutMs ?? HEARTBEAT_TICK_TIMEOUT_MS
   // Test-injection seam: point the drain pipe at a fixture SQLite store
   // instead of the real opencode data dir. Production input never carries it.
   const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
@@ -245,7 +270,7 @@ export default (async ({ client, directory, ...rest }) => {
       const timer = setTimeout(() => {
         childIdleResolvers.delete(childID)
         resolve(false) // timed out — mission abandoned for this tick
-      }, HEARTBEAT_TICK_TIMEOUT_MS)
+      }, tickTimeoutMs)
       timer.unref?.()
       childIdleResolvers.set(childID, () => {
         clearTimeout(timer)
@@ -345,6 +370,8 @@ export default (async ({ client, directory, ...rest }) => {
     mission: Mission
     prompt: string
     agent: string
+    /** Which lane's marker fields this run patches (docs/heartbeat-lanes.md). */
+    slot?: "primary" | "side"
   }): Promise<ChildRun> => {
     let sessionId: string | null = null
     let outcome: ChildOutcome = "error"
@@ -353,6 +380,7 @@ export default (async ({ client, directory, ...rest }) => {
     let runError: ReturnType<typeof heartbeatErrorFields> | undefined
     let result: MissionResult | null = null
     let drainTool: DrainToolResult | null = null
+    const slot = args.slot ?? "primary"
 
     try {
       const created = await (client as any).session.create({
@@ -363,12 +391,21 @@ export default (async ({ client, directory, ...rest }) => {
       if (!childID) throw new Error("session.create returned no id")
       sessionId = childID
       automationChildSessions.add(childID)
-      await setCurrent({
-        phase: "mission",
-        mission: args.mission.id,
-        mission_title: args.mission.title,
-        session: childID,
-      })
+      await setCurrent(
+        slot === "side"
+          ? {
+              phase: "mission",
+              side_mission: args.mission.id,
+              side_mission_title: args.mission.title,
+              side_session: childID,
+            }
+          : {
+              phase: "mission",
+              mission: args.mission.id,
+              mission_title: args.mission.title,
+              session: childID,
+            },
+      )
 
       const idled = waitForChildIdle(childID)
       const res = await (client as any).session.promptAsync({
@@ -428,6 +465,11 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   const decideDigest = async (digest: HeartbeatDigest): Promise<Decided> => {
+    // No primary candidates: the verdict is decided already — never spend a
+    // JEV call on a choice list of one (`no_reply`).
+    if (digest.candidates.length === 0) {
+      return { verdict: { kind: "no_reply" }, reason: "no-candidates" }
+    }
     const sole = soleDeterministicVerdict(digest.candidates)
     if (sole) return { verdict: sole, reason: "sole-min-gap" }
 
@@ -439,16 +481,27 @@ export default (async ({ client, directory, ...rest }) => {
         buildDigestChoiceRequest(digest, prompts.digest.assertion),
         { fallback: "open" },
       )
-      const verdict = digestVerdictFromResult(
+      let verdict = digestVerdictFromResult(
         outcome.result,
         digest.candidates.map((c) => c.id),
       )
-      const reason =
+      let reason =
         outcome.reason !== "none"
           ? outcome.reason
           : verdict.kind === "no_reply"
             ? "jev-no-reply"
             : "none"
+      // A provider fallback (abstain/error/shape) that resolves to silence
+      // must not starve warranted work: dispatch the highest-weight
+      // pending-work candidate instead. Confident no_reply (no fallback) and
+      // usable mission verdicts are untouched.
+      if (outcome.fallback && verdict.kind === "no_reply") {
+        const pending = deterministicDigestFallback(digest)
+        if (pending) {
+          verdict = pending
+          reason = `${outcome.reason}:pending-work`
+        }
+      }
       return { verdict, reason }
     } catch (err) {
       void diag.error("[heartbeat-hook] digest decision failed:", err)
@@ -612,14 +665,25 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 7a. JEV digest decision. Fail-open to no_reply: decisions disabled,
-      // error, abstain, or unknown id all mean silence — never invent work.
-      phase = "digest"
+      // 6b. Lane queues (docs/heartbeat-lanes.md): producers collect work
+      // deterministically — zero LLM calls. The tick producer projects the
+      // digest's primary candidates; the status producers feed the side lane
+      // (drain on pending turns, staleness on an old reference note).
+      phase = "queues"
       await setCurrent({ phase })
-      let decided = await decideDigest(digest)
-      let verdict = decided.verdict
-      let reason = decided.reason
-      let digestError = decided.error
+      const allMissions = await loadMissions(dir).catch(() => [])
+      const producerCtx: ProducerCtx = {
+        nowMs,
+        level: digest.level,
+        quiet: digest.quiet,
+        signals: digest.signals,
+        missions: allMissions,
+        candidates: digest.candidates,
+        lastMission: state.last_mission,
+      }
+      let queues = enqueueItems(await loadQueues(join(stateDir, LANES_FILE)), collectItems(producerCtx))
+      queues = pruneQueues(queues, nowMs, (item) => itemStillDue(producerCtx, item)).queues
+      await saveQueues(join(stateDir, LANES_FILE), queues)
 
       const contextFor = (d: HeartbeatDigest): string =>
         missionContextHeader(
@@ -634,23 +698,83 @@ export default (async ({ client, directory, ...rest }) => {
           { tokenBudget: autonomy.mission_token_budget },
         )
 
+      // Both queues empty: nothing to do this tick — silent, zero LLM calls.
+      if (queuesEmpty(queues)) {
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: "silent",
+          token_cost: 0,
+          gate: "queues",
+          reason: "empty",
+          queues: queueDepth(queues),
+        })
+        await recordNoop(digest.digest_hash)
+        return "fired"
+      }
+
+      // 6c. Side lane: exactly one dequeue per tick, FIFO among runnable
+      // items (a menu-window-blocked item stays queued). The side child runs
+      // to completion BEFORE the primary lane starts, so the lanes never
+      // race on vault writes.
+      type LaneRun = { mission: Mission; run: ChildRun; item: QueueItem }
+      let sideRun: LaneRun | null = null
+      const sidePick = dequeueSide(queues, (item) => itemRunnable(producerCtx, item))
+      if (sidePick) {
+        queues = sidePick.rest
+        const sideMission = allMissions.find((m) => m.id === missionIdOf(sidePick.item))
+        const sideBrief = sideMission
+          ? assembleMissionBrief(
+              { kind: "mission", id: sideMission.id },
+              sideMission,
+              undefined,
+              contextFor(digest),
+            )
+          : null
+        if (sideMission && sideBrief) {
+          // Record the attempt before dispatch (same discipline as primary):
+          // the no-repeat suppression reads it back through `last_mission`.
+          await stateStore.update((s) => ({ ...s, last_mission: sideMission.id }))
+          phase = "dispatch"
+          await setCurrent({ phase })
+          const run = await runMissionChild({
+            mission: sideMission,
+            prompt: sideBrief.prompt,
+            agent: sideBrief.agent,
+            slot: "side",
+          })
+          sideRun = { mission: sideMission, run, item: sidePick.item }
+        }
+      }
+
+      // 7a. JEV digest decision. Fail-open to no_reply: decisions disabled,
+      // error, abstain, or unknown id all mean silence — never invent work.
+      phase = "digest"
+      await setCurrent({ phase })
+      let decided = await decideDigest(digest)
+      let verdict = decided.verdict
+      let reason = decided.reason
+      let digestError = decided.error
+
       // Every mission is a child session. `runner` is a tool binding; the
       // body names the tool. A null result means the verdict/mission pair
       // could not be assembled (no_reply or a mismatch).
       const selected = async (
         d: HeartbeatDigest,
         v: DigestVerdict,
-      ): Promise<{ mission: Mission; run: ChildRun } | null> => {
+      ): Promise<{ mission: Mission; run: ChildRun; item: QueueItem | null } | null> => {
         const id = v.kind === "mission" ? v.id : null
         if (!id) return null
-        const all = await loadMissions(dir).catch(() => [])
-        const mission = all.find((m) => m.id === id)
+        const mission = allMissions.find((m) => m.id === id)
         const brief = assembleMissionBrief(v, mission, undefined, contextFor(d))
         if (!brief || !mission) return null
         // Record the attempt before dispatch: a declined mission still counts
         // as the last mission, so a no-repeat mission is not re-offered next
         // tick (the digest reads this back through `last_mission`).
         await stateStore.update((s) => ({ ...s, last_mission: mission.id }))
+        // JEV's pick leaves the primary queue; a timeout re-enqueues it.
+        const pick = dequeuePrimary(queues, missionItemId(mission.id))
+        if (pick) queues = pick.rest
         const extra =
           ideaCfg.enabled && brief.mission_id === "idea-generate"
             ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
@@ -661,27 +785,127 @@ export default (async ({ client, directory, ...rest }) => {
           mission,
           prompt: brief.prompt + extra,
           agent: brief.agent,
+          slot: "primary",
         })
-        return { mission, run }
+        return { mission, run, item: pick?.item ?? null }
+      }
+
+      // Item settlement (docs/heartbeat-lanes.md): a timeout re-enqueues at
+      // the queue tail with the reason recorded; error/declined/completed
+      // drop. Past MAX_REQUEUES a timeout drops too.
+      const settleItem = (laneRun: { item: QueueItem | null; run: ChildRun }): boolean => {
+        if (!laneRun.item || laneRun.run.outcome !== "timeout") return false
+        const requeued = requeueTail(laneRun.item, "timeout", Date.now())
+        if (!requeued) return false
+        queues = enqueueItems(queues, [requeued])
+        return true
+      }
+      const resultStatusOf = (r: ChildRun): MissionResult["status"] | "missing" =>
+        r.result?.status ?? (r.outcome === "completed" ? "missing" : "error")
+      const overBudgetOf = (tokens: number): boolean =>
+        autonomy.mission_token_budget !== "unlimited" && tokens > autonomy.mission_token_budget
+      const runEntry = (
+        mission: Mission,
+        lane: "primary" | "side",
+        r: ChildRun,
+        requeued: boolean,
+      ): Record<string, unknown> => ({
+        mission: mission.id,
+        lane,
+        outcome: r.outcome,
+        token_cost: r.tokenCost,
+        over_budget: overBudgetOf(r.tokenCost),
+        session: r.sessionId,
+        result_status: resultStatusOf(r),
+        result_missing: !r.result,
+        requeued,
+        ...(r.tool
+          ? {
+              tool_status: r.tool.status,
+              tool_session: r.tool.session,
+              tool_outcome: r.tool.outcome,
+              ...(r.tool.error ? { tool_error: r.tool.error } : {}),
+            }
+          : {}),
+      })
+      /** Legacy top-level drain-tool fields: whichever run carried the tool. */
+      const toolFields = (tool: DrainToolResult | null | undefined): Record<string, unknown> =>
+        tool
+          ? {
+              tool_status: tool.status,
+              tool_session: tool.session,
+              tool_outcome: tool.outcome,
+              ...(tool.error ? { tool_error: tool.error } : {}),
+            }
+          : {}
+      const sideFields = (laneRun: LaneRun, requeued: boolean): Record<string, unknown> => {
+        const r = laneRun.run
+        return {
+          side_mission: laneRun.mission.id,
+          side_outcome: r.outcome,
+          side_token_cost: r.tokenCost,
+          side_session: r.sessionId,
+          side_result_status: resultStatusOf(r),
+          side_requeued: requeued,
+        }
       }
 
       const first = await selected(digest, verdict)
       if (!first) {
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "digest",
-          reason,
-          ...(digestError ? { error: digestError } : {}),
-        })
-        await recordNoop(digest.digest_hash)
+        // No primary mission this tick (JEV silence). The side lane may
+        // still have done the tick's work — never book that as "silent".
+        const sideRequeued = sideRun ? settleItem(sideRun) : false
+        await saveQueues(join(stateDir, LANES_FILE), queues)
+        if (sideRun) {
+          const sideResultStatus = resultStatusOf(sideRun.run)
+          const sideDrainFailed =
+            sideRun.run.tool?.outcome === "error" || sideRun.run.tool?.outcome === "dropped"
+          const sideOk =
+            sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed
+          if (!sideOk) {
+            await moodFeed.apply("mission_failure")
+            moodEvent = "mission_failure"
+          }
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: sideRun.run.outcome,
+            token_cost: sideRun.run.tokenCost,
+            over_budget: overBudgetOf(sideRun.run.tokenCost),
+            gate: "digest",
+            reason,
+            queues: queueDepth(queues),
+            runs: [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)],
+            ...sideFields(sideRun, sideRequeued),
+            ...toolFields(sideRun.run.tool),
+            ...(digestError ? { error: digestError } : {}),
+          })
+          // Side work executed this tick: an executed mission resets the B7
+          // backoff streak (§17.8 reset rule).
+          await recordExecution()
+        } else {
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: "silent",
+            token_cost: 0,
+            gate: "digest",
+            reason,
+            queues: queueDepth(queues),
+            ...(digestError ? { error: digestError } : {}),
+          })
+          // Waiting side work must not be delayed by the identical-digest
+          // backoff; a primary item the JEV keeps declining backs off
+          // normally (its expiry re-offers it fresh).
+          if (queues.side.length > 0) await recordExecution()
+          else await recordNoop(digest.digest_hash)
+        }
         return "fired"
       }
 
       let chosen = first
-      let totalTokens = first.run.tokenCost
+      let secondRun: { mission: Mission; run: ChildRun; item: QueueItem | null } | null = null
+      let totalTokens = first.run.tokenCost + (sideRun?.run.tokenCost ?? 0)
       let reroll: { from: string; reason: string } | null = null
       const declined: string[] = []
       let finalReason = reason
@@ -708,6 +932,7 @@ export default (async ({ client, directory, ...rest }) => {
           digestError = decided.error
           const second = await selected(digest, verdict)
           if (second) {
+            secondRun = second
             chosen = second
             totalTokens += second.run.tokenCost
             const secondDrainFailed =
@@ -727,15 +952,22 @@ export default (async ({ client, directory, ...rest }) => {
         }
       }
 
+      // Settle every dispatched item: a timeout re-enqueues at the queue tail
+      // with the reason recorded; completed/error/declined drop.
+      const sideRequeued = sideRun ? settleItem(sideRun) : false
+      const firstRequeued = settleItem(first)
+      const secondRequeued = secondRun ? settleItem(secondRun) : false
+      await saveQueues(join(stateDir, LANES_FILE), queues)
+
       const run = chosen.run
       const finalMission = chosen.mission
       const finalResult = run.result
-      const drainTool = run.tool
+      // Legacy top-level drain-tool fields describe whichever run carried the
+      // tool (drain rides the side lane today).
+      const tickTool = sideRun?.run.tool ?? run.tool
       const outcome = run.outcome
       const tokenCost = totalTokens
-      const overBudget =
-        autonomy.mission_token_budget !== "unlimited" &&
-        tokenCost > autonomy.mission_token_budget
+      const overBudget = overBudgetOf(tokenCost)
       const runError = run.runError
       const resultStatus: MissionResult["status"] | "missing" =
         finalResult?.status ?? (outcome === "completed" ? "missing" : "error")
@@ -743,51 +975,71 @@ export default (async ({ client, directory, ...rest }) => {
       // The drain tool reports pipe failures as `status: "completed"` with
       // `outcome: "error" | "dropped"`, so the mission result alone cannot be
       // trusted: the observed tool outcome is the authoritative signal.
-      const drainFailed = drainTool?.outcome === "error" || drainTool?.outcome === "dropped"
-      const toolFailedButCompleted = drainFailed && resultStatus === "completed"
-      const summary = drainFailed && drainTool?.summary ? drainTool.summary : run.summary
+      const drainFailed = tickTool?.outcome === "error" || tickTool?.outcome === "dropped"
+      const toolFromSide = Boolean(sideRun?.run.tool)
+      const toolOwnerResultStatus = toolFromSide ? resultStatusOf(sideRun!.run) : resultStatus
+      const toolFailedButCompleted = drainFailed && toolOwnerResultStatus === "completed"
+      const summary = drainFailed && tickTool?.summary ? tickTool.summary : run.summary
       const toolSkippedButCompleted =
-        drainTool?.status === "skipped" && resultStatus === "completed"
+        tickTool?.status === "skipped" && toolOwnerResultStatus === "completed"
       sessionId = run.sessionId
+
+      const sideResultStatus = sideRun ? resultStatusOf(sideRun.run) : null
+      const sideDrainFailed =
+        sideRun?.run.tool?.outcome === "error" || sideRun?.run.tool?.outcome === "dropped"
+      const sideOk =
+        !sideRun ||
+        (sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed)
+      const dispatchedRuns = [
+        ...(sideRun ? [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)] : []),
+        runEntry(first.mission, "primary", first.run, firstRequeued),
+        ...(secondRun ? [runEntry(secondRun.mission, "primary", secondRun.run, secondRequeued)] : []),
+      ]
 
       if (finalDecision === "no_reply") {
         await ledger({
           verdict: "no_reply",
           mission: null,
-          outcome: "silent",
+          outcome: sideRun ? sideRun.run.outcome : "silent",
           token_cost: tokenCost,
           over_budget: overBudget,
           gate: "digest",
           reason: noReplyReason,
+          queues: queueDepth(queues),
+          runs: dispatchedRuns,
+          ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
           ...(sessionId ? { session: sessionId } : {}),
           result_status: resultStatus,
           result_missing: resultMissing,
-          ...(drainTool
-            ? {
-                tool_status: drainTool.status,
-                tool_session: drainTool.session,
-                tool_outcome: drainTool.outcome,
-                ...(drainTool.error ? { tool_error: drainTool.error } : {}),
-              }
-            : {}),
+          ...toolFields(tickTool),
           ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
           ...(reroll ? { reroll } : {}),
           ...(declined.length ? { declined } : {}),
           ...(runError ?? digestError ? { error: runError ?? digestError } : {}),
         })
-        await recordNoop(digest.digest_hash)
+        // A declined mission is not a mood failure; a broken side run is.
+        if (!sideOk) {
+          await moodFeed.apply("mission_failure")
+          moodEvent = "mission_failure"
+        }
+        // Executed side work — or side work still waiting — resets the B7
+        // backoff; a primary item the JEV keeps declining backs off normally.
+        if (sideRun || queues.side.length > 0) await recordExecution()
+        else await recordNoop(digest.digest_hash)
         return "fired"
       }
 
+      const primaryToolFailed =
+        run.tool?.outcome === "error" || run.tool?.outcome === "dropped"
       const missionOk =
         outcome === "completed" &&
         resultStatus !== "declined" &&
         resultStatus !== "error" &&
-        !drainFailed
+        !primaryToolFailed
 
       phase = "post"
       await setCurrent({ phase })
-      if (!missionOk) {
+      if (!missionOk || !sideOk) {
         await moodFeed.apply("mission_failure")
         moodEvent = "mission_failure"
       }
@@ -851,17 +1103,13 @@ export default (async ({ client, directory, ...rest }) => {
         over_budget: overBudget,
         gate: "digest",
         reason: finalReason,
+        queues: queueDepth(queues),
+        runs: dispatchedRuns,
+        ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
         ...(sessionId ? { session: sessionId } : {}),
         result_status: resultStatus,
         result_missing: resultMissing,
-        ...(drainTool
-          ? {
-              tool_status: drainTool.status,
-              tool_session: drainTool.session,
-              tool_outcome: drainTool.outcome,
-              ...(drainTool.error ? { tool_error: drainTool.error } : {}),
-            }
-          : {}),
+        ...toolFields(tickTool),
         ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
         ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
         ...(reroll ? { reroll } : {}),

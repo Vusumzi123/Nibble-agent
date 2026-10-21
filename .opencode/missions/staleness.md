@@ -6,7 +6,8 @@ menus: [day]
 min_level: 2
 approval: writes-follow-dial
 candidacy: brain-stale:720
-on_decline: reroll
+lane: side
+on_decline: stop
 agent: ""
 enabled: true
 ---

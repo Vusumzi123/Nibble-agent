@@ -26,6 +26,7 @@ menus: [day]
 min_level: 2
 approval: writes-follow-dial
 candidacy: digest
+lane: primary
 agent: ""
 runner: ""
 on_decline: stop
@@ -47,9 +48,10 @@ Defaults when a key is missing or invalid (`lib/missions.ts`
 | `min_level` | integer 0–4 | `2` | Lowest `autonomy.level` that may run it. |
 | `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the dashboard. It does **not** enforce anything; the autonomy matrix and JEV gate execution. |
 | `candidacy` | see below | `digest` | Deterministic eligibility gate, evaluated before JEV. |
+| `lane` | `primary` / `side` | `primary` | Dispatch lane (docs/heartbeat-lanes.md). `primary` = JEV-picked, one per tick. `side` = status-fed queue: strict FIFO, one side item per tick, runs alongside the primary in the same tick, never offered to the JEV. Side missions should use a status candidacy (`turns-pending`, `brain-stale[:hours]`). |
 | `agent` | opencode agent name | `""` | `""` = the default heartbeat agent. A name pins the child session to that agent (and its permissions). |
 | `runner` | tool binding name | `""` | Metadata only. It does not execute or bypass the child; the body must name the tool. Today only `drain-pipe` → `drain_run`. |
-| `on_decline` | `reroll` / `stop` | `stop` | What the orchestrator does after `mission_result` reports `declined`. |
+| `on_decline` | `reroll` / `stop` | `stop` | What the orchestrator does after `mission_result` reports `declined`. Ignored on the side lane: a side decline drops the queue item and never rerolls. |
 | `enabled` | `true` / `false` | `true` | A config overlay may only turn this off. |
 
 Unknown frontmatter keys are ignored with a warn-once. Invalid values fall
@@ -68,6 +70,7 @@ deterministic and fail closed.
 | `always` | Always. Same eligibility as `digest`. |
 | `backlog-pending` | Open backlog entries at the current level > 0. |
 | `turns-pending` | Unconsumed turn-store turns > 0. |
+| `brain-stale` | The oldest `type: reference` vault note is ≥ 720h old by its `updated:` frontmatter. `brain-stale:<hours>` overrides the threshold; absent signal fails closed. |
 | `dream-gate` | Sleep status is `dreaming`, under the nightly cap, and the `quiet.dream_chance` roll passes. Feature-specific (dream hook). |
 | `idea-roll` | Today's idea draw has quota left. Feature-specific (idea pipeline); absent state = fail closed. |
 | `min-gap:<key>` | Never ran, or `now - lastRun >= minGapMs[key]`. A key with no wired store/gap reads as 0 → always eligible. |
@@ -126,6 +129,8 @@ once:
 - `declined` + `on_decline: reroll`: the mission is excluded, the digest is
   recomputed, and JEV is asked once more in the same tick. Second decline ends
   the tick. `stop` ends the tick silently.
+- Side-lane missions (`lane: side`) never reroll: a decline drops the queue
+  item and the tick continues with the primary lane.
 - A decline must leave no side effects.
 - Tool-free missions (`agent: dreamer`, `agent: idea-generator`) cannot call
   `mission_result`; they end with their typed object/markers and the hook
@@ -206,7 +211,7 @@ re-enable a file-disabled mission.
 
 ## Verify
 
-1. `node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts`
+1. `node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts .opencode/plugin/lib/lanes/*.test.ts`
    — add a `parseMissionFile` fixture and, if shipped, a loader assertion in
    `lib/missions.test.ts`.
 2. Next tick, read `.opencode/logs/heartbeat.log`: one NDJSON line with
