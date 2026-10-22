@@ -307,6 +307,25 @@ test("writeConfig: top-level heartbeat section is writable, validated, hot-read"
   )
 })
 
+test("writeConfig: drain trigger thresholds are writable, validated, hot-read", async () => {
+  const dir = await project()
+  const res = await writeConfig(dir, "drain", { trigger_pending: 4, trigger_max_age_hours: 1 })
+  assert.deepEqual(res.applied, { trigger_pending: 4, trigger_max_age_hours: 1 })
+  const cfg = await configSnapshot(dir)
+  assert.equal(cfg.drain.trigger_pending, 4)
+  assert.equal(cfg.drain.trigger_max_age_hours, 1)
+  // all-or-nothing: a below-minimum value never lands
+  await assert.rejects(
+    () => writeConfig(dir, "drain", { trigger_pending: 0 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+  assert.equal((await configSnapshot(dir)).drain.trigger_pending, 4)
+  // absent keys fall back to the reader's defaults
+  const snap = await configSnapshot(await project())
+  assert.equal(snap.drain.trigger_pending, 12)
+  assert.equal(snap.drain.trigger_max_age_hours, 2)
+})
+
 test("writeConfig: journal written with origin metadata", async () => {
   const dir = await project()
   await writeConfig(dir, "mood", { dispatch_influence: false }, { origin: "http://127.0.0.1:4097", ip: "::ffff:127.0.0.1" })
@@ -327,6 +346,8 @@ test("configSnapshot overlays defaults for absent keys", async () => {
   assert.equal(snap.autonomy.enforcement, "per-task") // absent -> default
   assert.equal(snap.dashboard.auth.mode, "off")
   assert.equal(snap.comms.default_channel, "telegram")
+  assert.equal(snap.drain.trigger_pending, 12)
+  assert.equal(snap.drain.trigger_max_age_hours, 2)
 })
 
 test("listLedgers + tailLedger: counts, limit, whitelist", async () => {

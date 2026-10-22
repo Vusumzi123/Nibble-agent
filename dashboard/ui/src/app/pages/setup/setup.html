@@ -1,6 +1,6 @@
 <h1 class="mb-1">Setup</h1>
 <p class="text-muted mb-4">
-  Edit the heartbeat scheduler and the autonomy level. Writes go through the
+  Edit the heartbeat scheduler, the drain trigger, and the autonomy level. Writes go through the
   backend's schema-validated, comment-preserving config writer; every value is
   hot-read by the harness (no restart). Raising the level above the current one
   requires dashboard auth (2FA), so it is refused here until that ships.
@@ -80,6 +80,34 @@
   <div class="ph-panel__body border-top">
     <button class="btn btn-primary" [disabled]="savingHeartbeat()" (click)="saveHeartbeat()">
       {{ savingHeartbeat() ? 'saving…' : 'save heartbeat' }}
+    </button>
+  </div>
+</div>
+
+<div class="ph-panel mb-4">
+  <div class="ph-panel__header">Drain trigger</div>
+  <div class="ph-panel__body setup-grid">
+    <label class="setup-field">
+      <span class="setup-field__label">trigger pending <span class="muted">(turns)</span></span>
+      <input class="form-control" type="number" min="1"
+             [value]="triggerPending()" (input)="triggerPending.set(+$any($event.target).value)">
+      <span class="setup-field__hint muted">
+        Run a drain pass while the pending-turn count is at least this.
+      </span>
+    </label>
+
+    <label class="setup-field">
+      <span class="setup-field__label">trigger max age <span class="muted">(hours)</span></span>
+      <input class="form-control" type="number" min="1"
+             [value]="triggerMaxAgeHours()" (input)="triggerMaxAgeHours.set(+$any($event.target).value)">
+      <span class="setup-field__hint muted">
+        Or run a pass once the oldest pending turn is at least this old.
+      </span>
+    </label>
+  </div>
+  <div class="ph-panel__body border-top">
+    <button class="btn btn-primary" [disabled]="savingDrain()" (click)="saveDrain()">
+      {{ savingDrain() ? 'saving…' : 'save drain trigger' }}
     </button>
   </div>
 </div>

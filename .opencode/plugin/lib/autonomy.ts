@@ -521,12 +521,54 @@ const HEARTBEAT_OPTS: NestedSectionOptions = {
   coerce: makeCoerce(HEARTBEAT_SCALAR_RULES, {}),
 }
 
+// Top-level `drain:` block — the demand-driven consumer (lib/drain/config.ts
+// DEFAULT_DRAIN). Flat scalars plus the `exclude_missions` inline list. The
+// dashboard Setup page writes `trigger_pending` / `trigger_max_age_hours`
+// through the same schema-validated path the hot reader uses, so a written
+// value reads back identically (the consumer re-reads config every wake).
+const DRAIN_SCALAR_RULES: Record<string, Rule> = {
+  enabled: { t: "bool" },
+  consumer: { t: "bool" },
+  cursor_file: { t: "string" },
+  writer_model: { t: "string" },
+  summarize_model: { t: "string" },
+  batch_sessions: { t: "int", min: 1 },
+  initial_lookback_hours: { t: "int", min: 0 },
+  max_turns_per_session: { t: "int", min: 1 },
+  max_session_bytes: { t: "int", min: 0 },
+  max_items_per_session: { t: "int", min: 1 },
+  max_items_per_batch: { t: "int", min: 1 },
+  prefetch_candidates: { t: "int", min: 0 },
+  continuity_turns: { t: "int", min: 0 },
+  continuity_sessions: { t: "int", min: 0 },
+  poison_attempts: { t: "int", min: 0 },
+  drain_prompt_max_bytes: { t: "int", min: 0 },
+  exclude_missions: { t: "list" },
+  trigger_pending: { t: "int", min: 1 },
+  trigger_max_age_hours: { t: "int", min: 1 },
+  settle_seconds: { t: "int", min: 0 },
+  poll_seconds: { t: "int", min: 1 },
+  max_wall_minutes: { t: "int", min: 1 },
+  token_budget: { t: "int", min: 0 },
+  wake_token_budget: { t: "int", min: 0 },
+  max_passes_per_wake: { t: "int", min: 1 },
+  lock_refresh_ms: { t: "int", min: 1000 },
+  lock_stale_ms: { t: "int", min: 1000 },
+  cursor_migration: { t: "enum", values: ["carry", "recover"] },
+}
+
+const DRAIN_OPTS: NestedSectionOptions = {
+  scalarKeys: keysOf(DRAIN_SCALAR_RULES),
+  listKeys: listOf(DRAIN_SCALAR_RULES),
+  coerce: makeCoerce(DRAIN_SCALAR_RULES, {}),
+}
+
 // ---------------------------------------------------------------------------
 // Section specs for the dashboard backend (card 8, plan §9.2)
 //
 // The backend round-trip-validates a candidate sysop-config.yaml text through
 // the exact same parse options the hot readers use — one schema, no copy.
-export const NESTED_WRITABLE_SECTIONS = ["autonomy", "mood", "comms", "dashboard", "heartbeat"] as const
+export const NESTED_WRITABLE_SECTIONS = ["autonomy", "mood", "comms", "dashboard", "heartbeat", "drain"] as const
 export type NestedWritableSection = (typeof NESTED_WRITABLE_SECTIONS)[number]
 
 export function isNestedWritableSection(section: string): section is NestedWritableSection {
@@ -545,6 +587,8 @@ export function nestedSectionOpts(section: string): NestedSectionOptions | null 
       return DASHBOARD_OPTS
     case "heartbeat":
       return HEARTBEAT_OPTS
+    case "drain":
+      return DRAIN_OPTS
     default:
       return null
   }

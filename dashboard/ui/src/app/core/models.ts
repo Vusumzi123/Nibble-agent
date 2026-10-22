@@ -32,12 +32,24 @@ export interface HeartbeatConfig {
   log_rotate_by: string;
 }
 
+export interface DrainConfig {
+  enabled: boolean;
+  consumer: boolean;
+  trigger_pending: number;
+  trigger_max_age_hours: number;
+  settle_seconds: number;
+  poll_seconds: number;
+  [key: string]: unknown;
+}
+
 export interface ConfigSnapshot {
   autonomy: AutonomyConfig;
   heartbeat: HeartbeatConfig;
   mood: Record<string, unknown>;
   comms: Record<string, unknown>;
   dashboard: Record<string, unknown>;
+  /** Absent on backends older than the drain-trigger panel. */
+  drain?: DrainConfig;
 }
 
 export type HeartbeatState = 'idle' | 'in-flight';

@@ -7,9 +7,9 @@
 // reads over the NDJSON ledgers + state files, and the CSRF token store.
 //
 // Scope of card 8 (auth is card 11): CSRF only — no login/2FA/TLS. Writable
-// sections are the four nested Rule-backed ones (autonomy, mood, comms,
-// dashboard); every other section is refused `section_readonly` until a UI
-// panel needs it and a schema lands with it.
+// sections are the Rule-backed ones (autonomy, mood, comms, dashboard,
+// heartbeat, drain); every other section is refused `section_readonly` until
+// a UI panel needs it and a schema lands with it.
 //
 // Security posture (plan §9.2 + §14 "Dashboard API becomes security-critical"):
 //   - loopback bind only (non-loopback refused while auth is card 11),
@@ -436,17 +436,19 @@ export type ConfigSnapshot = {
   mood: Awaited<ReturnType<typeof readMoodConfig>>
   comms: Awaited<ReturnType<typeof readCommsConfig>>
   dashboard: Awaited<ReturnType<typeof readDashboardConfig>>
+  drain: Awaited<ReturnType<typeof readDrainConfig>>
 }
 
 export async function configSnapshot(directory: string): Promise<ConfigSnapshot> {
-  const [autonomy, heartbeat, mood, comms, dashboard] = await Promise.all([
+  const [autonomy, heartbeat, mood, comms, dashboard, drain] = await Promise.all([
     readAutonomyConfig(directory),
     readHeartbeatConfig(directory),
     readMoodConfig(directory),
     readCommsConfig(directory),
     readDashboardConfig(directory),
+    readDrainConfig(directory),
   ])
-  return { autonomy, heartbeat, mood, comms, dashboard }
+  return { autonomy, heartbeat, mood, comms, dashboard, drain }
 }
 
 export type LedgerInfo = { name: string; bytes: number; lines: number }

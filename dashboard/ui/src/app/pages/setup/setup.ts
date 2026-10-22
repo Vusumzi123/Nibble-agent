@@ -22,8 +22,12 @@ export class SetupPage {
   protected readonly hbEnabled = signal(true);
   protected readonly longSilence = signal(3);
 
+  protected readonly triggerPending = signal(12);
+  protected readonly triggerMaxAgeHours = signal(2);
+
   protected readonly savingAutonomy = signal(false);
   protected readonly savingHeartbeat = signal(false);
+  protected readonly savingDrain = signal(false);
   protected readonly notice = signal<string | null>(null);
   protected readonly error = signal<string | null>(null);
 
@@ -42,6 +46,10 @@ export class SetupPage {
     this.inProgressLock.set(c.autonomy.heartbeat.in_progress_lock);
     this.hbEnabled.set(c.heartbeat.enabled);
     this.longSilence.set(c.heartbeat.long_silence_factor);
+    if (c.drain) {
+      this.triggerPending.set(c.drain.trigger_pending);
+      this.triggerMaxAgeHours.set(c.drain.trigger_max_age_hours);
+    }
   }
 
   protected readonly target = () => this.store.health()?.directory ?? '—';
@@ -88,6 +96,32 @@ export class SetupPage {
       this.error.set(errorText(err));
     } finally {
       this.savingHeartbeat.set(false);
+    }
+  }
+
+  protected async saveDrain(): Promise<void> {
+    this.savingDrain.set(true);
+    this.notice.set(null);
+    this.error.set(null);
+    try {
+      const pending = this.triggerPending();
+      const maxAge = this.triggerMaxAgeHours();
+      if (!Number.isInteger(pending) || pending < 1) {
+        throw new Error('trigger pending must be an integer >= 1');
+      }
+      if (!Number.isInteger(maxAge) || maxAge < 1) {
+        throw new Error('trigger max age must be a whole number of hours >= 1');
+      }
+      const result = await this.api.writeConfig('drain', {
+        trigger_pending: pending,
+        trigger_max_age_hours: maxAge,
+      });
+      this.notice.set(`drain trigger saved: ${Object.keys(result.applied).join(', ')}`);
+      await this.store.refreshConfig();
+    } catch (err) {
+      this.error.set(errorText(err));
+    } finally {
+      this.savingDrain.set(false);
     }
   }
 }
