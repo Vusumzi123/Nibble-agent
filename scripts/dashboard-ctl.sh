@@ -37,10 +37,33 @@ if ! TARGET="$(cd "$TARGET" 2>/dev/null && pwd)"; then
   exit 1
 fi
 
-PORT="${DASHBOARD_PORT:-4097}"
+# Read a `dashboard.<key>` scalar from the target's sysop-config.yaml (plain
+# grep — the file is line-oriented YAML with two-space nesting). Empty when
+# the file or key is missing; the backend applies schema defaults anyway.
+config_scalar() {
+  local key="$1" cfg="$TARGET/.opencode/sysop-config.yaml" in_section=0 line val
+  [ -f "$cfg" ] || return 0
+  while IFS= read -r line; do
+    if printf '%s' "$line" | grep -q '^dashboard:'; then
+      in_section=1
+    elif [ "$in_section" = 1 ] && printf '%s' "$line" | grep -q '^[^[:space:]]'; then
+      in_section=0
+    elif [ "$in_section" = 1 ]; then
+      val="$(printf '%s' "$line" | sed -n "s/^  ${key}: *//p" | sed 's/ *#.*//; s/^"//; s/"$//; s/^'\''//; s/'\''$//')"
+      if [ -n "$val" ]; then
+        printf '%s' "$val"
+        return 0
+      fi
+    fi
+  done < "$cfg"
+}
+
+PORT="${DASHBOARD_PORT:-$(config_scalar port)}"
+PORT="${PORT:-4097}"
 # Display-only fallback for `status` when the backend is down; when it is up,
 # status reports the proxy target from /api/health (config-aware).
-SERVE_URL="${OPENCODE_SERVE_URL:-http://127.0.0.1:4096}"
+SERVE_URL="${OPENCODE_SERVE_URL:-$(config_scalar serve_url)}"
+SERVE_URL="${SERVE_URL:-http://127.0.0.1:4096}"
 BACKEND="$TARGET/.opencode/plugin/lib/dashboard-server.ts"
 STATE_DIR="$TARGET/.opencode/state"
 LOG_DIR="$TARGET/.opencode/logs"
