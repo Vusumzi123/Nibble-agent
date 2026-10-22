@@ -88,7 +88,7 @@ async function seedTurns(dir: string, tag: string): Promise<void> {
   const db = new DatabaseSync(join(dataDir, "opencode.db"))
   const now = Date.now()
   db.exec(`
-    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
   `)
@@ -1272,6 +1272,11 @@ test("side lane and primary both run in one tick", async () => {
     "  enabled: true",
     "  provider: openjev",
     "",
+    "# These tests exercise the legacy side-lane drain (the consumer: false",
+    "# rollback path of docs/drain-consumer-plan.md §9).",
+    "drain:",
+    "  consumer: false",
+    "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
   await writeLaneMission(dir, "research", { lane: "primary", candidacy: "digest" })
@@ -1319,6 +1324,11 @@ test("the side lane dequeues one item per tick; the rest wait", async () => {
     "decisions:",
     "  enabled: true",
     "  provider: openjev",
+    "",
+    "# These tests exercise the legacy side-lane drain (the consumer: false",
+    "# rollback path of docs/drain-consumer-plan.md §9).",
+    "drain:",
+    "  consumer: false",
     "",
   ])
   // Two status-fed side missions, no primary work at all.
@@ -1373,6 +1383,11 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
     "decisions:",
     "  enabled: true",
     "  provider: openjev",
+    "",
+    "# These tests exercise the legacy side-lane drain (the consumer: false",
+    "# rollback path of docs/drain-consumer-plan.md §9).",
+    "drain:",
+    "  consumer: false",
     "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })

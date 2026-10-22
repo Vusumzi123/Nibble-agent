@@ -12,6 +12,15 @@ tick with nothing queued does nothing at all.
 Missed ticks still coalesce (`computeWakeDelayMs` — "coalesce, never
 replay"). Work piles up in the queues; ticks never pile up.
 
+> **Drain left the queues** (docs/drain-consumer-plan.md): since
+> `drain.consumer: true` (the default), consolidation runs on its own
+> demand-driven loop — the `turns-pending` producer stops collecting, the
+> side lane carries **staleness only**, and drain work appears in the
+> dashboard as `lane: "drain"` runs from `drain.log`. Setting
+> `drain.consumer: false` restores the pre-consumer behaviour described below
+> (the rollback path, one release of dual support). See
+> [docs/drain-consumer.md](drain-consumer.md).
+
 ## The model
 
 ```
@@ -46,11 +55,11 @@ A **work item** is a small JSON record — not a mission:
 
 | | primary | side |
 | --- | --- | --- |
-| Producer | `tick` — every eligible primary mission the digest computed | `turns-pending` (drain), `brain-stale` (staleness) |
+| Producer | `tick` — every eligible primary mission the digest computed | `turns-pending` (drain, legacy only), `brain-stale` (staleness) |
 | Selection | JEV digest picks one (`no_reply` is allowed) | none — strict FIFO among runnable items |
 | Per tick | one | **one** (the rest wait for the next tick) |
 | Expiry | 24 h from enqueue (`PRIMARY_TTL_MS`), then drop | never — waits indefinitely |
-| Trigger semantics | judgment / cadence | status: unconsumed turns, oldest reference note age |
+| Trigger semantics | judgment / cadence | status: unconsumed turns (legacy), oldest reference note age |
 
 Mission files declare their lane in the frontmatter (default `primary`):
 

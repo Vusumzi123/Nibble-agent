@@ -12,6 +12,7 @@ import {
   backlogSnapshot,
   configSnapshot,
   createCsrfStore,
+  drainSnapshot,
   flattenValues,
   guardLeaf,
   heartbeatSchedule,
@@ -21,7 +22,12 @@ import {
   memoryPendingSnapshot,
   metricsSnapshot,
   missionsSnapshot,
+  resetDrainCache,
   resetMemoryPendingCache,
+  resetQueuesCache,
+  runsSnapshot,
+  queuesSnapshot,
+  tokenSeriesSnapshot,
   renderYamlScalar,
   setMissionEnabled,
   tailLedger,
@@ -636,6 +642,7 @@ function pendingDb(file: string): DatabaseSync {
       parent_id TEXT,
       directory TEXT NOT NULL,
       time_updated INTEGER NOT NULL,
+      time_created INTEGER NOT NULL DEFAULT 0,
       title TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE message (
@@ -761,4 +768,274 @@ test("memoryPendingSnapshot: a fresh cursor uses the initial lookback", async ()
   assert.equal(snap.seeded, true)
   assert.equal(snap.pending_turns, 1)
   assert.equal(snap.cursor_last_ts, now - 24 * 3_600_000)
+})
+
+// --- lane queues, recent runs, token series --------------------------------
+
+test("queuesSnapshot: lane items carry titles, age, TTL and requeue info", async () => {
+  const dir = await project()
+  await withMissions(dir, { drain: missionFile("drain") })
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+  const now = Date.parse("2026-10-20T12:00:00Z")
+  await writeFile(
+    join(dir, ".opencode", "state", "lanes.json"),
+    JSON.stringify({
+      primary: [
+        {
+          id: "mission:drain",
+          kind: "mission",
+          lane: "primary",
+          producer: "tick",
+          enqueued_ms: now - 60_000,
+          expires_ms: now + 3_600_000,
+          requeue_count: 0,
+        },
+      ],
+      side: [
+        {
+          id: "mission:dream",
+          kind: "mission",
+          producer: "turns-pending",
+          enqueued_ms: now - 1_000,
+          requeue_count: 2,
+          requeue_reason: "timeout",
+        },
+      ],
+    }),
+    "utf8",
+  )
+  resetQueuesCache()
+  const snap = await queuesSnapshot(dir, now)
+  assert.equal(snap.available, true)
+  assert.equal(snap.primary[0].title, "drain mission")
+  assert.equal(snap.primary[0].age_ms, 60_000)
+  assert.equal(snap.primary[0].ttl_ms, 3_600_000)
+  assert.equal(snap.side[0].requeue_count, 2)
+  assert.equal(snap.side[0].requeue_reason, "timeout")
+  assert.equal(snap.side[0].ttl_ms, null)
+})
+
+test("queuesSnapshot: a missing lanes.json degrades to available:false", async () => {
+  const dir = await project()
+  resetQueuesCache()
+  const snap = await queuesSnapshot(dir, Date.now())
+  assert.equal(snap.available, false)
+  assert.deepEqual(snap.primary, [])
+  assert.deepEqual(snap.side, [])
+  assert.equal(snap.running.mission, null)
+})
+
+test("runsSnapshot: runs[] plus legacy fallback, newest first, filters apply", async () => {
+  const dir = await project()
+  await withMissions(dir, { drain: missionFile("drain") })
+  await mkdir(join(dir, ".opencode", "logs"), { recursive: true })
+  const now = Date.now()
+  const lines = [
+    { ts: new Date(now - 120_000).toISOString(), tick: 1, mission: "drain", outcome: "completed", token_cost: 1000, session: "ses_old" },
+    {
+      ts: new Date(now - 60_000).toISOString(),
+      tick: 2,
+      runs: [
+        { mission: "drain", lane: "side", outcome: "completed", token_cost: 5000, over_budget: true, session: "ses_side", tool_session: "ses_writer" },
+        { mission: "drain", lane: "primary", outcome: "timeout", token_cost: 2000, over_budget: false, session: "ses_primary", requeued: true },
+      ],
+      duration_ms: 1234,
+    },
+  ]
+  await writeFile(join(dir, ".opencode", "logs", "heartbeat.log"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8")
+
+  const all = await runsSnapshot(dir, { limit: 10 })
+  assert.equal(all.available, true)
+  assert.equal(all.runs.length, 3)
+  assert.equal(all.runs[0].lane, "primary")
+  assert.equal(all.runs[0].tick, 2)
+  assert.equal(all.runs[0].mission_title, "drain mission")
+  assert.equal(all.runs[0].requeued, true)
+  assert.equal(all.runs[0].duration_ms, 1234)
+  assert.equal(all.runs[1].lane, "side")
+  assert.equal(all.runs[1].over_budget, true)
+  assert.equal(all.runs[1].tool_session, "ses_writer")
+  assert.equal(all.runs[2].tick, 1)
+  assert.equal(all.runs[2].lane, "primary")
+
+  const side = await runsSnapshot(dir, { lane: "side" })
+  assert.equal(side.runs.length, 1)
+  const timeouts = await runsSnapshot(dir, { outcome: "timeout" })
+  assert.equal(timeouts.runs.length, 1)
+  assert.equal(timeouts.runs[0].session, "ses_primary")
+})
+
+test("tokenSeriesSnapshot: buckets tokens vs budget and counts over-runs", async () => {
+  const dir = await project()
+  await mkdir(join(dir, ".opencode", "logs"), { recursive: true })
+  const now = Date.now()
+  const lines = [
+    {
+      ts: new Date(now - 90_000).toISOString(),
+      tick: 1,
+      runs: [
+        { mission: "drain", lane: "primary", outcome: "completed", token_cost: 40_000, over_budget: true },
+        { mission: "drain", lane: "side", outcome: "completed", token_cost: 10_000, over_budget: false },
+      ],
+    },
+  ]
+  await writeFile(join(dir, ".opencode", "logs", "heartbeat.log"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8")
+
+  const hourly = await tokenSeriesSnapshot(dir, { bucket: "hour", hours: 24 })
+  assert.equal(hourly.available, true)
+  assert.equal(hourly.points.length, 1)
+  assert.equal(hourly.points[0].tokens, 50_000)
+  assert.equal(hourly.points[0].runs, 2)
+  assert.equal(hourly.points[0].over_runs, 1)
+  assert.equal(hourly.totals.tokens, 50_000)
+  assert.equal(typeof hourly.budget_per_run, "number")
+
+  const primary = await tokenSeriesSnapshot(dir, { bucket: "tick", hours: 24, lane: "primary" })
+  assert.equal(primary.totals.tokens, 40_000)
+  assert.equal(primary.points[0].tick, 1)
+})
+
+// --- drain consumer snapshot (plan §6.1) ----------------------------------
+
+async function drainProject(config = CONFIG): Promise<string> {
+  const dir = await project(config)
+  const stateDir = join(dir, ".opencode", "state")
+  const logDir = join(dir, ".opencode", "logs")
+  await mkdir(stateDir, { recursive: true })
+  await mkdir(logDir, { recursive: true })
+  return dir
+}
+
+test("drainSnapshot: a missing marker still reports config dials", async () => {
+  resetDrainCache()
+  const dir = await drainProject()
+  const snap = await drainSnapshot(dir)
+  assert.equal(snap.available, true)
+  assert.equal(snap.state, "unknown")
+  assert.equal(snap.enabled, true)
+  assert.equal(snap.consumer, true)
+  assert.equal(snap.trigger_pending, 12, "default trigger surfaces")
+  assert.equal(snap.wake, null)
+  assert.equal(snap.last_pass, null)
+})
+
+test("drainSnapshot: marker + ledger lines populate wake and last_pass", async () => {
+  resetDrainCache()
+  const dir = await drainProject()
+  const stateDir = join(dir, ".opencode", "state")
+  const logDir = join(dir, ".opencode", "logs")
+  await writeFile(
+    join(stateDir, "drain.current.json"),
+    JSON.stringify({
+      state: "idle",
+      trigger: "consumer",
+      pass: 2,
+      pending: 7,
+      oldest_pending_age_ms: 90_000,
+      started_at: "2026-10-22T00:00:00.000Z",
+      updated_at: "2026-10-22T00:05:00.000Z",
+      next_due: 1_800_000_000_000,
+    }),
+    "utf8",
+  )
+  const ledgerLines = [
+    { ts: "2026-10-22T00:04:00.000Z", source: "pipe", outcome: "completed", wall_ms: 1200, tokens: 32_000, sessions: 2, items: 6 },
+    { ts: "2026-10-22T00:05:00.000Z", source: "consumer", outcome: "ok", passes: 3, wake_tokens: 96_000, wall_ms: 214_000, stopped: "backlog-below-trigger" },
+  ]
+  await writeFile(join(logDir, "drain.log"), ledgerLines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8")
+
+  const snap = await drainSnapshot(dir)
+  assert.equal(snap.state, "idle")
+  assert.equal(snap.pass, 2)
+  assert.equal(snap.pending, 7)
+  assert.equal(snap.oldest_pending_age_ms, 90_000)
+  assert.equal(snap.next_due, 1_800_000_000_000)
+  assert.deepEqual(snap.wake, {
+    passes: 3,
+    wake_tokens: 96_000,
+    wall_ms: 214_000,
+    stopped: "backlog-below-trigger",
+  })
+  assert.equal(snap.last_pass?.outcome, "completed")
+  assert.equal(snap.last_pass?.tokens, 32_000)
+  assert.equal(snap.last_pass?.items, 6)
+})
+
+test("drainSnapshot: results are cached for 5s and resetDrainCache clears", async () => {
+  resetDrainCache()
+  const dir = await drainProject()
+  const first = await drainSnapshot(dir, 1_000)
+  // Marker appears after the cached read: same cache window returns stale data.
+  await writeFile(
+    join(dir, ".opencode", "state", "drain.current.json"),
+    JSON.stringify({ state: "running", pending: 42, updated_at: "2026-10-22T00:00:00.000Z" }),
+    "utf8",
+  )
+  const cached = await drainSnapshot(dir, 2_000)
+  assert.equal(cached.state, first.state, "cached within the TTL")
+  resetDrainCache()
+  const fresh = await drainSnapshot(dir, 3_000)
+  assert.equal(fresh.state, "running")
+  assert.equal(fresh.pending, 42)
+})
+
+test("runsSnapshot: drain pipe lines surface as lane=drain rows", async () => {
+  const dir = await project()
+  await withMissions(dir, { drain: missionFile("drain") })
+  await mkdir(join(dir, ".opencode", "logs"), { recursive: true })
+  const now = Date.now()
+  await writeFile(
+    join(dir, ".opencode", "logs", "heartbeat.log"),
+    JSON.stringify({
+      ts: new Date(now - 60_000).toISOString(),
+      tick: 5,
+      runs: [{ mission: "research", lane: "primary", outcome: "completed", token_cost: 100 }],
+    }) + "\n",
+    "utf8",
+  )
+  await writeFile(
+    join(dir, ".opencode", "logs", "drain.log"),
+    JSON.stringify({
+      ts: new Date(now - 30_000).toISOString(),
+      source: "pipe",
+      outcome: "completed",
+      tokens: 40_000,
+      wall_ms: 900,
+      sessions: 2,
+      items: 5,
+    }) + "\n",
+    "utf8",
+  )
+
+  const all = await runsSnapshot(dir, { limit: 10 })
+  assert.equal(all.runs.length, 2)
+  assert.equal(all.runs[0].lane, "drain", "newest first: the drain pass")
+  assert.equal(all.runs[0].mission, "drain")
+  assert.equal(all.runs[0].token_cost, 40_000)
+  assert.equal(all.runs[0].duration_ms, 900)
+  assert.equal(all.runs[1].lane, "primary")
+
+  const drainOnly = await runsSnapshot(dir, { lane: "drain" })
+  assert.equal(drainOnly.runs.length, 1)
+
+  const tokens = await tokenSeriesSnapshot(dir, { bucket: "tick", hours: 24, lane: "drain" })
+  assert.equal(tokens.totals.tokens, 40_000)
+})
+
+test("queuesSnapshot: carries a drain consumer pointer", async () => {
+  resetQueuesCache()
+  resetDrainCache()
+  const dir = await project()
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(
+    join(stateDir, "drain.current.json"),
+    JSON.stringify({ state: "running", pending: 15, next_due: null, updated_at: "2026-10-22T00:00:00.000Z" }),
+    "utf8",
+  )
+  const snap = await queuesSnapshot(dir)
+  assert.ok(snap.drain)
+  assert.equal(snap.drain!.consumer, true)
+  assert.equal(snap.drain!.state, "running")
+  assert.equal(snap.drain!.pending, 15)
 })

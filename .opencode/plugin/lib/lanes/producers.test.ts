@@ -96,6 +96,29 @@ test("turns-pending producer fires only with unconsumed turns", () => {
   assert.deepEqual(turnsPendingProducer.collect(ctx({ missions: [drain] })), [])
 })
 
+test("drain consumer owns drain: turns-pending stops collecting, staleness untouched (plan §4)", () => {
+  const drain = mission("drain", ["candidacy: turns-pending", "lane: side", "menus: [day, night]"])
+  const stale = mission("staleness", ["candidacy: brain-stale:720", "lane: side", "menus: [day, night]"])
+  const note = { path: "Ref/note.md", title: "note", updated: "2026-01-01", ageHours: 900 }
+
+  const base = ctx({
+    missions: [drain, stale],
+    signals: signals({ unconsumed_turns: 3, brain_oldest: note }),
+    drainConsumer: true,
+  })
+  assert.deepEqual(turnsPendingProducer.collect(base), [], "drain leaves the queues")
+  assert.deepEqual(collectItems(base).map((i) => i.id), ["mission:staleness"], "staleness still runs")
+
+  // A queued drain item is no longer runnable and is pruned.
+  const asSide = { id: "mission:drain", lane: "side" } as never
+  assert.equal(itemRunnable(base, asSide), false)
+  assert.equal(itemStillDue(base, asSide), false, "drops out of the queue on the next prune")
+
+  // Rollback path: consumer off restores the old behaviour.
+  const legacy = { ...base, drainConsumer: false }
+  assert.deepEqual(turnsPendingProducer.collect(legacy).map((i) => i.id), ["mission:drain"])
+})
+
 test("brain-stale producer honours the candidacy threshold", () => {
   const stale = mission("staleness", ["candidacy: brain-stale:720", "lane: side"])
   const note = {

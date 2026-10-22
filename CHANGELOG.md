@@ -1,5 +1,67 @@
 # Changelog
 
+## 2026-10-21
+
+### Added
+
+- **Drain consumer loop** — consolidation leaves the heartbeat side lane for
+  its own demand-driven in-process loop (docs/drain-consumer-plan.md,
+  docs/drain-consumer.md). A wake runs bounded passes while
+  `pending >= trigger_pending` (12) OR the oldest pending turn is
+  `>= trigger_max_age_hours` (2 h), under per-pass (`token_budget: 80000`)
+  and per-wake (`wake_token_budget: 250000`, `max_wall_minutes: 15`,
+  `max_passes_per_wake: 6`) ceilings — all observable budgets, no guessed
+  pass counts. Stop reasons (`backlog-below-trigger`, `token-budget`,
+  `lock-held`, `no-progress`, `crash`, …) land on a `source: "consumer"`
+  line in `drain.log`; the live marker is `state/drain.current.json`
+  (state, pending, `next_due`). The tick gains
+  `drain: { pending, oldest_age_ms, last_wake_age_ms }` on every ledger
+  line. Rollback: `drain.consumer: false` returns drain to the side lane
+  (one release of dual support); all dials hot-read.
+- **Drain writer gate (`drain.lock`)** — lock acquisition moved *inside*
+  the pipe (`lib/drain/lock.ts`), so the consumer, the `drain_run` tool
+  (dream/manual/mission) serialize on one gate regardless of caller. The
+  record refreshes `heartbeat_ms` on a 60 s timer (stale at 3 × refresh =
+  180 s, down from 30 min); a steal requires stale **and** a dead holder,
+  so a hung-but-alive writer is never stolen from. Acquisition is
+  try-only — callers never wait: `drain_run` returns
+  `status: "skipped", reason: "lock-held"` and the consumer skips the wake.
+- **Cursor v2** — the global activity-time high-water mark becomes
+  `watermark_ts` plus **per-session marks** (`sessions[sid].last_ts` +
+  continuity summary). Fetch uses each session's own mark, so a resumed or
+  late-discovered session is re-read from its mark and no turn can fall
+  below a global mark and be skipped. v1 cursors migrate in place
+  (`migrated_from: 1`; mark = `min(v1.last_ts, summary.ts)`).
+  `drain.cursor_migration: recover` repairs the two documented v1 gaps at
+  discovery. A **settle guard** (`settle_seconds: 120`) defers any session
+  active within the window, closing the half-written-turn hole.
+  `blocked` gains `blocked_until` so a failing batch backs the consumer
+  off instead of hot-looping at poll cadence.
+- **`drain.lock` + consumer tests** — `lib/drain/lock.test.ts` (steal
+  rules, heartbeat refresh, live-holder protection),
+  `lib/drain/consumer.test.ts` (trigger, ceilings, lock-held wake,
+  config-flip stop, rollback flag), plus v2 cursor/pipe/config/tool
+  coverage.
+- **Dashboard drain surfaces** — `GET /api/drain` (consumer snapshot:
+  state, trigger, pending, oldest age, `next_due`, last wake/pass);
+  `/api/memory/pending` gains the consumer dials; drain pipe lines appear
+  in `/api/runs` as `lane: "drain"`; `/api/metrics/tokens?lane=drain`
+  charts drain spend beside primary/side; `/api/queues` side lane is
+  staleness-only and carries a drain pointer. The queues page shows a
+  drain consumer card, metrics a drain panel, flight a drain-loop row.
+
+### Changed
+
+- **Side lane = staleness only** — with `drain.consumer: true` (the new
+  default) the `turns-pending` producer stops collecting, queued drain
+  items prune out, and `itemRunnable`/`itemStillDue` refuse them;
+  `heartbeat-lanes.md` documents the split. Missions `drain.md` and
+  `dream-hook.ts` are unchanged — both still reach the pipe through the
+  shared lock.
+- **`HEARTBEAT_CODE_FILES`** gains `lib/drain/consumer.ts`,
+  `lib/drain/lock.ts`, `lib/drain/pipe.ts` — editing them disables the
+  scheduler of a running process (restart opencode).
+
 ## 2026-10-20
 
 ### Added

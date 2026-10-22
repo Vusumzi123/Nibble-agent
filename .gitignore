@@ -6,11 +6,13 @@ SETUP.md
 
 # Local design notes — not part of the public push
 # (public exceptions: the autonomy-integration contract, the sysop-config
-#  reference, and the lane-queue architecture + producer guide)
+#  reference, the lane-queue architecture + producer guide, and the drain
+#  consumer contract)
 docs/*
 !docs/autonomy-integration.md
 !docs/sysop-config-reference.md
 !docs/heartbeat-lanes.md
+!docs/drain-consumer.md
 
 # Kanban board (personal project management, local only)
 Boards/

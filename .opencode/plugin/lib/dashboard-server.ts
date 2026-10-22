@@ -28,12 +28,16 @@ import {
   createCsrfStore,
   heartbeatSnapshot,
   isLoopback,
+  drainSnapshot,
   listLedgers,
   memoryPendingSnapshot,
   metricsSnapshot,
   missionsSnapshot,
+  queuesSnapshot,
+  runsSnapshot,
   setMissionEnabled,
   tailLedger,
+  tokenSeriesSnapshot,
   writeConfig,
   type CsrfStore,
 } from "./dashboard.ts"
@@ -332,8 +336,52 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
       return
     }
 
+    // Drain consumer loop (plan §6.1): live marker + last wake/pass.
+    if (path === "/api/drain" && method === "GET") {
+      json(res, 200, await drainSnapshot(directory))
+      return
+    }
+
     if (path === "/api/heartbeat" && method === "GET") {
       json(res, 200, await heartbeatSnapshot(directory))
+      return
+    }
+
+    // Lane queues + run history (queue-monitoring plan): what is queued, what
+    // ran recently (with its session), and token spend against the budget.
+    if (path === "/api/queues" && method === "GET") {
+      json(res, 200, await queuesSnapshot(directory))
+      return
+    }
+
+    if (path === "/api/runs" && method === "GET") {
+      const limit = Number(url.searchParams.get("limit") ?? 50)
+      json(
+        res,
+        200,
+        await runsSnapshot(directory, {
+          limit: Number.isFinite(limit) ? limit : 50,
+          mission: url.searchParams.get("mission"),
+          lane: url.searchParams.get("lane"),
+          outcome: url.searchParams.get("outcome"),
+        }),
+      )
+      return
+    }
+
+    if (path === "/api/metrics/tokens" && method === "GET") {
+      const hours = Number(url.searchParams.get("hours") ?? 24)
+      json(
+        res,
+        200,
+        await tokenSeriesSnapshot(directory, {
+          bucket: url.searchParams.get("bucket"),
+          hours: Number.isFinite(hours) ? hours : 24,
+          mission: url.searchParams.get("mission"),
+          lane: url.searchParams.get("lane"),
+          type: url.searchParams.get("type"),
+        }),
+      )
       return
     }
 

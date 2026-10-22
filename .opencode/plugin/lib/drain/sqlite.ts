@@ -18,6 +18,8 @@ export type SqliteStatement = {
 export type SqliteDatabase = {
   prepare(sql: string): SqliteStatement
   close(): void
+  /** Optional raw exec (PRAGMA statements cannot be bound). */
+  exec?(sql: string): void
 }
 
 type BunDatabaseCtor = new (
@@ -39,12 +41,22 @@ function isBun(): boolean {
  * when the file is missing or unreadable; callers degrade to the SDK lane.
  */
 export async function openReadOnlyDb(file: string): Promise<SqliteDatabase> {
+  let db: SqliteDatabase
   if (isBun()) {
     // Non-literal specifier: keeps `bun:sqlite` out of the Node type graph.
     const spec = "bun:sqlite"
     const mod = (await import(spec)) as { Database: BunDatabaseCtor }
-    return new mod.Database(file, { readonly: true })
+    db = new mod.Database(file, { readonly: true })
+  } else {
+    const mod = (await import("node:sqlite")) as { DatabaseSync: NodeDatabaseCtor }
+    db = new mod.DatabaseSync(file, { readOnly: true })
   }
-  const mod = (await import("node:sqlite")) as { DatabaseSync: NodeDatabaseCtor }
-  return new mod.DatabaseSync(file, { readOnly: true })
+  // A wedged writer must not hang the drain read indefinitely
+  // (drain-consumer-plan §2.7): bounded wait on every statement.
+  try {
+    db.exec?.("PRAGMA busy_timeout=5000")
+  } catch {
+    /* pragma is best-effort — the backend may not expose exec */
+  }
+  return db
 }

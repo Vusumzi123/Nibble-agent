@@ -39,6 +39,9 @@ export type ProducerCtx = {
   candidates: DigestCandidate[]
   /** Last dispatched mission id (heartbeat.json) — no-repeat suppression. */
   lastMission: string | null
+  /** drain.consumer — true means the drain loop owns drain; the
+   *  turns-pending producer stops collecting (staleness is untouched). */
+  drainConsumer?: boolean
 }
 
 export type Producer = {
@@ -134,11 +137,14 @@ export const tickProducer: Producer = {
   },
 }
 
-/** Side lane status trigger: unconsumed turns waiting to be drained. */
+/** Side lane status trigger: unconsumed turns waiting to be drained.
+ *  Drain-consumer-plan §4: when `drain.consumer` owns drain, the producer
+ *  stops collecting so the side lane carries staleness only. */
 export const turnsPendingProducer: Producer = {
   id: "turns-pending",
   lane: "side",
   collect(ctx) {
+    if (ctx.drainConsumer) return []
     return collectSideByStatus(ctx, "turns-pending", "turns-pending")
   },
 }
@@ -173,7 +179,8 @@ export function collectItems(ctx: ProducerCtx): QueueItem[] {
  * Dequeue-time runnability re-check. Primary items are runnable while the
  * digest still offers their mission; side items are runnable while their
  * status predicate AND structural filters hold. A menu-blocked item (day-only
- * mission at night) is NOT runnable but stays queued.
+ * mission at night) is NOT runnable but stays queued. A turns-pending item is
+ * never runnable while the drain consumer owns drain (plan §4).
  */
 export function itemRunnable(ctx: ProducerCtx, item: QueueItem): boolean {
   const id = missionIdOf(item)
@@ -183,14 +190,16 @@ export function itemRunnable(ctx: ProducerCtx, item: QueueItem): boolean {
   }
   const mission = ctx.missions.find((m) => m.id === id)
   if (!mission) return false
+  if (ctx.drainConsumer && mission.candidacy === "turns-pending") return false
   if (!missionEligible(mission, ctx)) return false
   return candidacyPasses(mission, statusCandidacy(ctx))
 }
 
 /**
  * Prune-time "is the work still needed". Side items drop when their status
- * is gone (turns consumed elsewhere, note refreshed); primary items are
- * governed purely by their expiry, so they are always "due" here.
+ * is gone (turns consumed elsewhere, note refreshed) or the drain consumer
+ * took over; primary items are governed purely by their expiry, so they are
+ * always "due" here.
  */
 export function itemStillDue(ctx: ProducerCtx, item: QueueItem): boolean {
   if (item.lane === "primary") return true
@@ -198,5 +207,6 @@ export function itemStillDue(ctx: ProducerCtx, item: QueueItem): boolean {
   if (id === null) return false
   const mission = ctx.missions.find((m) => m.id === id)
   if (!mission) return false
+  if (ctx.drainConsumer && mission.candidacy === "turns-pending") return false
   return candidacyPasses(mission, statusCandidacy(ctx))
 }

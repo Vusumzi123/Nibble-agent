@@ -1,29 +1,43 @@
-// Drain pipe orchestration (knowledge-pipeline-redesign §A.12).
+// Drain pipe orchestration (knowledge-pipeline-redesign §A.12,
+// drain-consumer-plan §2.2–§2.7).
 //
-// One run: load cursor -> discover/fetch -> render -> summarize -> hand the
-// items to the active memory provider's writer -> map its WriteReport to the
-// cursor.
+// One run: load cursor -> acquire drain.lock -> discover/fetch -> render ->
+// summarize -> hand the items to the active memory provider's writer -> map
+// its WriteReport to per-session cursor marks. The lock lives INSIDE the pipe
+// so tool, dream, and consumer serialize on one gate regardless of caller
+// (§2.4); acquisition is try-only — a held lock returns `lockHeld` without a
+// ledger line (the caller reports it).
+//
+// Cursor v2 (§2.3): discovery is watermark-based; fetch uses each session's
+// own mark. The watermark never advances past a marked session that still has
+// unconsumed work (its mark floors the advance), so pending counts and
+// rediscovery stay correct; fully-consumed sessions contribute their marks as
+// the new candidate bound. A per-pass `token_budget` is checked between units
+// — never mid-unit — and a budget-stopped pass advances only the sessions
+// whose items were fully reported (§2.2).
 //
 // The pipe writes no vault notes and knows nothing about the writer's prompt
 // internals: the only contract is `WriteReport` (memory/types.ts). A run that
-// cannot report every item does not advance the cursor; transient failures back
-// off, permanent failures count toward poison.
+// cannot report every item does not advance the affected session; transient
+// failures back off, permanent failures count toward poison.
 //
 // Loaded via relative import only.
 import type { DrainConfig } from "./config.ts"
 import {
-  advanceCursor,
+  advanceSession,
+  advanceWatermark,
   defaultCursor,
   loadCursor,
-  pruneSummaries,
+  pruneSessions,
   recordFailure,
   resolveCursorFile,
   saveCursor,
-  setSummary,
+  sessionMarkTs,
   type DrainCursor,
 } from "./cursor.ts"
 import { openDrainSource, type DrainSource } from "./db.ts"
 import type { DrainLedger } from "./ledger.ts"
+import { acquireDrainLock, drainLockFile, lockOptsFromConfig } from "./lock.ts"
 import { renderSession, type RenderedSession } from "./render.ts"
 import { summarizeSession, type SummaryItem, type SummarizerClient } from "./summarize.ts"
 import type {
@@ -35,6 +49,9 @@ import type {
 } from "../memory/types.ts"
 
 export type DrainOutcome = "completed" | "nothing" | "degraded" | "error" | "dropped"
+
+/** Why the pass stopped early (§2.2/§2.6). */
+export type DrainStopReason = "token-budget"
 
 export type DrainPipeResult = {
   outcome: DrainOutcome
@@ -48,8 +65,16 @@ export type DrainPipeResult = {
   session?: string | null
   /** Billable tokens (summarizer + writer) spent by the run. */
   tokens?: number | null
-  degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback"
+  degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback" | "budget-exhausted"
   error?: string
+  /** Set when the pipe could not take drain.lock (§2.4) — no ledger line. */
+  lockHeld?: true
+  /** Early stop: the per-pass budget ran out between units (§2.2). */
+  stopped?: DrainStopReason | null
+  pendingBefore?: number | null
+  pendingAfter?: number | null
+  oldestPendingAgeMs?: number | null
+  budgetRemaining?: number | null
 }
 
 /** One-line mission summary for the heartbeat/dream ledger and backlog. */
@@ -62,12 +87,16 @@ export function formatDrainResult(result: DrainPipeResult): string {
     `${result.skipped} skipped`,
     `cursor ${result.cursorBefore}->${result.cursorAfter}`,
   ]
+  if (result.stopped) bits.push(`stopped:${result.stopped}`)
   if (result.degraded) bits.push(`degraded:${result.degraded}`)
   if (result.error) bits.push(`error:${result.error}`)
   return bits.join(", ")
 }
 
 export type DrainPipeClient = SummarizerClient & MemoryWriteClient
+
+/** Where this pass was invoked from (§5.1 `trigger`). */
+export type DrainTrigger = "consumer" | "tick" | "tool" | "dream"
 
 export type DrainPipeDeps = {
   directory: string
@@ -83,6 +112,10 @@ export type DrainPipeDeps = {
   /** Test/E2E override; defaults to the opencode data dir. */
   dbFile?: string
   ledger?: DrainLedger
+  /** Invocation source recorded on the pipe ledger line (§5.1). */
+  trigger?: DrainTrigger
+  /** Index within the current consumer wake (§5.1). */
+  pass?: number
   onWarn?: (message: string, err?: unknown) => void
 }
 
@@ -118,7 +151,7 @@ export function chunkPlanned(planned: PlannedItem[], size: number): PlannedChunk
 /**
  * Run one drain cycle. Always resolves with a result; expected failures are
  * outcomes, not throws. The cursor is saved only on advance or failure
- * accounting.
+ * accounting. A held drain.lock short-circuits with `lockHeld` (§2.4).
  */
 export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult> {
   const started = Date.now()
@@ -137,8 +170,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   // A fresh cursor starts at epoch and would replay every session in the DB,
   // oldest first. Seed it to a bounded lookback instead; 0 keeps the
   // historical behavior (consolidate from the beginning of history).
-  if (cursor.last_ts <= 0 && cfg.initial_lookback_hours > 0) {
-    cursor = advanceCursor(cursor, Date.now() - cfg.initial_lookback_hours * 3_600_000)
+  if (cursor.watermark_ts <= 0 && cfg.initial_lookback_hours > 0) {
+    cursor = advanceWatermark(cursor, Date.now() - cfg.initial_lookback_hours * 3_600_000)
     try {
       await saveCursor(cursorFile, cursor)
     } catch (err) {
@@ -146,9 +179,17 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     }
   }
 
-  const cursorBefore = cursor.last_ts
+  const cursorBefore = cursor.watermark_ts
+  const budget = cfg.token_budget > 0 ? cfg.token_budget : Infinity
   let promptBytes: number | undefined
   let totalTokens = 0
+  let pendingBefore: number | null = null
+  let pendingAfter: number | null = null
+  let oldestAgeMs: number | null = null
+  let stopped: DrainStopReason | null = null
+
+  const budgetRemaining = (): number | null =>
+    Number.isFinite(budget) ? Math.max(0, Math.floor(budget - totalTokens)) : null
 
   const emit = async (result: DrainPipeResult): Promise<DrainPipeResult> => {
     try {
@@ -166,6 +207,13 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         degraded: result.degraded ?? null,
         error: result.error ?? null,
         wall_ms: Date.now() - started,
+        ...(deps.trigger ? { trigger: deps.trigger } : {}),
+        ...(deps.pass !== undefined ? { pass: deps.pass } : {}),
+        ...(pendingBefore !== null ? { pending_before: pendingBefore } : {}),
+        ...(pendingAfter !== null ? { pending_after: pendingAfter } : {}),
+        ...(oldestAgeMs !== null ? { oldest_pending_age_ms: oldestAgeMs } : {}),
+        ...(stopped ? { stopped } : {}),
+        ...(Number.isFinite(budget) ? { budget_remaining: budgetRemaining() } : {}),
       })
     } catch {
       /* fail-open */
@@ -173,7 +221,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     return result
   }
 
-  const stuck = async (error?: string, degraded?: DrainPipeResult["degraded"]): Promise<DrainPipeResult> =>
+  const stuck = async (
+    error?: string,
+    degraded: DrainPipeResult["degraded"] = undefined,
+  ): Promise<DrainPipeResult> =>
     emit({
       outcome: "nothing",
       sessions: 0,
@@ -181,7 +232,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       consolidated: 0,
       skipped: 0,
       cursorBefore,
-      cursorAfter: cursor.last_ts,
+      cursorAfter: cursor.watermark_ts,
       tokens: totalTokens || null,
       degraded,
       ...(error ? { error } : {}),
@@ -191,6 +242,22 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   // Complete-disable / read-only profiles: never open the DB, never advance.
   if (!deps.provider || !deps.provider.consolidate) {
     return stuck("memory provider has no writer")
+  }
+
+  // §2.4: the writer gate is INSIDE the pipe — try-only, never wait.
+  const lock = await acquireDrainLock(drainLockFile(deps.stateDir), lockOptsFromConfig(cfg))
+  if (!lock) {
+    return {
+      outcome: "nothing",
+      sessions: 0,
+      items: 0,
+      consolidated: 0,
+      skipped: 0,
+      cursorBefore,
+      cursorAfter: cursor.watermark_ts,
+      tokens: null,
+      lockHeld: true,
+    }
   }
 
   let source: DrainSource
@@ -203,6 +270,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       onWarn: deps.onWarn,
     })
   } catch (err) {
+    await lock.release()
     return emit({
       outcome: "error",
       sessions: 0,
@@ -210,7 +278,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       consolidated: 0,
       skipped: 0,
       cursorBefore,
-      cursorAfter: cursor.last_ts,
+      cursorAfter: cursor.watermark_ts,
       error: errorText(err),
     })
   }
@@ -218,28 +286,81 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   let degraded: DrainPipeResult["degraded"] = source.degraded
 
   try {
-    const sessions = await source.discover(cursor.last_ts, cfg.batch_sessions)
+    pendingBefore = await source.unconsumedCount(cursor.watermark_ts)
+    const sessions = await source.discover(cursor.watermark_ts, cfg.batch_sessions)
     const renderings: RenderedSession[] = []
+    // Per-session fetch marks + the watermark floor rule (§2.3): a discovered
+    // session with unconsumed work above its mark floors the watermark so it
+    // is re-discovered; a fully-consumed session contributes its mark as the
+    // candidate bound.
+    const floorMarks: number[] = []
+    const consumedMarks: number[] = []
+    const settleCutoff = Date.now() - Math.max(0, cfg.settle_seconds) * 1000
 
     for (const session of sessions) {
-      const turns = await source.fetch(session.id, cursor.last_ts, cfg.max_turns_per_session)
-      if (turns.length === 0) continue
+      // Settle guard (§2.3): only consume a session that has been idle for
+      // settle_seconds — a streaming assistant message is never read mid-flight.
+      if (cfg.settle_seconds > 0 && session.timeUpdated >= settleCutoff) {
+        floorMarks.push(sessionMarkTs(cursor, session.id))
+        continue
+      }
+
+      let mark = sessionMarkTs(cursor, session.id)
+      // Unknown mark + recover mode (§2.3.1): start at the session's own
+      // creation time, floored at watermark - lookback. Carry mode keeps the
+      // watermark (conservative: no re-read).
+      if (cfg.cursor_migration === "recover" && !cursor.sessions[session.id]) {
+        const floor = Math.max(0, cursor.watermark_ts - cfg.initial_lookback_hours * 3_600_000)
+        mark = Math.max(session.timeCreated || 0, floor)
+      }
+
+      const turns = await source.fetch(session.id, mark, cfg.max_turns_per_session)
+      if (turns.length === 0) {
+        consumedMarks.push(mark)
+        continue
+      }
       const rendered = renderSession(session.id, turns, {
         maxBytes: cfg.max_session_bytes,
-        priorSummary: cursor.summaries[session.id]?.text ?? null,
+        priorSummary: cursor.sessions[session.id]?.summary || null,
       })
-      if (rendered) renderings.push(rendered)
+      if (!rendered) {
+        // Turn rows existed but rendered empty — treat as consumed at the mark.
+        consumedMarks.push(mark)
+        continue
+      }
+      renderings.push(rendered)
+      // A full fetch page may have more turns above this mark: floor the
+      // watermark so the rest is re-read next pass.
+      if (turns.length >= cfg.max_turns_per_session) floorMarks.push(mark)
     }
 
-    if (renderings.length === 0) return stuck(undefined, degraded)
+    if (renderings.length === 0) {
+      if (floorMarks.length > 0) {
+        const held = Math.min(...floorMarks)
+        if (held > cursor.watermark_ts) {
+          cursor = advanceWatermark(cursor, held)
+          await saveCursor(cursorFile, cursor)
+        }
+      }
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
+      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+      oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
+      return stuck(undefined, degraded)
+    }
 
     const planned: PlannedItem[] = []
+    const sessionMaxTs = new Map<string, number>()
     for (const rendered of renderings) {
+      // Budget check BEFORE the next unit (§2.2) — never mid-unit.
+      if (totalTokens >= budget) {
+        stopped = "token-budget"
+        break
+      }
       const summary = await summarizeSession(
         {
           sessionID: rendered.sessionID,
           rendered,
-          priorSummary: cursor.summaries[rendered.sessionID]?.text ?? null,
+          priorSummary: cursor.sessions[rendered.sessionID]?.summary || null,
         },
         {
           client: deps.client,
@@ -255,17 +376,57 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       totalTokens += summary.tokens ?? 0
 
       const ts = Math.max(...rendered.turns.map((turn) => turn.time))
+      sessionMaxTs.set(rendered.sessionID, Math.max(sessionMaxTs.get(rendered.sessionID) ?? 0, ts))
       for (const item of summary.items) {
         planned.push({ item, sessionID: rendered.sessionID, ts })
+      }
+      if (summary.items.length === 0) {
+        // Nothing durable in this session: it is consumed at its mark.
+        consumedMarks.push(ts)
+      }
+    }
+
+    // Sessions never summarized because the budget stopped the loop stay at
+    // their marks (unconsumed above them) — floor the watermark for them.
+    const summarizedIds = new Set(sessionMaxTs.keys())
+    for (const rendered of renderings) {
+      if (!summarizedIds.has(rendered.sessionID)) {
+        floorMarks.push(sessionMarkTs(cursor, rendered.sessionID))
       }
     }
 
     if (planned.length === 0) {
-      // Every session summarized to an empty item list: nothing durable in the
-      // batch. Advance past it so the same turns are not re-ingested each tick,
-      // and spawn no writer.
-      cursor = advanceCursor(cursor, maxTurnTime(renderings))
-      await saveCursor(cursorFile, cursor)
+      // Every summarized session yielded an empty item list: advance those
+      // sessions (and the watermark) so the same turns are not re-ingested,
+      // and spawn no writer. Sessions stopped by the budget stay unadvanced.
+      if (consumedMarks.length > 0) {
+        const bound = Math.max(...consumedMarks)
+        for (const [sid, ts] of sessionMaxTs) cursor = advanceSession(cursor, sid, ts)
+        const candidate = Math.min(
+          bound,
+          ...(floorMarks.length > 0 ? floorMarks : [bound]),
+        )
+        cursor = advanceWatermark(cursor, Math.min(candidate, bound))
+        cursor = pruneSessions(cursor, cfg.continuity_sessions)
+        await saveCursor(cursorFile, cursor)
+      }
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
+      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+      oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
+      if (stopped === "token-budget") {
+        return emit({
+          outcome: "degraded",
+          sessions: renderings.length,
+          items: 0,
+          consolidated: 0,
+          skipped: 0,
+          cursorBefore,
+          cursorAfter: cursor.watermark_ts,
+          tokens: totalTokens || null,
+          degraded: "budget-exhausted",
+          stopped,
+        })
+      }
       return emit({
         outcome: "nothing",
         sessions: renderings.length,
@@ -273,7 +434,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         consolidated: 0,
         skipped: 0,
         cursorBefore,
-        cursorAfter: cursor.last_ts,
+        cursorAfter: cursor.watermark_ts,
         tokens: totalTokens || null,
         degraded,
       })
@@ -300,8 +461,9 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     }
 
     // Chunk the writer so one spawn never has more items than its step budget
-    // can service. The cursor still advances once, only after every chunk
-    // reports or skips all of its items (atomic across chunks).
+    // can service. On a complete run the cursor advances once after every
+    // chunk reports or skips all of its items; on a budget stop only the
+    // fully-reported sessions advance (§2.2).
     const chunks = chunkPlanned(planned, cfg.max_items_per_batch)
     const consumed: number[] = []
     const skipped: number[] = []
@@ -311,6 +473,11 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     promptBytes = 0
 
     for (const chunk of chunks) {
+      // Budget check BEFORE the next writer chunk (§2.2) — never mid-chunk.
+      if (totalTokens >= budget) {
+        stopped = "token-budget"
+        break
+      }
       const writerStarted = Date.now()
       const chunkReport = await deps.provider!.consolidate!(
         chunk.items.map((entry) => entry.item),
@@ -333,6 +500,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursor_after: cursorBefore,
           session: chunkReport.session ?? null,
           error: chunkReport.detail ?? null,
+          ...(deps.trigger ? { trigger: deps.trigger } : {}),
+          ...(deps.pass !== undefined ? { pass: deps.pass } : {}),
         })
       } catch {
         /* fail-open */
@@ -355,15 +524,19 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     }
 
     const boundary = maxTurnTime(renderings)
-    const complete = atomicAll || (failure === null && consumed.length + skipped.length === items.length)
+    const reportedAll = consumed.length + skipped.length === items.length
+    const complete = atomicAll || (failure === null && reportedAll)
 
-    if (failure || !complete) {
+    if (failure || (!complete && stopped === null)) {
       // Transient provider failures back off without poisoning the boundary.
       const errorKind = failure?.errorKind
       if (errorKind !== "transient") {
-        const failed = recordFailure(cursor, boundary, cfg.poison_attempts)
+        const failed = recordFailure(cursor, boundary, cfg.poison_attempts, {
+          backoffMs: cfg.poll_seconds * 4 * 1000,
+        })
         cursor = failed.cursor
         await saveCursor(cursorFile, cursor)
+        pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
         return emit({
           outcome: failed.dropped ? "dropped" : "error",
           sessions: renderings.length,
@@ -371,13 +544,14 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           consolidated: consumed.length,
           skipped: skipped.length,
           cursorBefore,
-          cursorAfter: cursor.last_ts,
+          cursorAfter: cursor.watermark_ts,
           session: writerSession,
           tokens: totalTokens || null,
           degraded,
           error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
       }
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
       return emit({
         outcome: "error",
         sessions: renderings.length,
@@ -385,7 +559,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         consolidated: consumed.length,
         skipped: skipped.length,
         cursorBefore,
-        cursorAfter: cursor.last_ts,
+        cursorAfter: cursor.watermark_ts,
         session: writerSession,
         tokens: totalTokens || null,
         degraded,
@@ -393,21 +567,70 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       })
     }
 
-    cursor = advanceCursor(cursor, boundary)
-
-    const bySession = new Map<string, { ts: number; parts: string[] }>()
-    for (const entry of planned) {
-      const current = bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [] }
+    // Per-session advance (§2.3): only sessions whose items were ALL reported
+    // (or that had no items) consume their mark; partial sessions floor the
+    // watermark so they are re-read from their own mark next pass.
+    // Report labels are 1-based (types.ts: "matching the prompt labels").
+    const reportedLabels = new Set([...consumed, ...skipped])
+    const bySession = new Map<string, { ts: number; parts: string[]; fully: boolean }>()
+    for (let i = 0; i < planned.length; i++) {
+      const entry = planned[i]
+      const current =
+        bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [], fully: true }
       current.ts = Math.max(current.ts, entry.ts)
+      // `atomic: true` reports the whole batch consumed without labels.
+      if (!atomicAll && !reportedLabels.has(i + 1)) current.fully = false
       if (entry.item.summary.trim()) current.parts.push(entry.item.summary.trim())
       bySession.set(entry.sessionID, current)
     }
-    for (const [sessionID, entry] of bySession) {
+
+    let advancedBound = 0
+    for (const [sid, entry] of bySession) {
       const text = entry.parts.join("\n\n").slice(0, 2000)
-      if (text) cursor = setSummary(cursor, sessionID, entry.ts, text)
+      if (entry.fully) {
+        cursor = advanceSession(cursor, sid, entry.ts, text || undefined)
+        advancedBound = Math.max(advancedBound, entry.ts)
+        consumedMarks.push(entry.ts)
+      } else {
+        floorMarks.push(sessionMarkTs(cursor, sid))
+      }
     }
-    cursor = pruneSummaries(cursor, cfg.continuity_sessions)
+    // Sessions with zero items that were summarized this pass are consumed.
+    for (const [sid, ts] of sessionMaxTs) {
+      if (!bySession.has(sid)) {
+        cursor = advanceSession(cursor, sid, ts)
+        advancedBound = Math.max(advancedBound, ts)
+        consumedMarks.push(ts)
+      }
+    }
+
+    if (consumedMarks.length > 0) {
+      const bound = Math.max(...consumedMarks)
+      const candidate = Math.min(bound, ...(floorMarks.length > 0 ? floorMarks : [bound]))
+      cursor = advanceWatermark(cursor, candidate)
+    }
+    cursor = pruneSessions(cursor, cfg.continuity_sessions)
     await saveCursor(cursorFile, cursor)
+
+    pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
+    const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+    oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
+
+    if (stopped === "token-budget") {
+      return emit({
+        outcome: "degraded",
+        sessions: renderings.length,
+        items: planned.length,
+        consolidated: consumed.length,
+        skipped: skipped.length,
+        cursorBefore,
+        cursorAfter: cursor.watermark_ts,
+        session: writerSession,
+        tokens: totalTokens || null,
+        degraded: "budget-exhausted",
+        stopped,
+      })
+    }
 
     return emit({
       outcome: degraded ? "degraded" : "completed",
@@ -416,7 +639,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       consolidated: consumed.length,
       skipped: skipped.length,
       cursorBefore,
-      cursorAfter: cursor.last_ts,
+      cursorAfter: cursor.watermark_ts,
       session: writerSession,
       tokens: totalTokens || null,
       degraded,
@@ -429,7 +652,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       consolidated: 0,
       skipped: 0,
       cursorBefore,
-      cursorAfter: cursor.last_ts,
+      cursorAfter: cursor.watermark_ts,
       tokens: totalTokens || null,
       degraded,
       error: errorText(err),
@@ -440,5 +663,6 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     } catch {
       /* ignore */
     }
+    await lock.release().catch(() => {})
   }
 }

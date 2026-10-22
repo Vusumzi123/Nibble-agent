@@ -25,6 +25,30 @@ export type DrainConfig = {
   drain_prompt_max_bytes: number
   /** Mission ids whose child transcripts are already represented elsewhere. */
   exclude_missions: string[]
+  /** Demand-driven consumer loop; false = the legacy side-lane behaviour. */
+  consumer: boolean
+  /** Run a pass while pending >= N (drain-consumer-plan §2.5). */
+  trigger_pending: number
+  /** Run a pass while the oldest pending turn is >= T hours. */
+  trigger_max_age_hours: number
+  /** A session idle for less than this is not consumed (settle guard). */
+  settle_seconds: number
+  /** Consumer reschedule delay when the backlog is below the trigger. */
+  poll_seconds: number
+  /** Wall-clock ceiling for one consumer wake (§2.6). */
+  max_wall_minutes: number
+  /** Per-pass token budget; 0 = unlimited (ceiling, not a target). */
+  token_budget: number
+  /** Per-wake token budget (§2.6). */
+  wake_token_budget: number
+  /** Backstop only — the observable budgets decide (§2.6). */
+  max_passes_per_wake: number
+  /** Drain lock heartbeat interval (§2.4). */
+  lock_refresh_ms: number
+  /** Drain lock stale threshold = 3 × lock_refresh_ms (§2.4). */
+  lock_stale_ms: number
+  /** v1 → v2 mark repair at discovery: carry | recover (§2.3.1). */
+  cursor_migration: "carry" | "recover"
 }
 
 export const DEFAULT_DRAIN: DrainConfig = {
@@ -44,9 +68,21 @@ export const DEFAULT_DRAIN: DrainConfig = {
   poison_attempts: 3,
   drain_prompt_max_bytes: 60000,
   exclude_missions: ["drain", "staleness"],
+  consumer: true,
+  trigger_pending: 12,
+  trigger_max_age_hours: 2,
+  settle_seconds: 120,
+  poll_seconds: 60,
+  max_wall_minutes: 15,
+  token_budget: 80000,
+  wake_token_budget: 250000,
+  max_passes_per_wake: 6,
+  lock_refresh_ms: 60000,
+  lock_stale_ms: 180000,
+  cursor_migration: "carry",
 }
 
-const BOOL_KEYS = new Set(["enabled"])
+const BOOL_KEYS = new Set(["enabled", "consumer"])
 const INT_KEYS = new Set([
   "batch_sessions",
   "initial_lookback_hours",
@@ -59,6 +95,16 @@ const INT_KEYS = new Set([
   "continuity_sessions",
   "poison_attempts",
   "drain_prompt_max_bytes",
+  "trigger_pending",
+  "trigger_max_age_hours",
+  "settle_seconds",
+  "poll_seconds",
+  "max_wall_minutes",
+  "token_budget",
+  "wake_token_budget",
+  "max_passes_per_wake",
+  "lock_refresh_ms",
+  "lock_stale_ms",
 ])
 const KNOWN_KEYS = new Set(Object.keys(DEFAULT_DRAIN))
 
@@ -153,12 +199,35 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     0,
     DEFAULT_DRAIN.drain_prompt_max_bytes,
   )
+  cfg.trigger_pending = atLeast(cfg.trigger_pending, 1, DEFAULT_DRAIN.trigger_pending)
+  cfg.trigger_max_age_hours = atLeast(
+    cfg.trigger_max_age_hours,
+    1,
+    DEFAULT_DRAIN.trigger_max_age_hours,
+  )
+  cfg.settle_seconds = atLeast(cfg.settle_seconds, 0, DEFAULT_DRAIN.settle_seconds)
+  cfg.poll_seconds = atLeast(cfg.poll_seconds, 1, DEFAULT_DRAIN.poll_seconds)
+  cfg.max_wall_minutes = atLeast(cfg.max_wall_minutes, 1, DEFAULT_DRAIN.max_wall_minutes)
+  cfg.token_budget = atLeast(cfg.token_budget, 0, DEFAULT_DRAIN.token_budget)
+  cfg.wake_token_budget = atLeast(cfg.wake_token_budget, 0, DEFAULT_DRAIN.wake_token_budget)
+  cfg.max_passes_per_wake = atLeast(
+    cfg.max_passes_per_wake,
+    1,
+    DEFAULT_DRAIN.max_passes_per_wake,
+  )
+  cfg.lock_refresh_ms = atLeast(cfg.lock_refresh_ms, 1000, DEFAULT_DRAIN.lock_refresh_ms)
+  // Stale must be >= 3 × refresh so a slow unit never risks its own lock (§2.4).
+  cfg.lock_stale_ms = Math.max(
+    atLeast(cfg.lock_stale_ms, 1000, DEFAULT_DRAIN.lock_stale_ms),
+    3 * cfg.lock_refresh_ms,
+  )
 
   if (typeof cfg.cursor_file !== "string" || !cfg.cursor_file.trim()) {
     cfg.cursor_file = DEFAULT_DRAIN.cursor_file
   }
   if (typeof cfg.writer_model !== "string") cfg.writer_model = DEFAULT_DRAIN.writer_model
   if (typeof cfg.summarize_model !== "string") cfg.summarize_model = DEFAULT_DRAIN.summarize_model
+  if (cfg.cursor_migration !== "recover") cfg.cursor_migration = "carry"
   cfg.exclude_missions =
     coerceMissionList(cfg.exclude_missions) ?? [...DEFAULT_DRAIN.exclude_missions]
 

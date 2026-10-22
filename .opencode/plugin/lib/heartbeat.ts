@@ -621,6 +621,9 @@ export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/lib/lanes/producers.ts",
   ".opencode/plugin/lib/drain/status.ts",
   ".opencode/plugin/lib/drain/tool.ts",
+  ".opencode/plugin/lib/drain/consumer.ts",
+  ".opencode/plugin/lib/drain/lock.ts",
+  ".opencode/plugin/lib/drain/pipe.ts",
 ]
 
 /** Relative plugin files modified after the process started (mtime newer

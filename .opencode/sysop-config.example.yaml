@@ -29,10 +29,12 @@ audit:
   rotate_by: size            # size | daily | weekly
 
 drain:
-  # Cursor-backed conversation consolidation (drain-pipe). The heartbeat/dream
-  # `drain` mission reads the opencode SQLite store from the cursor, summarizes
-  # each session, and hands labelled items to rag-brain. All keys are optional.
+  # Cursor-backed conversation consolidation (drain-pipe). With consumer: true
+  # (default) a demand-driven in-process loop runs passes on its own timer
+  # (docs/drain-consumer.md); consumer: false returns drain to the heartbeat
+  # side lane (the rollback path). All keys are optional and hot-read.
   enabled: true
+  consumer: true
   cursor_file: drain-cursor.json   # leaf under <state>
   writer_model: ""             # rag-brain writer; "" = the agent default
   summarize_model: ""          # session-summarizer; "" = the agent default
@@ -48,6 +50,18 @@ drain:
   poison_attempts: 3           # failed runs at one boundary before dropping
   drain_prompt_max_bytes: 60000
   exclude_missions: [drain, staleness]  # mission transcripts not drained
+  # Consumer loop (docs/drain-consumer-plan.md §3).
+  trigger_pending: 12          # run a pass while pending >= N
+  trigger_max_age_hours: 2     # or the oldest pending turn is >= T hours old
+  settle_seconds: 120          # a session idle this long is safe to consume
+  poll_seconds: 60             # reschedule delay when below the trigger
+  max_wall_minutes: 15         # wall-clock ceiling per wake
+  token_budget: 80000          # per pass; 0 = unlimited (ceiling, not a target)
+  wake_token_budget: 250000    # per wake
+  max_passes_per_wake: 6       # backstop only — the budgets decide
+  lock_refresh_ms: 60000       # drain.lock heartbeat interval
+  lock_stale_ms: 180000        # stale threshold (3 x refresh, enforced)
+  cursor_migration: carry      # carry | recover — v1 -> v2 mark repair (§2.3.1)
 
 memory:
   # One active memory provider (docs/knowledge-memory-modularization.md).

@@ -140,8 +140,25 @@ export async function runDrainForMission(deps: DrainToolDeps): Promise<DrainTool
       registerChild: deps.registerChild,
       dbFile: deps.dbFile,
       ledger: deps.ledger,
+      trigger: "tool",
       onWarn: deps.onWarn,
     })
+    // §2.4: the pipe is try-only on drain.lock — a held lock is a clean skip
+    // for the mission (roll-mission), never a wait.
+    if (result.lockHeld) {
+      return {
+        status: "skipped",
+        reason: "lock-held",
+        outcome: null,
+        summary: "drain:lock-held",
+        tokens: 0,
+        session: null,
+        cursor_before: result.cursorBefore,
+        cursor_after: result.cursorAfter,
+        sessions: 0,
+        items: 0,
+      }
+    }
     return {
       status: "completed",
       reason: result.outcome === "nothing" ? "nothing" : null,

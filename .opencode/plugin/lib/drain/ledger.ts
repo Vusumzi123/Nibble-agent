@@ -16,7 +16,7 @@ import { nowIso } from "../util.ts"
 
 export const DRAIN_LEDGER_FILE = "drain.log"
 
-export type DrainLedgerSource = "pipe" | "writer" | "explorer"
+export type DrainLedgerSource = "pipe" | "writer" | "explorer" | "consumer"
 
 export type DrainLedgerOutcome =
   | "completed"

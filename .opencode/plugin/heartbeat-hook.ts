@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { automationChildSessions } from "./lib/automation.ts"
@@ -89,6 +90,7 @@ import {
 } from "./lib/lanes/producers.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
+import { startDrainConsumer, type DrainConsumerHandle } from "./lib/drain/consumer.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
@@ -284,6 +286,63 @@ export default (async ({ client, directory, ...rest }) => {
       await logger.append({ ts: nowIso(), event: "tick", pid: process.pid, ...entry })
     } catch (err) {
       void diag.error("[heartbeat-hook] tick log failed:", err)
+    }
+  }
+
+  // Drain consumer (docs/drain-consumer.md): a demand-driven loop sharing no
+  // lock with the tick — each pass serializes through drain.lock inside the
+  // pipe. Hot-reads drain.consumer each wake, so the rollback flag
+  // (`consumer: false`) applies without a restart. Its timer is unref'd; it
+  // lives and dies with this process like the tick loop.
+  const drainLedger = createDrainLedger({ logDir, home: homedir() })
+  const drainConsumer: DrainConsumerHandle = startDrainConsumer({
+    directory: dir,
+    stateDir,
+    vaultDir,
+    client: client as unknown as DrainPipeClient,
+    waitForIdle: waitForChildIdle,
+    registerChild: (sid) => automationChildSessions.add(sid),
+    ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
+    ledger: drainLedger,
+    resolveProvider: async () => {
+      const memoryCfg = await readMemoryConfig(dir)
+      return resolveProvider(memoryCfg.provider, {
+        directory: dir,
+        stateDir,
+        vaultDir,
+        drain: await readDrainConfig(dir),
+        dbFile: drainDbFile,
+        onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+      })
+    },
+    onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+  })
+
+  // Drain health for the tick ledger line (§5.3): read-only view of the
+  // consumer's marker + config, never a DB call on the tick's critical path.
+  const drainHealth = async (): Promise<{
+    pending: number | null
+    oldest_age_ms: number | null
+    last_wake_age_ms: number | null
+  } | null> => {
+    try {
+      const cfg = await readDrainConfig(dir)
+      if (!cfg.enabled || !cfg.consumer) return null
+      const raw = await readFile(drainConsumer.currentFile, "utf8")
+      const marker = JSON.parse(raw) as {
+        pending?: number | null
+        oldest_pending_age_ms?: number | null
+        updated_at?: string
+      }
+      const updatedMs = marker.updated_at ? Date.parse(marker.updated_at) : NaN
+      return {
+        pending: typeof marker.pending === "number" ? marker.pending : null,
+        oldest_age_ms:
+          typeof marker.oldest_pending_age_ms === "number" ? marker.oldest_pending_age_ms : null,
+        last_wake_age_ms: Number.isFinite(updatedMs) ? Math.max(0, Date.now() - updatedMs) : null,
+      }
+    } catch {
+      return null
     }
   }
 
@@ -616,21 +675,27 @@ export default (async ({ client, directory, ...rest }) => {
 
       // One ledger line per tick (§7). `reason` disambiguates no_reply:
       // all-quiet pre-gate, decisions-disabled, provider error/abstain/shape,
-      // or an explicit JEV no_reply choice.
+      // or an explicit JEV no_reply choice. Each line carries the drain
+      // consumer's health (plan §5.3) so the tick view never needs drain.log.
+      let drainHealthCache: Awaited<ReturnType<typeof drainHealth>> | undefined
       const ledger = (extra: Record<string, unknown>): Promise<void> =>
-        logTick({
-          tick,
-          digest_hash: digest.digest_hash,
-          level: digest.level,
-          quiet: digest.quiet,
-          candidates: digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`),
-          bias: digest.bias,
-          ...extra,
-          mood_event: moodEvent,
-          // Exec time for the dashboard's metrics widget (card 16): ms from
-          // tick start to this ledger write.
-          duration_ms: Date.now() - nowMs,
-        })
+        (async () => {
+          if (drainHealthCache === undefined) drainHealthCache = await drainHealth()
+          return logTick({
+            tick,
+            digest_hash: digest.digest_hash,
+            level: digest.level,
+            quiet: digest.quiet,
+            candidates: digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`),
+            bias: digest.bias,
+            ...extra,
+            ...(drainHealthCache ? { drain: drainHealthCache } : {}),
+            mood_event: moodEvent,
+            // Exec time for the dashboard's metrics widget (card 16): ms from
+            // tick start to this ledger write.
+            duration_ms: Date.now() - nowMs,
+          })
+        })()
       ledgerForTick = ledger
 
       // 5. Sleep-system pre-gate (§17.2): inside the quiet window the dream
@@ -668,10 +733,14 @@ export default (async ({ client, directory, ...rest }) => {
       // 6b. Lane queues (docs/heartbeat-lanes.md): producers collect work
       // deterministically — zero LLM calls. The tick producer projects the
       // digest's primary candidates; the status producers feed the side lane
-      // (drain on pending turns, staleness on an old reference note).
+      // (staleness on an old reference note). When the drain consumer owns
+      // drain (plan §4), the turns-pending producer stops collecting — the
+      // side lane is staleness-only.
       phase = "queues"
       await setCurrent({ phase })
       const allMissions = await loadMissions(dir).catch(() => [])
+      const drainCfgForProducers = await readDrainConfig(dir).catch(() => null)
+      const drainConsumerOwnsDrain = Boolean(drainCfgForProducers?.enabled && drainCfgForProducers?.consumer)
       const producerCtx: ProducerCtx = {
         nowMs,
         level: digest.level,
@@ -680,6 +749,7 @@ export default (async ({ client, directory, ...rest }) => {
         missions: allMissions,
         candidates: digest.candidates,
         lastMission: state.last_mission,
+        drainConsumer: drainConsumerOwnsDrain,
       }
       let queues = enqueueItems(await loadQueues(join(stateDir, LANES_FILE)), collectItems(producerCtx))
       queues = pruneQueues(queues, nowMs, (item) => itemStillDue(producerCtx, item)).queues

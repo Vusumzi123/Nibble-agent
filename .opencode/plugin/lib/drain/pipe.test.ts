@@ -111,7 +111,7 @@ async function seedDb(
   const file = join(dir, "opencode.db")
   const db = new DatabaseSync(file)
   db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
     CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
@@ -198,8 +198,8 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.equal(result.tokens, 14, "summarizer 7 + writer 7")
 
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.last_ts, 1000)
-  assert.match(cursor.summaries["top-1"].text, /Restart wg0/)
+  assert.equal(cursor.watermark_ts, 1000)
+  assert.match(cursor.sessions["top-1"].summary, /Restart wg0/)
 
   const writerPrompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
   assert.match(writerPrompt, /^Consolidation mode\./)
@@ -232,13 +232,13 @@ test("a fresh cursor starts at the configured lookback, not at epoch", async () 
   assert.ok(result.cursorBefore >= before - lookback - 1000)
   assert.ok(result.cursorBefore <= Date.now() - lookback + 1000)
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.last_ts, result.cursorBefore)
+  assert.equal(cursor.watermark_ts, result.cursorBefore)
   assert.equal(prompts.length, 0, "old sessions are not summarized")
 })
 
 test("lookback still picks up a session inside the window", async () => {
   const now = Date.now()
-  const base = { ...(await workspace()), dbFile: await seedDb({ time: now - 60_000, sessionTime: now - 60_000 }) }
+  const base = { ...(await workspace()), dbFile: await seedDb({ time: now - 300_000, sessionTime: now - 300_000 }) }
   const { client } = fakeClient({ writerReply: report(["#1"]) })
 
   const result = await runDrainPipe(
@@ -248,7 +248,7 @@ test("lookback still picks up a session inside the window", async () => {
   assert.equal(result.outcome, "completed")
   assert.equal(result.sessions, 1)
   assert.equal(result.items, 1)
-  assert.ok(result.cursorAfter >= now - 60_000)
+  assert.ok(result.cursorAfter >= now - 300_000)
 })
 
 test("nothing to do leaves the cursor untouched", async () => {
@@ -259,7 +259,7 @@ test("nothing to do leaves the cursor untouched", async () => {
   assert.equal(result.outcome, "nothing")
   assert.equal(result.cursorAfter, 0)
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.last_ts, 0)
+  assert.equal(cursor.watermark_ts, 0)
 })
 
 test("disabled config is a no-op", async () => {
@@ -287,7 +287,7 @@ test("a valid empty summary advances the cursor without spawning a writer", asyn
     "no writer spawn for an empty batch",
   )
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.last_ts, 1000)
+  assert.equal(cursor.watermark_ts, 1000)
 })
 
 test("a partial writer report blocks the cursor and counts attempts", async () => {
@@ -300,12 +300,15 @@ test("a partial writer report blocks the cursor and counts attempts", async () =
   assert.equal(first.cursorAfter, 0)
 
   const cursor1 = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor1.last_ts, 0)
-  assert.deepEqual(cursor1.blocked, { ts: 1000, attempts: 1 })
+  assert.equal(cursor1.watermark_ts, 0)
+  assert.equal(cursor1.blocked.ts, 1000)
+  assert.equal(cursor1.blocked.attempts, 1)
+  assert.ok(cursor1.blocked.blocked_until > 0, "a failure sets the backoff deadline")
 
   await runDrainPipe(deps(base, client))
   const cursor2 = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.deepEqual(cursor2.blocked, { ts: 1000, attempts: 2 })
+  assert.equal(cursor2.blocked.ts, 1000)
+  assert.equal(cursor2.blocked.attempts, 2)
 })
 
 test("poison advances past a batch that never reports completely", async () => {
@@ -319,8 +322,9 @@ test("poison advances past a batch that never reports completely", async () => {
   assert.equal(third.outcome, "dropped")
   assert.equal(third.cursorAfter, 1000)
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.last_ts, 1000)
-  assert.deepEqual(cursor.blocked, { ts: 1000, attempts: 0 })
+  assert.equal(cursor.watermark_ts, 1000)
+  assert.equal(cursor.blocked.ts, 1000)
+  assert.equal(cursor.blocked.attempts, 0)
 })
 
 test("a writer timeout is reported and does not advance", async () => {
@@ -483,7 +487,9 @@ test("a later chunk failure blocks the cursor even when earlier chunks succeeded
   assert.equal(result.cursorAfter, 0)
   assert.match(result.error ?? "", /chunk two failed/)
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.deepEqual(cursor.blocked, { ts: 1000, attempts: 1 })
+  assert.equal(cursor.blocked.ts, 1000)
+  assert.equal(cursor.blocked.attempts, 1)
+  assert.ok(cursor.blocked.blocked_until > 0, "a failure sets the backoff deadline")
 })
 
 test("a transient provider error backs off without poisoning the boundary", async () => {

@@ -114,25 +114,40 @@ and root/sandbox/dry flags.
 ## `drain:`
 
 Cursor-backed conversation consolidation (`lib/drain/*`, design:
-`docs/knowledge-pipeline-redesign.md`). The drain mission discovers top-level
-sessions newer than the cursor, renders and summarizes each delta, and hands
-labelled `#1..N` items to `rag-brain`. The writer reports a
-`consolidated`/`skipped` fence; the cursor advances only when every item is
-reported exactly once.
+`docs/knowledge-pipeline-redesign.md`, consumer: `docs/drain-consumer.md`).
+With `consumer: true` (default) a demand-driven in-process loop runs passes
+on its own timer; `consumer: false` returns drain to the heartbeat side lane
+(the rollback path). A pass discovers top-level sessions newer than the
+watermark, renders and summarizes each settled delta, and hands labelled
+`#1..N` items to `rag-brain`. The writer reports a
+`consolidated`/`skipped` fence; per-session cursor marks advance only for
+fully-reported sessions.
 
 | Key | Meaning |
 | --- | ------- |
-| `enabled` | Master switch for the drain tool (`false` = the mission declines). |
-| `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the activity-time cursor (`last_ts`), the blocked counter, and per-session continuity summaries. |
+| `enabled` | Master switch (`false` = the mission declines and the consumer idles). |
+| `consumer` | `true` = the demand-driven loop owns drain; `false` = legacy side-lane behaviour (plan §9 rollback). |
+| `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the v2 watermark, per-session marks + continuity summaries, and the blocked/backoff counter. |
 | `writer_model` | `rag-brain` writer model; `""` = the agent default. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |
-| `batch_sessions` | Max top-level sessions per run. |
+| `batch_sessions` | Max top-level sessions per pass. |
 | `initial_lookback_hours` | Fresh-cursor start: only consolidate sessions active in the last N hours (`0` = whole history). |
 | `max_turns_per_session` | Cap on fetched text parts per session. |
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
 | `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 8). |
 | `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness]`. |
+| `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |
+| `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |
+| `settle_seconds` | A session idle for less than this is not consumed — the half-written-turn guard (default 120). |
+| `poll_seconds` | Consumer reschedule delay when the backlog is below the trigger (default 60). |
+| `max_wall_minutes` | Wall-clock ceiling for one consumer wake (default 15). |
+| `token_budget` | Per-pass token ceiling, checked between units; `0` = unlimited (default 80 000). |
+| `wake_token_budget` | Per-wake token ceiling (default 250 000). |
+| `max_passes_per_wake` | Backstop only — the observable budgets decide first (default 6). |
+| `lock_refresh_ms` | `drain.lock` heartbeat interval (default 60 000). |
+| `lock_stale_ms` | Stale threshold; lifted to 3 × refresh at load (default 180 000). |
+| `cursor_migration` | `carry` (default) or `recover` — v1 → v2 unknown-mark repair (plan §2.3.1). |
 | `prefetch_candidates` | Candidate notes scored deterministically per batch. |
 | `continuity_turns` | Reserved for continuity tuning (currently unused). |
 | `continuity_sessions` | Prior per-session summaries kept for long-lived sessions. |

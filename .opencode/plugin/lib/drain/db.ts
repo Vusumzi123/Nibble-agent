@@ -25,6 +25,8 @@ export type DrainSession = {
   directory: string
   /** Activity time (`session.time_updated`). */
   timeUpdated: number
+  /** Creation time (`session.time_created`; 0 on the SDK lane when absent). */
+  timeCreated: number
 }
 
 export type DrainTurn = {
@@ -45,6 +47,8 @@ export type DrainSource = {
   discover(lastTs: number, limit: number): Promise<DrainSession[]>
   fetch(sessionID: string, lastTs: number, limit: number): Promise<DrainTurn[]>
   unconsumedCount(lastTs: number): Promise<number>
+  /** Oldest unconsumed turn's activity time, or null when the lane is empty. */
+  oldestUnconsumedTs(lastTs: number): Promise<number | null>
   close(): Promise<void>
 }
 
@@ -105,7 +109,7 @@ export type OpenDrainSourceOptions = {
 const TITLE_PLACEHOLDER = "__AUTOMATION_TITLES__"
 
 const DISCOVER_SQL = `
-  SELECT id, directory, time_updated
+  SELECT id, directory, time_updated, time_created
   FROM session
   WHERE parent_id IS NULL
     AND directory = ?
@@ -141,6 +145,19 @@ const COUNT_SQL = `
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
     AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
 
+const OLDEST_SQL = `
+  SELECT min(m.time_created) AS t
+  FROM message m
+  JOIN part p ON p.message_id = m.id
+  JOIN session s ON s.id = m.session_id
+  WHERE s.parent_id IS NULL
+    AND s.directory = ?
+    AND m.time_created > ?
+    AND s.title NOT IN (${TITLE_PLACEHOLDER})
+    AND json_extract(p.data, '$.type') = 'text'
+    AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
+    AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
+
 export const FETCH_QUERY_PLAN_SQL = `EXPLAIN QUERY PLAN ${FETCH_SQL}`
 
 /** Rows of the fetch query plan (tests assert the index is used). */
@@ -156,7 +173,7 @@ export function explainFetch(
 }
 
 const REQUIRED_COLUMNS: Record<string, string[]> = {
-  session: ["id", "parent_id", "directory", "time_updated", "title"],
+  session: ["id", "parent_id", "directory", "time_updated", "time_created", "title"],
   message: ["id", "session_id", "time_created", "data"],
   part: ["message_id", "data"],
 }
@@ -218,6 +235,7 @@ function sqliteSource(
   const discover = db.prepare(withTitles(DISCOVER_SQL, titles))
   const fetch = db.prepare(FETCH_SQL)
   const count = db.prepare(withTitles(COUNT_SQL, titles))
+  const oldest = db.prepare(withTitles(OLDEST_SQL, titles))
 
   return {
     kind: "sqlite",
@@ -232,6 +250,7 @@ function sqliteSource(
         id: String(row.id ?? ""),
         directory: String(row.directory ?? ""),
         timeUpdated: Number(row.time_updated ?? 0),
+        timeCreated: Number(row.time_created ?? 0),
       }))
     },
     async fetch(sessionID, lastTs, limit) {
@@ -243,6 +262,13 @@ function sqliteSource(
         | { n?: unknown }
         | undefined
       return Number(row?.n ?? 0)
+    },
+    async oldestUnconsumedTs(lastTs) {
+      const row = oldest.get(projectDir, lastTs, ...titles) as
+        | { t?: unknown }
+        | undefined
+      const t = Number(row?.t ?? 0)
+      return Number.isFinite(t) && t > 0 ? t : null
     },
     async close() {
       db.close()
@@ -300,6 +326,7 @@ function sdkSource(
         id: String(s.id ?? ""),
         directory: typeof s.directory === "string" ? s.directory : projectDir,
         timeUpdated: Number(s.time?.updated ?? 0),
+        timeCreated: Number(s.time?.created ?? 0),
       }))
       .filter((s) => s.id !== "" && s.timeUpdated > lastTs)
       .sort((a, b) => a.timeUpdated - b.timeUpdated)
@@ -345,6 +372,17 @@ function sdkSource(
       }
       return total
     },
+    async oldestUnconsumedTs(lastTs) {
+      const sessions = await discover(lastTs, 1000)
+      let oldest: number | null = null
+      for (const session of sessions) {
+        const turns = await fetchTurns(session.id, lastTs, Number.MAX_SAFE_INTEGER)
+        for (const turn of turns) {
+          if (oldest === null || turn.time < oldest) oldest = turn.time
+        }
+      }
+      return oldest
+    },
     async close() {},
   }
 }
@@ -374,6 +412,41 @@ export async function countUnconsumed(opts: {
   })
   try {
     return await source.unconsumedCount(opts.lastTs)
+  } finally {
+    await source.close().catch(() => {})
+  }
+}
+
+/**
+ * One-shot oldest-unconsumed age for the consumer trigger (drain-consumer-plan
+ * §2.5): the activity time of the oldest eligible text part newer than the
+ * cursor, or null when the lane is empty/unreadable. Opens and closes the read
+ * source like `countUnconsumed`.
+ */
+export async function oldestPendingAge(opts: {
+  projectDir: string
+  lastTs: number
+  now?: number
+  dbFile?: string
+  client?: DrainSdkClient
+  home?: string
+  env?: NodeJS.ProcessEnv
+  excludeMissions?: readonly string[]
+  onWarn?: DrainWarn
+}): Promise<{ oldestTs: number | null; ageMs: number | null }> {
+  const now = opts.now ?? Date.now()
+  const source = await openDrainSource({
+    projectDir: opts.projectDir,
+    client: opts.client,
+    dbFile: opts.dbFile,
+    home: opts.home,
+    env: opts.env,
+    excludeMissions: opts.excludeMissions,
+    onWarn: opts.onWarn,
+  })
+  try {
+    const oldestTs = await source.oldestUnconsumedTs(opts.lastTs)
+    return oldestTs === null ? { oldestTs: null, ageMs: null } : { oldestTs, ageMs: Math.max(0, now - oldestTs) }
   } finally {
     await source.close().catch(() => {})
   }

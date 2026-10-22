@@ -31,6 +31,7 @@ function createFixture(file: string): DatabaseSync {
       parent_id TEXT,
       directory TEXT NOT NULL,
       time_updated INTEGER NOT NULL,
+      time_created INTEGER NOT NULL DEFAULT 0,
       title TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE message (

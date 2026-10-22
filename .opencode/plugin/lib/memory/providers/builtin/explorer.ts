@@ -66,7 +66,7 @@ function memorySearchTool(factory: MemoryToolFactory, deps: ExplorerProviderDeps
         const cursor = await loadCursor(resolveCursorFile(deps.stateDir, deps.drain.cursor_file))
         const hits = await searchUnconsumed({
           projectDir: dir,
-          cursorTs: cursor.last_ts,
+          cursorTs: cursor.watermark_ts,
           query: args.query,
           topK: args.top_k ?? 5,
           since: args.since,
@@ -75,7 +75,7 @@ function memorySearchTool(factory: MemoryToolFactory, deps: ExplorerProviderDeps
           dbFile: deps.dbFile,
           excludeMissions: deps.drain.exclude_missions,
         })
-        return JSON.stringify({ lane: "unconsolidated", cursor: cursor.last_ts, hits })
+        return JSON.stringify({ lane: "unconsolidated", cursor: cursor.watermark_ts, hits })
       } catch (err) {
         deps.onWarn?.("memory explorer: memory_search failed", err)
         return JSON.stringify({
@@ -120,7 +120,7 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
       const cursor = await loadCursor(resolveCursorFile(deps.stateDir, deps.drain.cursor_file))
       return searchUnconsumed({
         projectDir: deps.directory,
-        cursorTs: cursor.last_ts,
+        cursorTs: cursor.watermark_ts,
         query: req.query,
         topK: req.topK,
         since: req.since,
@@ -143,7 +143,7 @@ export function createExplorerProvider(deps: ExplorerProviderDeps): MemoryProvid
         const cursor = await loadCursor(resolveCursorFile(deps.stateDir, deps.drain.cursor_file))
         const [last] = await searchUnconsumed({
           projectDir: deps.directory,
-          cursorTs: cursor.last_ts,
+          cursorTs: cursor.watermark_ts,
           query: "",
           topK: 1,
           dbFile: deps.dbFile,

@@ -19,6 +19,8 @@ function report(labels: string[], skipped: string[] = []): string {
   return ["```consolidated", ...labels, "```", "```skipped", ...skipped, "```"].join("\n")
 }
 
+const RECENT = Date.now() - 3_600_000
+
 function workspace(): Promise<{ directory: string; stateDir: string; vaultDir: string }> {
   return mkdtemp(join(tmpdir(), "memory-brain-")).then(async (root) => {
     const stateDir = join(root, "state")
@@ -132,7 +134,7 @@ test("pending counts turns after the cursor", async () => {
   const dbFile = join(ws.directory, "opencode.db")
   const db = new DatabaseSync(dbFile)
   db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
   `)
@@ -140,12 +142,12 @@ test("pending counts turns after the cursor", async () => {
     "top-1",
     null,
     ws.directory,
-    2000,
+    RECENT,
   )
   db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
     "m1",
     "top-1",
-    2000,
+    RECENT,
     JSON.stringify({ role: "user" }),
   )
   db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(

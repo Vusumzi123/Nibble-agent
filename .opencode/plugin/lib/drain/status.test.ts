@@ -19,7 +19,7 @@ async function workspace(): Promise<{ directory: string; stateDir: string; dbFil
   const dbFile = join(stateDir, "turns.db")
   const db = new DatabaseSync(dbFile)
   db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
   `)
@@ -83,7 +83,7 @@ test("drain status: disabled and no-writer are locked", async () => {
 test("drain status: cursor parity and in-sync at the cursor", async () => {
   const ws = await workspace()
   addTurn(ws.dbFile, ws.directory, "old", 1_000)
-  await saveCursor(resolveCursorFile(ws.stateDir), { ...defaultCursor(), last_ts: 1_000 })
+  await saveCursor(resolveCursorFile(ws.stateDir), { ...defaultCursor(), watermark_ts: 1_000 })
 
   const synced = await readDrainStatus({ ...ws, config: cfg(), provider: writer })
   assert.equal(synced.pending, 0)

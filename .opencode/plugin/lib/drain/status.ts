@@ -11,7 +11,13 @@ import { countUnconsumed } from "./db.ts"
 import { loadCursor, resolveCursorFile } from "./cursor.ts"
 import type { MemoryProvider } from "../memory/types.ts"
 
-export type DrainSkipReason = "disabled" | "no-provider" | "paused" | "in-sync" | "unavailable"
+export type DrainSkipReason =
+  | "disabled"
+  | "no-provider"
+  | "paused"
+  | "in-sync"
+  | "unavailable"
+  | "lock-held"
 
 export type DrainStatus = {
   enabled: boolean
@@ -28,18 +34,18 @@ export type DrainStatus = {
   error?: string
 }
 
-/** The pipe's effective cursor: a fresh cursor starts at the configured
- *  lookback, not at epoch. Read-only; the pipe owns the save. */
+/** The pipe's effective discovery bound: a fresh cursor starts at the
+ *  configured lookback, not at epoch. Read-only; the pipe owns the save. */
 export async function effectiveCursorLastTs(
   stateDir: string,
   config: DrainConfig,
   now: number = Date.now(),
 ): Promise<{ lastTs: number; seeded: boolean }> {
   const cursor = await loadCursor(resolveCursorFile(stateDir, config.cursor_file))
-  if (cursor.last_ts <= 0 && config.initial_lookback_hours > 0) {
+  if (cursor.watermark_ts <= 0 && config.initial_lookback_hours > 0) {
     return { lastTs: now - config.initial_lookback_hours * 3_600_000, seeded: true }
   }
-  return { lastTs: cursor.last_ts, seeded: false }
+  return { lastTs: cursor.watermark_ts, seeded: false }
 }
 
 /**

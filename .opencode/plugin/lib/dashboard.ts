@@ -49,8 +49,10 @@ import { readAll, readBacklogConfig, resolveBacklogFile, type BacklogEntry } fro
 import { readResolvedPaths } from "./paths.ts"
 import { LOG_DEFAULTS, getLogger } from "./logging.ts"
 import { readDrainConfig } from "./drain/config.ts"
+import { DRAIN_CURRENT_FILE } from "./drain/consumer.ts"
 import { loadCursor, resolveCursorFile } from "./drain/cursor.ts"
 import { countUnconsumed } from "./drain/db.ts"
+import { DRAIN_LEDGER_FILE } from "./drain/ledger.ts"
 import { readMemoryConfig } from "./memory/config.ts"
 import type { MemoryProfile } from "./memory/types.ts"
 
@@ -674,6 +676,12 @@ export type MemoryPendingSnapshot = {
   cursor_updated_at: string | null
   /** True when the cursor was missing and the lookback window was applied. */
   seeded: boolean
+  /** Consumer-loop dials (plan §6.1): trigger and next scheduled wake. */
+  consumer: boolean
+  trigger_pending: number
+  trigger_max_age_hours: number
+  next_due: number | null
+  oldest_pending_age_ms: number | null
   available: boolean
   error?: string
 }
@@ -717,12 +725,35 @@ export async function memoryPendingSnapshot(
       provider: memory.provider,
       writer,
       paused: !drain.enabled || !writer,
+      consumer: drain.consumer,
+      trigger_pending: drain.trigger_pending,
+      trigger_max_age_hours: drain.trigger_max_age_hours,
+      next_due: null as number | null,
+      oldest_pending_age_ms: null as number | null,
     }
 
     try {
       const { stateDir } = await readResolvedPaths(directory)
+      // The consumer's live marker carries next_due and the last observed
+      // oldest age (plan §6.1); a missing marker just leaves them null.
+      try {
+        const marker = JSON.parse(
+          await readFile(join(stateDir, DRAIN_CURRENT_FILE), "utf8"),
+        ) as { next_due?: unknown; oldest_pending_age_ms?: unknown }
+        if (typeof marker.next_due === "number" && Number.isFinite(marker.next_due)) {
+          base.next_due = marker.next_due
+        }
+        if (
+          typeof marker.oldest_pending_age_ms === "number" &&
+          Number.isFinite(marker.oldest_pending_age_ms)
+        ) {
+          base.oldest_pending_age_ms = marker.oldest_pending_age_ms
+        }
+      } catch {
+        /* no marker yet */
+      }
       const cursor = await loadCursor(resolveCursorFile(stateDir, drain.cursor_file))
-      let lastTs = cursor.last_ts
+      let lastTs = cursor.watermark_ts
       let seeded = false
       if (lastTs <= 0 && drain.initial_lookback_hours > 0) {
         lastTs = now - drain.initial_lookback_hours * 3_600_000
@@ -738,7 +769,7 @@ export async function memoryPendingSnapshot(
         ...base,
         pending_turns,
         cursor_last_ts: lastTs,
-        cursor_updated_at: cursor.last_ts > 0 ? cursor.updated_at : null,
+        cursor_updated_at: cursor.watermark_ts > 0 ? cursor.updated_at : null,
         seeded,
         available: true,
       }
@@ -765,6 +796,159 @@ export async function memoryPendingSnapshot(
   } finally {
     memoryPendingInflight.delete(directory)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Drain consumer (plan §6.1): the live marker (state/drain.current.json) +
+// the last consumer/pipe ledger lines, so the queues page shows the loop
+// without reading drain.log. Cached for 5 s like /api/queues.
+
+export type DrainSnapshot = {
+  ts: string
+  enabled: boolean
+  consumer: boolean
+  state: "idle" | "running" | "unknown"
+  trigger: string | null
+  pass: number
+  pending: number | null
+  oldest_pending_age_ms: number | null
+  trigger_pending: number
+  trigger_max_age_hours: number
+  next_due: number | null
+  wake: { passes: number; wake_tokens: number; wall_ms: number; stopped: string | null } | null
+  last_pass: {
+    ts: string
+    wall_ms: number
+    tokens: number
+    sessions: number
+    items: number
+    outcome: string
+  } | null
+  available: boolean
+  error?: string
+}
+
+const DRAIN_TTL_MS = 5_000
+const drainCache = new Map<string, { at: number; value: DrainSnapshot }>()
+
+/** Test seam: drop the per-directory drain cache. */
+export function resetDrainCache(): void {
+  drainCache.clear()
+}
+
+/** Last NDJSON line in a ledger matching `pred` (newest file tail). */
+function lastLedgerLine(
+  body: string,
+  pred: (row: Record<string, unknown>) => boolean,
+): Record<string, unknown> | null {
+  const lines = body.split("\n")
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line === "") continue
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      if (pred(parsed)) return parsed
+    } catch {
+      /* torn tail — keep walking back */
+    }
+  }
+  return null
+}
+
+export async function drainSnapshot(
+  directory: string,
+  now: number = Date.now(),
+): Promise<DrainSnapshot> {
+  const cached = drainCache.get(directory)
+  if (cached && now - cached.at < DRAIN_TTL_MS) return cached.value
+
+  const ts = new Date(now).toISOString()
+  const base = {
+    ts,
+    enabled: false,
+    consumer: false,
+    state: "unknown" as const,
+    trigger: null,
+    pass: 0,
+    pending: null,
+    oldest_pending_age_ms: null,
+    trigger_pending: 0,
+    trigger_max_age_hours: 0,
+    next_due: null,
+    wake: null,
+    last_pass: null,
+  }
+
+  let value: DrainSnapshot
+  try {
+    const cfg = await readDrainConfig(directory)
+    const { stateDir, logDir } = await readResolvedPaths(directory)
+    base.enabled = cfg.enabled
+    base.consumer = cfg.consumer
+    base.trigger_pending = cfg.trigger_pending
+    base.trigger_max_age_hours = cfg.trigger_max_age_hours
+
+    try {
+      const marker = JSON.parse(
+        await readFile(join(stateDir, DRAIN_CURRENT_FILE), "utf8"),
+      ) as Record<string, unknown>
+      const state = marker.state === "running" || marker.state === "idle" ? marker.state : "unknown"
+      value = {
+        ...base,
+        state,
+        trigger: typeof marker.trigger === "string" ? marker.trigger : null,
+        pass: typeof marker.pass === "number" ? marker.pass : 0,
+        pending: typeof marker.pending === "number" ? marker.pending : null,
+        oldest_pending_age_ms:
+          typeof marker.oldest_pending_age_ms === "number" ? marker.oldest_pending_age_ms : null,
+        next_due: typeof marker.next_due === "number" ? marker.next_due : null,
+        available: true,
+      }
+    } catch {
+      value = { ...base, available: true }
+    }
+
+    try {
+      const body = await readFile(join(logDir, DRAIN_LEDGER_FILE), "utf8")
+      const wake = lastLedgerLine(body, (row) => row.source === "consumer")
+      if (wake) {
+        value = {
+          ...value,
+          wake: {
+            passes: typeof wake.passes === "number" ? wake.passes : 0,
+            wake_tokens: typeof wake.wake_tokens === "number" ? wake.wake_tokens : 0,
+            wall_ms: typeof wake.wall_ms === "number" ? wake.wall_ms : 0,
+            stopped: typeof wake.stopped === "string" ? wake.stopped : null,
+          },
+        }
+      }
+      const pass = lastLedgerLine(body, (row) => row.source === "pipe")
+      if (pass) {
+        value = {
+          ...value,
+          last_pass: {
+            ts: typeof pass.ts === "string" ? pass.ts : "",
+            wall_ms: typeof pass.wall_ms === "number" ? pass.wall_ms : 0,
+            tokens: typeof pass.tokens === "number" ? pass.tokens : 0,
+            sessions: typeof pass.sessions === "number" ? pass.sessions : 0,
+            items: typeof pass.items === "number" ? pass.items : 0,
+            outcome: typeof pass.outcome === "string" ? pass.outcome : "unknown",
+          },
+        }
+      }
+    } catch {
+      /* no ledger yet */
+    }
+  } catch (err) {
+    value = {
+      ...base,
+      available: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  drainCache.set(directory, { at: now, value })
+  return value
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1206,460 @@ export async function setMissionEnabled(
     ip: opts.ip ?? null,
   })
   return { id, enabled }
+}
+
+// ---------------------------------------------------------------------------
+// Lane queues, recent runs, token series (queue-monitoring plan)
+//
+// Read-only views over `state/lanes.json` + `logs/heartbeat.log`. Every reader
+// degrades to an empty payload (`available: false`) instead of failing the
+// request: an old backend/project simply has no queues or `runs[]` yet.
+
+type LaneName = "primary" | "side" | "drain"
+
+export type QueueItemView = {
+  id: string
+  title: string | null
+  kind: string
+  lane: LaneName
+  producer: string
+  enqueued_ms: number | null
+  age_ms: number | null
+  expires_ms: number | null
+  ttl_ms: number | null
+  requeue_count: number
+  requeue_reason: string | null
+}
+
+export type QueuesSnapshot = {
+  ts: string
+  primary: QueueItemView[]
+  side: QueueItemView[]
+  running: {
+    mission: string | null
+    mission_title: string | null
+    side_mission: string | null
+    side_mission_title: string | null
+  }
+  /** Drain consumer pointer (plan §6.1): the loop's live state, not a queue. */
+  drain: {
+    consumer: boolean
+    state: "idle" | "running" | "unknown"
+    pending: number | null
+    next_due: number | null
+  } | null
+  available: boolean
+  error?: string
+}
+
+const QUEUES_TTL_MS = 2_000
+const queuesCache = new Map<string, { at: number; value: QueuesSnapshot }>()
+
+/** Test seam: drop the per-directory queues cache. */
+export function resetQueuesCache(): void {
+  queuesCache.clear()
+}
+
+function toQueueItemView(raw: Record<string, unknown>, lane: LaneName, now: number, titles: Map<string, string>): QueueItemView {
+  const enqueued = typeof raw.enqueued_ms === "number" && Number.isFinite(raw.enqueued_ms) ? raw.enqueued_ms : null
+  const expires = typeof raw.expires_ms === "number" && Number.isFinite(raw.expires_ms) ? raw.expires_ms : null
+  const id = typeof raw.id === "string" ? raw.id : "unknown"
+  const missionId = id.startsWith("mission:") ? id.slice("mission:".length) : id
+  return {
+    id,
+    title: titles.get(missionId) ?? (typeof raw.title === "string" ? raw.title : null),
+    kind: typeof raw.kind === "string" ? raw.kind : "unknown",
+    lane,
+    producer: typeof raw.producer === "string" ? raw.producer : "unknown",
+    enqueued_ms: enqueued,
+    age_ms: enqueued === null ? null : Math.max(0, now - enqueued),
+    expires_ms: expires,
+    ttl_ms: expires === null ? null : Math.max(0, expires - now),
+    requeue_count: typeof raw.requeue_count === "number" ? raw.requeue_count : 0,
+    requeue_reason: typeof raw.requeue_reason === "string" ? raw.requeue_reason : null,
+  }
+}
+
+/** Compact drain pointer for the queues widget (plan §6.1) — projects the
+ *  drain snapshot down to what the queues page shows beside the lanes. */
+async function drainPointer(
+  directory: string,
+): Promise<QueuesSnapshot["drain"]> {
+  try {
+    const snap = await drainSnapshot(directory)
+    return {
+      consumer: snap.consumer,
+      state: snap.state,
+      pending: snap.pending,
+      next_due: snap.next_due,
+    }
+  } catch {
+    return null
+  }
+}
+
+export async function queuesSnapshot(directory: string, now: number = Date.now()): Promise<QueuesSnapshot> {
+  const cached = queuesCache.get(directory)
+  if (cached && now - cached.at < QUEUES_TTL_MS) return cached.value
+
+  const ts = new Date(now).toISOString()
+  const { stateDir } = await readResolvedPaths(directory)
+  const titles = new Map<string, string>()
+  try {
+    for (const m of await loadMissionStates(directory)) titles.set(m.id, m.title)
+  } catch {
+    // mission list unreadable — ids only
+  }
+
+  let running: QueuesSnapshot["running"] = {
+    mission: null,
+    mission_title: null,
+    side_mission: null,
+    side_mission_title: null,
+  }
+  try {
+    const current = await readHeartbeatCurrent(join(stateDir, HEARTBEAT_CURRENT_FILE))
+    if (current.state === "in-flight") {
+      running = {
+        mission: current.mission,
+        mission_title: current.mission_title,
+        side_mission: current.side_mission ?? null,
+        side_mission_title: current.side_mission_title ?? null,
+      }
+    }
+  } catch {
+    // no marker
+  }
+
+  let value: QueuesSnapshot
+  const drainPtr = await drainPointer(directory)
+  try {
+    const parsed = JSON.parse(await readFile(join(stateDir, "lanes.json"), "utf8")) as Record<string, unknown>
+    const laneItems = (lane: LaneName): QueueItemView[] => {
+      const raw = parsed[lane]
+      if (!Array.isArray(raw)) return []
+      return raw
+        .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
+        .map((item) => toQueueItemView(item, lane, now, titles))
+    }
+    value = {
+      ts,
+      primary: laneItems("primary"),
+      side: laneItems("side"),
+      running,
+      drain: drainPtr,
+      available: true,
+    }
+  } catch (err) {
+    value = {
+      ts,
+      primary: [],
+      side: [],
+      running,
+      // The lanes file may be missing while the drain marker is readable —
+      // the pointer survives the queue failure (plan §6.1).
+      drain: drainPtr,
+      available: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  queuesCache.set(directory, { at: now, value })
+  return value
+}
+
+export type RunRow = {
+  ts: string
+  tick: number | null
+  mission: string | null
+  mission_title: string | null
+  lane: LaneName
+  outcome: string | null
+  token_cost: number | null
+  over_budget: boolean
+  result_status: string | null
+  result_missing: boolean
+  requeued: boolean
+  session: string | null
+  tool_session: string | null
+  tool_outcome: string | null
+  duration_ms: number | null
+}
+
+export type RunsSnapshot = {
+  ts: string
+  runs: RunRow[]
+  available: boolean
+  error?: string
+}
+
+export type RunQuery = { limit?: number; mission?: string | null; lane?: string | null; outcome?: string | null }
+
+type HeartbeatLedgerRow = Record<string, unknown>
+
+function parseHeartbeatLedger(body: string): HeartbeatLedgerRow[] {
+  const rows: HeartbeatLedgerRow[] = []
+  for (const line of body.split("\n")) {
+    if (line.trim() === "") continue
+    try {
+      const parsed = JSON.parse(line) as unknown
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rows.push(parsed as HeartbeatLedgerRow)
+      }
+    } catch {
+      // partial/torn line — skip
+    }
+  }
+  return rows
+}
+
+function flattenRuns(ticks: HeartbeatLedgerRow[]): RunRow[] {
+  const out: RunRow[] = []
+  for (const tick of ticks) {
+    const ts = typeof tick.ts === "string" ? tick.ts : ""
+    const tickNo = typeof tick.tick === "number" ? tick.tick : null
+    const duration = typeof tick.duration_ms === "number" ? tick.duration_ms : null
+    const rawRuns = Array.isArray(tick.runs) ? tick.runs : null
+    if (rawRuns && rawRuns.length > 0) {
+      for (const entry of rawRuns) {
+        if (entry === null || typeof entry !== "object") continue
+        const r = entry as Record<string, unknown>
+        const lane = r.lane === "side" ? "side" : "primary"
+        out.push({
+          ts,
+          tick: tickNo,
+          mission: typeof r.mission === "string" ? r.mission : null,
+          mission_title: null,
+          lane,
+          outcome: typeof r.outcome === "string" ? r.outcome : null,
+          token_cost: typeof r.token_cost === "number" ? r.token_cost : null,
+          over_budget: r.over_budget === true,
+          result_status: typeof r.result_status === "string" ? r.result_status : null,
+          result_missing: r.result_missing === true,
+          requeued: r.requeued === true,
+          session: typeof r.session === "string" ? r.session : null,
+          tool_session: typeof r.tool_session === "string" ? r.tool_session : null,
+          tool_outcome: typeof r.tool_outcome === "string" ? r.tool_outcome : null,
+          duration_ms: duration,
+        })
+      }
+      continue
+    }
+    // Legacy tick: synthesize one primary row; legacy side-only ticks do not exist.
+    if (typeof tick.mission !== "string" || tick.mission === "") continue
+    out.push({
+      ts,
+      tick: tickNo,
+      mission: tick.mission,
+      mission_title: null,
+      lane: "primary",
+      outcome: typeof tick.outcome === "string" ? tick.outcome : null,
+      token_cost: typeof tick.token_cost === "number" ? tick.token_cost : null,
+      over_budget: tick.over_budget === true,
+      result_status: typeof tick.result_status === "string" ? tick.result_status : null,
+      result_missing: tick.result_missing === true,
+      requeued: false,
+      session: typeof tick.session === "string" ? tick.session : null,
+      tool_session: typeof tick.tool_session === "string" ? tick.tool_session : null,
+      tool_outcome: typeof tick.tool_outcome === "string" ? tick.tool_outcome : null,
+      duration_ms: duration,
+    })
+  }
+  return out
+}
+
+async function readRuns(directory: string): Promise<RunRow[]> {
+  const { logDir } = await readResolvedPaths(directory)
+  const body = await readFile(join(logDir, "heartbeat.log"), "utf8")
+  // Both sources are chronological in file order; reverse each, then merge by
+  // ts (descending) so heartbeat and drain rows interleave correctly while
+  // same-ts ties keep their within-tick order.
+  const heartbeatRuns = flattenRuns(parseHeartbeatLedger(body)).reverse()
+  const drainRuns: RunRow[] = []
+  // Drain passes (plan §6.1): after drain left the queues, its work is still
+  // visible — each `source: "pipe"` line becomes a lane=drain row.
+  try {
+    const drainBody = await readFile(join(logDir, DRAIN_LEDGER_FILE), "utf8")
+    for (const line of drainBody.split("\n")) {
+      if (line.trim() === "") continue
+      try {
+        const row = JSON.parse(line) as Record<string, unknown>
+        if (row.source !== "pipe") continue
+        drainRuns.push({
+          ts: typeof row.ts === "string" ? row.ts : "",
+          tick: null,
+          mission: "drain",
+          mission_title: null,
+          lane: "drain",
+          outcome: typeof row.outcome === "string" ? row.outcome : null,
+          token_cost: typeof row.tokens === "number" ? row.tokens : null,
+          over_budget: false,
+          result_status: null,
+          result_missing: false,
+          requeued: false,
+          session: typeof row.session === "string" ? row.session : null,
+          tool_session: null,
+          tool_outcome: null,
+          duration_ms: typeof row.wall_ms === "number" ? row.wall_ms : null,
+        })
+      } catch {
+        /* torn line */
+      }
+    }
+  } catch {
+    /* no drain ledger */
+  }
+  drainRuns.reverse()
+
+  const merged: RunRow[] = []
+  let i = 0
+  let j = 0
+  while (i < heartbeatRuns.length && j < drainRuns.length) {
+    if (heartbeatRuns[i].ts >= drainRuns[j].ts) merged.push(heartbeatRuns[i++])
+    else merged.push(drainRuns[j++])
+  }
+  while (i < heartbeatRuns.length) merged.push(heartbeatRuns[i++])
+  while (j < drainRuns.length) merged.push(drainRuns[j++])
+  return merged
+}
+
+async function missionTitles(directory: string): Promise<Map<string, string>> {
+  const titles = new Map<string, string>()
+  try {
+    for (const m of await loadMissionStates(directory)) titles.set(m.id, m.title)
+  } catch {
+    // ids only
+  }
+  return titles
+}
+
+export async function runsSnapshot(directory: string, query: RunQuery = {}): Promise<RunsSnapshot> {
+  const ts = new Date().toISOString()
+  try {
+    const titles = await missionTitles(directory)
+    const lane =
+      query.lane === "primary" || query.lane === "side" || query.lane === "drain"
+        ? query.lane
+        : null
+    const mission = typeof query.mission === "string" && query.mission !== "" ? query.mission : null
+    const outcome = typeof query.outcome === "string" && query.outcome !== "" ? query.outcome : null
+    const limit = Math.max(1, Math.min(Number.isFinite(query.limit) ? Number(query.limit) : 50, 500))
+    const rows = (await readRuns(directory))
+      .filter((r) => (lane === null ? true : r.lane === lane))
+      .filter((r) => (mission === null ? true : r.mission === mission))
+      .filter((r) => (outcome === null ? true : r.outcome === outcome))
+      .slice(0, limit)
+      .map((r) => ({ ...r, mission_title: r.mission ? titles.get(r.mission) ?? null : null }))
+    return { ts, runs: rows, available: true }
+  } catch (err) {
+    return { ts, runs: [], available: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export type TokenBucket = "tick" | "hour" | "day"
+
+export type TokenPoint = {
+  bucket: string
+  tokens: number
+  runs: number
+  over_runs: number
+  /** Present on bucket=tick only. */
+  tick?: number
+}
+
+export type TokenSeries = {
+  ts: string
+  bucket: TokenBucket
+  /** autonomy.mission_token_budget; null when unlimited/unknown. */
+  budget_per_run: number | null
+  points: TokenPoint[]
+  totals: { tokens: number; runs: number; over_runs: number }
+  available: boolean
+  error?: string
+}
+
+export type TokenQuery = {
+  bucket?: string | null
+  hours?: number | null
+  mission?: string | null
+  lane?: string | null
+  /** Mission type — the mission file's `frequency` (day | mid | low | …). */
+  type?: string | null
+}
+
+function hourKey(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`
+}
+
+function dayKey(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+export async function tokenSeriesSnapshot(directory: string, query: TokenQuery = {}): Promise<TokenSeries> {
+  const ts = new Date().toISOString()
+  const bucket: TokenBucket = query.bucket === "hour" || query.bucket === "day" ? query.bucket : "tick"
+  const hours = Number.isFinite(query.hours) && Number(query.hours) > 0 ? Math.min(Number(query.hours), 24 * 90) : 24
+  const lane =
+    query.lane === "primary" || query.lane === "side" || query.lane === "drain" ? query.lane : null
+  const mission = typeof query.mission === "string" && query.mission !== "" ? query.mission : null
+  const type = typeof query.type === "string" && query.type !== "" ? query.type : null
+
+  try {
+    const autonomy = await readAutonomyConfig(directory)
+    const rawBudget = autonomy.mission_token_budget
+    const budget = typeof rawBudget === "number" && Number.isFinite(rawBudget) ? rawBudget : null
+    const cutoff = Date.now() - hours * 3_600_000
+
+    let typeIds: Set<string> | null = null
+    if (type !== null) {
+      typeIds = new Set<string>()
+      for (const m of await loadMissionStates(directory)) {
+        if (m.frequency === type) typeIds.add(m.id)
+      }
+    }
+
+    const rows = (await readRuns(directory))
+      .filter((r) => (lane === null ? true : r.lane === lane))
+      .filter((r) => (mission === null ? true : r.mission === mission))
+      .filter((r) => (typeIds === null ? true : r.mission !== null && typeIds.has(r.mission)))
+      .filter((r) => {
+        const t = Date.parse(r.ts)
+        return Number.isFinite(t) && t >= cutoff
+      })
+
+    const points = new Map<string, TokenPoint>()
+    for (const r of rows) {
+      const d = new Date(Date.parse(r.ts))
+      const key = bucket === "tick" ? `tick:${r.tick ?? r.ts}` : bucket === "hour" ? hourKey(d) : dayKey(d)
+      const point =
+        points.get(key) ??
+        ({ bucket: bucket === "tick" ? key : key, tokens: 0, runs: 0, over_runs: 0 } as TokenPoint)
+      if (bucket === "tick") point.tick = r.tick ?? undefined
+      point.tokens += r.token_cost ?? 0
+      point.runs += 1
+      if (r.over_budget) point.over_runs += 1
+      points.set(key, point)
+    }
+
+    const ordered = [...points.values()].sort((a, b) => a.bucket.localeCompare(b.bucket))
+    const totals = ordered.reduce(
+      (acc, p) => ({ tokens: acc.tokens + p.tokens, runs: acc.runs + p.runs, over_runs: acc.over_runs + p.over_runs }),
+      { tokens: 0, runs: 0, over_runs: 0 },
+    )
+    return { ts, bucket, budget_per_run: budget, points: ordered, totals, available: true }
+  } catch (err) {
+    return {
+      ts,
+      bucket,
+      budget_per_run: null,
+      points: [],
+      totals: { tokens: 0, runs: 0, over_runs: 0 },
+      available: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
