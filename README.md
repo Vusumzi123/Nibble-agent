@@ -26,6 +26,12 @@ exits — **only if the script started it** (a pre-existing server is left alone
 Run plain `opencode` instead if you don't want Ollama (the MCP then falls back to
 local transformer embeddings).
 
+The dashboard backend (config API + web UI) is tied to the opencode process:
+`dashboard-hook` starts it as a child on launch and stops it on exit; an
+already-running backend (another opencode instance or a manual start) is left
+alone. Reset it with `./scripts/dashboard-ctl.sh restart` (`stop`, `status`,
+`logs` also work). Set `DASHBOARD_AUTOSTART=0` to disable the autostart.
+
 ## Requirements
 
 - [opencode](https://opencode.ai) with at least one model connected.
