@@ -624,5 +624,7 @@ Local web UI (§9), read by cards 8/11.
 | Key | Meaning |
 | --- | ------- |
 | `bind_address` | loopback only. |
+| `port` | Backend listen port (default 4097). Per-instance so two agents on one host never collide (Nemu: 4099). |
+| `serve_url` | `opencode serve` proxy target for the transcript stream (default `http://127.0.0.1:4096`). Per-instance; a wrong value shows as `Transcript unavailable — connect ECONNREFUSED`. Env `OPENCODE_SERVE_URL` overrides. |
 | `auth.mode` | `off` \| `login` \| `login+2fa` (§10). |
 | `auth.require_tls` | TLS requirement for the dashboard. |

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Nibble dashboard backend control (start / stop / restart / status).
 #
-# Manages only the dashboard backend on DASHBOARD_PORT (default 4097). It does
-# NOT manage `opencode serve` (default 127.0.0.1:4096): that process owns
-# sessions and the Output & thoughts transcript stream, and opencode owns its
-# lifecycle. `status` reports whether the proxy target is reachable.
+# Manages only the dashboard backend. It does NOT manage `opencode serve`:
+# that process owns sessions and the Output & thoughts transcript stream, and
+# opencode owns its lifecycle. `status` reports whether the proxy target is
+# reachable.
+#
+# Port and proxy target come from `dashboard.port` / `dashboard.serve_url` in
+# .opencode/sysop-config.yaml (env DASHBOARD_PORT / OPENCODE_SERVE_URL
+# override). The static UI is served from <target>/dashboard/static — the
+# committed `npm run build` output of dashboard/ui.
 #
 # Usage:
 #   ./scripts/dashboard-ctl.sh start
@@ -15,14 +20,14 @@
 #
 # Env:
 #   DASHBOARD_TARGET     project to observe        (default: parent of scripts/)
-#   DASHBOARD_PORT       backend port              (default: 4097)
-#   OPENCODE_SERVE_URL   proxy target              (default: http://127.0.0.1:4096)
-#   DASHBOARD_STATIC_DIR built UI directory        (default: auto-detect)
+#   DASHBOARD_PORT       backend port override     (default: dashboard.port config)
+#   OPENCODE_SERVE_URL   proxy target override     (default: dashboard.serve_url config)
+#   DASHBOARD_STATIC_DIR built UI directory        (default: <target>/dashboard/static)
 #   NODE_BIN             node executable           (default: command -v node)
 set -euo pipefail
 
 usage() {
-  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +38,8 @@ if ! TARGET="$(cd "$TARGET" 2>/dev/null && pwd)"; then
 fi
 
 PORT="${DASHBOARD_PORT:-4097}"
+# Display-only fallback for `status` when the backend is down; when it is up,
+# status reports the proxy target from /api/health (config-aware).
 SERVE_URL="${OPENCODE_SERVE_URL:-http://127.0.0.1:4096}"
 BACKEND="$TARGET/.opencode/plugin/lib/dashboard-server.ts"
 STATE_DIR="$TARGET/.opencode/state"
@@ -109,13 +116,14 @@ resolve_ui() {
     printf '%s\n' "$DASHBOARD_STATIC_DIR"
     return 0
   fi
+  # Integrated build output first (dashboard/ui → npm run build → dashboard/static);
+  # legacy per-checkout locations stay as fallback for one release.
   for cand in \
+    "$TARGET/dashboard/static" \
     "$TARGET/projects/Nibble-dashboard/dist/dashboard/browser" \
     "$TARGET/projects/Nibble-dashboard/dist/browser" \
     "$TARGET/../Nibble-dashboard/dist/dashboard/browser" \
-    "$TARGET/../Nibble-dashboard/dist/browser" \
-    "$TARGET/dashboard/static" \
-    "$TARGET/dashboard/dist/dashboard/browser"; do
+    "$TARGET/../Nibble-dashboard/dist/browser"; do
     if [ -f "$cand/index.html" ]; then
       printf '%s\n' "$cand"
       return 0
@@ -210,28 +218,36 @@ do_stop() {
 }
 
 do_status() {
-  local pid code proxy ui
+  local pid code proxy ui hcode health_serve
   pid="$(current_pid || true)"
   ui="$(resolve_ui)"
+  hcode="$(health_code)"
   echo "target: $TARGET"
   echo "url:    http://127.0.0.1:$PORT"
   echo "ui:     ${ui:-<built-in $TARGET/dashboard/static>}"
   echo "log:    $LOG_FILE"
 
+  # When the backend is up, /api/health reports the serve_url it resolved
+  # (opts > env > dashboard.serve_url config > default) — trust that over
+  # this script's env-derived guess.
+  health_serve=""
+  if [ "$hcode" = "200" ]; then
+    health_serve="$("${CURL[@]}" "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+      | sed -n 's/.*"serve_url": *"\([^"]*\)".*/\1/p')" || true
+  fi
+  proxy="${health_serve:-$SERVE_URL}"
+
   if [ -n "$pid" ]; then
     echo "state:  running (pid $pid)"
-    echo "health: HTTP $(health_code)"
-    proxy="$(http_code "$SERVE_URL/")"
-    echo "proxy:  $SERVE_URL (HTTP $proxy)"
+    echo "health: HTTP $hcode"
+    echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
   else
-    code="$(health_code)"
-    if [ "$code" = "000" ]; then
+    if [ "$hcode" = "000" ]; then
       echo "state:  stopped"
     else
-      echo "state:  stopped (port $PORT held by a foreign process, HTTP $code)"
+      echo "state:  stopped (port $PORT held by a foreign process, HTTP $hcode)"
     fi
-    proxy="$(http_code "$SERVE_URL/")"
-    echo "proxy:  $SERVE_URL (HTTP $proxy)"
+    echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
   fi
 }
 

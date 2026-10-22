@@ -216,6 +216,16 @@ test("guardLeaf: floor patterns refused; auth.* is card 11; bind must stay loopb
   assert.equal(guardLeaf("dashboard", { path: "bind_address", value: "127.0.0.1" }, ctx), null)
 })
 
+test("guardLeaf: serve_url must be a loopback http(s) URL", () => {
+  const ctx = { autonomyLevel: 3, authMode: "off" }
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: "http://127.0.0.1:4095" }, ctx), null)
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: "http://localhost:4096" }, ctx), null)
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: "http://[::1]:4095" }, ctx), null)
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: "http://192.168.1.10:4096" }, ctx)?.code, "serve_requires_loopback")
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: "not a url" }, ctx)?.code, "serve_requires_loopback")
+  assert.equal(guardLeaf("dashboard", { path: "serve_url", value: 4096 }, ctx)?.code, "serve_requires_loopback")
+})
+
 // --- writeConfig -----------------------------------------------------------
 
 test("writeConfig: valid write lands, keeps comments, journals to dashboard.log", async () => {

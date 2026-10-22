@@ -1,0 +1,31 @@
+/* Phosphorstrap — modals
+   Bootstrap JS owns show/hide/backdrop; the bridge themes .modal's
+   --bs-modal-* vars (surface, border, radius, shadow, backdrop).
+   This file adds what the bridge can't reach: the gradient title bar
+   (same wash as .ph-panel__header) and terminal type on the title. */
+
+.modal-header {
+  background-image: var(--ph-gradient-header);
+  border-bottom-color: var(--ph-border);
+  padding: var(--ph-space-4) var(--ph-space-5);
+}
+
+.modal-title {
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-lg);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: var(--ph-leading-tight);
+  text-transform: uppercase;
+}
+
+.modal-body {
+  line-height: var(--ph-leading-base);
+  padding: var(--ph-space-5);
+}
+
+.modal-footer {
+  border-top-color: var(--ph-border);
+  gap: var(--ph-space-2);
+  padding: var(--ph-space-3) var(--ph-space-5);
+}

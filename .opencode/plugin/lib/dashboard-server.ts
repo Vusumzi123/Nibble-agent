@@ -11,8 +11,9 @@
 // Origin header (when present) and a valid `X-CSRF-Token` from GET /api/csrf.
 //
 // Runnable: `node .opencode/plugin/lib/dashboard-server.ts [project-dir]`
-// (launcher: scripts/dashboard.sh). Default port 4097 (opencode serve is
-// 4096); default proxy target OPENCODE_SERVE_URL or http://127.0.0.1:4096.
+// (launchers: scripts/run.sh --dashboard, scripts/dashboard-ctl.sh). Port and
+// proxy target resolve as opts > env (DASHBOARD_PORT / OPENCODE_SERVE_URL) >
+// dashboard.port / dashboard.serve_url config > defaults (4097 / 4096).
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { request as httpsRequest } from "node:https"
 import { readFile, stat } from "node:fs/promises"
@@ -48,11 +49,11 @@ const MAX_BODY_BYTES = 1024 * 1024
 
 export type DashboardServerOpts = {
   directory: string
-  /** 0 = ephemeral (tests). Default DASHBOARD_PORT env, else 4097. */
+  /** 0 = ephemeral (tests). Default DASHBOARD_PORT env, else dashboard.port, else 4097. */
   port?: number
   /** Defaults to the `dashboard.bind_address` config value. */
   host?: string
-  /** Proxy target for `opencode serve`. Default OPENCODE_SERVE_URL, else 4096. */
+  /** Proxy target for `opencode serve`. Default OPENCODE_SERVE_URL env, else dashboard.serve_url, else 4096. */
   serveUrl?: string
   /** Static UI root. Default `<directory>/dashboard/static`. */
   staticDir?: string
@@ -104,6 +105,14 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
+
+/** Env var → positive int, or null when unset/invalid (config wins over garbage). */
+function envInt(name: string): number | null {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === "") return null
+  const n = Number(raw)
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null
+}
 
 function hostIsLoopback(req: IncomingMessage): boolean {
   const host = req.headers.host
@@ -245,8 +254,8 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
   if (!isLoopback(host)) {
     throw new DashboardError(403, "bind_requires_auth", `refusing to bind non-loopback ${host} while auth is card 11`)
   }
-  const port = opts.port ?? Number(process.env.DASHBOARD_PORT ?? 4097)
-  const serveUrl = opts.serveUrl ?? process.env.OPENCODE_SERVE_URL ?? "http://127.0.0.1:4096"
+  const port = opts.port ?? envInt("DASHBOARD_PORT") ?? dash.port
+  const serveUrl = opts.serveUrl ?? process.env.OPENCODE_SERVE_URL ?? dash.serve_url
   const serveBase = new URL(serveUrl)
   const staticDir = opts.staticDir ?? join(directory, "dashboard", "static")
   const csrf = createCsrfStore(opts.csrfTtlMs !== undefined ? { ttlMs: opts.csrfTtlMs } : {})

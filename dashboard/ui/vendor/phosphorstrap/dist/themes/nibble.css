@@ -1,0 +1,453 @@
+/* Phosphorstrap extended theme — nibble
+   Modern minimal: near-black canvas, one luminous accent, sans UI with mono
+   labels, soft borders and 8–16px radii.
+
+   Load AFTER phosphorstrap.css and activate with data-theme on <html>:
+
+     <link rel="stylesheet" href="phosphorstrap.css">
+     <link rel="stylesheet" href="themes/nibble.css">
+     <html data-theme="nibble">                 <!-- dark, lime -->
+     <html data-theme="nibble-light">           <!-- light, lime -->
+     <html data-theme="nibble" data-accent="cyan"> <!-- dark, cyan -->
+
+   This is an extended theme: tokens first, then component polish scoped to
+   [data-theme^="nibble"]. Every component override lives under that prefix,
+   so it cannot leak into the built-in or other community themes. */
+
+/* ==========================================================================
+   1. Tokens — dark (default)
+   ========================================================================== */
+
+[data-theme="nibble"] {
+  /* color — near-black with a warm-neutral cast */
+  --ph-bg: #0a0b0d;
+  --ph-bg-rgb: 10, 11, 13;
+  --ph-surface: #101216;
+  --ph-surface-rgb: 16, 18, 22;
+  --ph-surface-raised: #16191e;
+  --ph-surface-raised-rgb: 22, 25, 30;
+  --ph-border: #242830;
+  --ph-text: #eceef2;
+  --ph-text-rgb: 236, 238, 242;
+  --ph-text-muted: #8a919e;
+  --ph-text-muted-rgb: 138, 145, 158;
+  --ph-primary: #c6f36b;
+  --ph-primary-rgb: 198, 243, 107;
+  --ph-success: #6ee7a0;
+  --ph-success-rgb: 110, 231, 160;
+  --ph-warning: #f5c66b;
+  --ph-warning-rgb: 245, 198, 107;
+  --ph-danger: #f07f7f;
+  --ph-danger-rgb: 240, 127, 127;
+  --ph-info: #7dd3fc;
+  --ph-info-rgb: 125, 211, 252;
+
+  /* type — sans for UI, mono for labels and code */
+  --ph-font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --ph-font-mono:
+    ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas,
+    monospace;
+  --ph-font-size-base: 0.9375rem;
+
+  /* shape & depth */
+  --ph-radius-sm: 8px;
+  --ph-radius-md: 12px;
+  --ph-radius-lg: 16px;
+  --ph-control-height: 2.5rem;
+  --ph-shadow-1: 0 1px 0 rgba(255, 255, 255, 0.03);
+  --ph-shadow-2: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --ph-shadow-3: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --ph-gradient-header: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.045),
+    rgba(255, 255, 255, 0)
+  );
+
+  /* motion */
+  --ph-transition-fast: 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ph-transition-base: 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* ==========================================================================
+   2. Tokens — light
+   ========================================================================== */
+
+[data-theme="nibble-light"] {
+  /* color — warm paper, ink black, one deep accent */
+  --ph-bg: #f5f5f1;
+  --ph-bg-rgb: 245, 245, 241;
+  --ph-surface: #fafaf8;
+  --ph-surface-rgb: 250, 250, 248;
+  --ph-surface-raised: #ffffff;
+  --ph-surface-raised-rgb: 255, 255, 255;
+  --ph-border: #e3e3dc;
+  --ph-text: #17181a;
+  --ph-text-rgb: 23, 24, 26;
+  --ph-text-muted: #6b7078;
+  --ph-text-muted-rgb: 107, 112, 120;
+  --ph-primary: #3f6212;
+  --ph-primary-rgb: 63, 98, 18;
+  --ph-success: #15803d;
+  --ph-success-rgb: 21, 128, 61;
+  --ph-warning: #b45309;
+  --ph-warning-rgb: 180, 83, 9;
+  --ph-danger: #b91c1c;
+  --ph-danger-rgb: 185, 28, 28;
+  --ph-info: #0369a1;
+  --ph-info-rgb: 3, 105, 161;
+
+  /* type — same UI stacks as the dark tone */
+  --ph-font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --ph-font-mono:
+    ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas,
+    monospace;
+  --ph-font-size-base: 0.9375rem;
+
+  --ph-radius-sm: 8px;
+  --ph-radius-md: 12px;
+  --ph-radius-lg: 16px;
+  --ph-control-height: 2.5rem;
+  --ph-shadow-1: 0 1px 0 rgba(20, 20, 15, 0.04);
+  --ph-shadow-2: 0 8px 24px rgba(20, 20, 15, 0.07);
+  --ph-shadow-3: 0 24px 64px rgba(20, 20, 15, 0.14);
+  --ph-gradient-header: linear-gradient(
+    180deg,
+    rgba(23, 24, 26, 0.035),
+    rgba(23, 24, 26, 0)
+  );
+
+  --ph-transition-fast: 130ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ph-transition-base: 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* ==========================================================================
+   3. Accent variants
+   Lime is the default. Set data-accent on <html> to switch. Light tone
+   accents are darker so white button ink stays readable.
+   ========================================================================== */
+
+[data-theme^="nibble"][data-accent="amber"] {
+  --ph-primary: #f5c76b;
+  --ph-primary-rgb: 245, 199, 107;
+}
+
+[data-theme^="nibble"][data-accent="cyan"] {
+  --ph-primary: #67e8f9;
+  --ph-primary-rgb: 103, 232, 249;
+}
+
+[data-theme^="nibble"][data-accent="violet"] {
+  --ph-primary: #c4b5fd;
+  --ph-primary-rgb: 196, 181, 253;
+}
+
+[data-theme^="nibble"][data-accent="rose"] {
+  --ph-primary: #fda4af;
+  --ph-primary-rgb: 253, 164, 175;
+}
+
+[data-theme="nibble-light"][data-accent="amber"] {
+  --ph-primary: #a16207;
+  --ph-primary-rgb: 161, 98, 7;
+}
+
+[data-theme="nibble-light"][data-accent="cyan"] {
+  --ph-primary: #0e7490;
+  --ph-primary-rgb: 14, 116, 144;
+}
+
+[data-theme="nibble-light"][data-accent="violet"] {
+  --ph-primary: #6d28d9;
+  --ph-primary-rgb: 109, 40, 217;
+}
+
+[data-theme="nibble-light"][data-accent="rose"] {
+  --ph-primary: #be123c;
+  --ph-primary-rgb: 190, 18, 60;
+}
+
+/* ==========================================================================
+   4. Component polish
+   Everything here is scoped to the theme and only changes treatment the
+   token layer cannot reach (font family, gradients, focus softness, ink
+   color on solid fills).
+   ========================================================================== */
+
+/* --- typography ------------------------------------------------------- */
+
+[data-theme^="nibble"] body {
+  font-family: var(--ph-font-sans);
+  font-size: var(--ph-font-size-base);
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+[data-theme^="nibble"] h1,
+[data-theme^="nibble"] h2,
+[data-theme^="nibble"] h3,
+[data-theme^="nibble"] h4,
+[data-theme^="nibble"] h5,
+[data-theme^="nibble"] h6 {
+  font-family: var(--ph-font-sans);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+[data-theme^="nibble"] .lead {
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* --- buttons ---------------------------------------------------------- */
+
+[data-theme^="nibble"] .btn {
+  font-family: var(--ph-font-sans);
+  font-weight: 540;
+  letter-spacing: 0;
+  border-radius: var(--ph-radius-md);
+  min-height: var(--ph-control-height);
+  padding: 0 var(--ph-space-4);
+  transition:
+    background-color var(--ph-transition-fast),
+    border-color var(--ph-transition-fast),
+    color var(--ph-transition-fast),
+    box-shadow var(--ph-transition-fast),
+    transform var(--ph-transition-fast);
+}
+
+[data-theme^="nibble"] .btn-sm {
+  min-height: 2rem;
+  padding: 0 var(--ph-space-3);
+  font-size: 0.8125rem;
+}
+
+[data-theme^="nibble"] .btn-lg {
+  min-height: 3rem;
+  padding: 0 var(--ph-space-5);
+}
+
+/* flat fills instead of the terminal gradient wash */
+[data-theme^="nibble"] .btn-primary,
+[data-theme^="nibble"] .btn-secondary,
+[data-theme^="nibble"] .btn-success,
+[data-theme^="nibble"] .btn-danger,
+[data-theme^="nibble"] .btn-warning,
+[data-theme^="nibble"] .btn-info {
+  background-image: none;
+  box-shadow: none;
+}
+
+[data-theme^="nibble"] .btn:active {
+  transform: translateY(1px);
+}
+
+[data-theme^="nibble"] .btn:focus-visible,
+[data-theme^="nibble"] .btn-check:focus-visible + .btn {
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.22);
+}
+
+/* ink on the solid primary / outline-hover fill */
+[data-theme="nibble"] .btn-primary,
+[data-theme="nibble"] .btn-outline-primary {
+  --ph-on-accent: #10130a;
+}
+
+[data-theme="nibble-light"] .btn-primary,
+[data-theme="nibble-light"] .btn-outline-primary {
+  --ph-on-accent: #ffffff;
+}
+
+/* --- navs ------------------------------------------------------------- */
+
+[data-theme^="nibble"] .nav-link {
+  font-family: var(--ph-font-sans);
+  font-size: var(--ph-text-sm);
+  letter-spacing: 0;
+  border-radius: 10px;
+}
+
+[data-theme^="nibble"] .nav-tabs .nav-link,
+[data-theme^="nibble"] .nav-pills .nav-link,
+[data-theme^="nibble"] .nav-underline .nav-link {
+  min-height: var(--ph-control-height);
+  padding: var(--ph-space-2) var(--ph-space-3);
+}
+
+[data-theme^="nibble"] .nav-tabs .nav-link.active {
+  background-image: none;
+  box-shadow: inset 0 -2px 0 var(--ph-primary);
+  font-weight: 560;
+}
+
+[data-theme^="nibble"] .nav-pills .nav-link.active {
+  box-shadow: none;
+  font-weight: 560;
+}
+
+[data-theme^="nibble"] .navbar {
+  --bs-navbar-color: rgba(var(--ph-text-rgb), 0.72);
+  --bs-navbar-hover-color: var(--ph-text);
+  --bs-navbar-active-color: var(--ph-text);
+  --bs-navbar-brand-color: var(--ph-text);
+  --bs-navbar-brand-hover-color: var(--ph-text);
+}
+
+[data-theme^="nibble"] .navbar .navbar-brand {
+  font-family: var(--ph-font-sans);
+  letter-spacing: -0.01em;
+}
+
+/* --- forms ------------------------------------------------------------ */
+
+[data-theme^="nibble"] .form-control,
+[data-theme^="nibble"] .form-select {
+  font-family: var(--ph-font-sans);
+  border-radius: var(--ph-radius-md);
+  min-height: var(--ph-control-height);
+}
+
+[data-theme^="nibble"] .form-control:focus,
+[data-theme^="nibble"] .form-select:focus {
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.18);
+}
+
+[data-theme^="nibble"] .form-label {
+  font-family: var(--ph-font-sans);
+  font-weight: 520;
+  letter-spacing: -0.005em;
+}
+
+[data-theme^="nibble"] .form-text {
+  font-family: var(--ph-font-sans);
+}
+
+/* dark surface needs the light chevron; light inherits Bootstrap's */
+[data-theme="nibble"] .form-select {
+  --bs-form-select-bg-img: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23eceef2' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+}
+
+/* bright accents need dark checkmarks in the dark theme */
+[data-theme="nibble"] .form-check-input:checked[type="checkbox"] {
+  --bs-form-check-bg-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%2310130a' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='m6 10 3 3 6-6'/%3e%3c/svg%3e");
+}
+
+[data-theme="nibble"] .form-check-input:checked[type="radio"] {
+  --bs-form-check-bg-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='2' fill='%2310130a'/%3e%3c/svg%3e");
+}
+
+/* --- cards & panels --------------------------------------------------- */
+
+[data-theme^="nibble"] .card {
+  border-radius: var(--ph-radius-lg);
+}
+
+[data-theme^="nibble"] .card-body {
+  font-family: var(--ph-font-sans);
+}
+
+[data-theme^="nibble"] .card-header,
+[data-theme^="nibble"] .ph-panel__header {
+  font-family: var(--ph-font-sans);
+  font-weight: 580;
+  letter-spacing: -0.005em;
+  text-transform: none;
+}
+
+[data-theme^="nibble"] .ph-panel {
+  border-radius: var(--ph-radius-lg);
+}
+
+[data-theme^="nibble"] .ph-panel--accent {
+  box-shadow:
+    var(--ph-shadow-2),
+    0 0 16px rgba(var(--ph-primary-rgb), 0.12);
+}
+
+/* --- alerts, tables, modals, toasts, dropdowns ------------------------ */
+
+[data-theme^="nibble"] .alert {
+  font-family: var(--ph-font-sans);
+  letter-spacing: 0;
+  border-radius: var(--ph-radius-md);
+}
+
+[data-theme^="nibble"] .table {
+  font-family: var(--ph-font-sans);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme^="nibble"] .table thead th {
+  font-family: var(--ph-font-sans);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+[data-theme^="nibble"] .modal-content {
+  font-family: var(--ph-font-sans);
+  border-radius: var(--ph-radius-lg);
+}
+
+[data-theme^="nibble"] .modal-title,
+[data-theme^="nibble"] .toast-header {
+  font-family: var(--ph-font-sans);
+  letter-spacing: -0.005em;
+}
+
+[data-theme^="nibble"] .toast {
+  font-family: var(--ph-font-sans);
+}
+
+[data-theme^="nibble"] .dropdown-menu,
+[data-theme^="nibble"] .list-group,
+[data-theme^="nibble"] .pagination {
+  font-family: var(--ph-font-sans);
+}
+
+/* solid primary fills inside Bootstrap widgets need the same ink flip */
+[data-theme="nibble"] .dropdown-menu {
+  --bs-dropdown-link-active-color: #10130a;
+}
+
+[data-theme="nibble"] .list-group {
+  --bs-list-group-active-color: #10130a;
+}
+
+[data-theme="nibble"] .pagination {
+  --bs-pagination-active-color: #10130a;
+}
+
+[data-theme="nibble"] .progress,
+[data-theme="nibble"] .progress-stacked {
+  --bs-progress-bar-color: #10130a;
+}
+
+[data-theme="nibble-light"] .dropdown-menu {
+  --bs-dropdown-link-active-color: #ffffff;
+}
+
+[data-theme="nibble-light"] .list-group {
+  --bs-list-group-active-color: #ffffff;
+}
+
+[data-theme="nibble-light"] .pagination {
+  --bs-pagination-active-color: #ffffff;
+}
+
+[data-theme="nibble-light"] .progress,
+[data-theme="nibble-light"] .progress-stacked {
+  --bs-progress-bar-color: #ffffff;
+}
+
+/* --- optional density ------------------------------------------------- */
+
+[data-theme^="nibble"][data-density="compact"] {
+  --ph-control-height: 2.125rem;
+  --ph-space-5: 1.25rem;
+  --ph-space-6: 1.5rem;
+  --ph-space-7: 2rem;
+}

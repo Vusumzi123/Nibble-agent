@@ -4,7 +4,7 @@
 import { test, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse, type Server } from "node:http"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -470,4 +470,64 @@ test("createDashboardServer refuses a non-loopback bind while auth is card 11", 
     () => createDashboardServer({ directory: dir, port: 0, host: "0.0.0.0" }),
     (err: { status?: number; code?: string }) => err.status === 403 && err.code === "bind_requires_auth",
   )
+})
+
+// --- port/serve_url precedence (opts > env > config > default) -------------
+
+test("port + serve_url resolve opts > env > dashboard.* config > default", async () => {
+  const cfgDir = await project()
+  const cfgPath = join(cfgDir, ".opencode", "sysop-config.yaml")
+  const cfg = await readFile(cfgPath, "utf8")
+  await writeFile(
+    cfgPath,
+    cfg.replace(
+      "dashboard:\n  bind_address: 127.0.0.1      # loopback only",
+      // high ports: the config path binds for real, must not collide with a
+      // live instance dashboard (4097/4099)
+      "dashboard:\n  bind_address: 127.0.0.1      # loopback only\n  port: 44999\n  serve_url: http://127.0.0.1:44998",
+    ),
+    "utf8",
+  )
+
+  // config wins when neither opts nor env are set
+  const fromCfg = await createDashboardServer({ directory: cfgDir, host: "127.0.0.1" })
+  try {
+    assert.equal(fromCfg.port, 44999)
+    assert.equal(fromCfg.serveUrl, "http://127.0.0.1:44998")
+  } finally {
+    await fromCfg.close()
+  }
+
+  // env overrides config: DASHBOARD_PORT beats dashboard.port (both bind
+  // for real — distinct high ports), OPENCODE_SERVE_URL beats serve_url
+  process.env.DASHBOARD_PORT = "44996"
+  process.env.OPENCODE_SERVE_URL = "http://127.0.0.1:44995"
+  const fromEnv = await createDashboardServer({ directory: cfgDir, host: "127.0.0.1" })
+  try {
+    assert.equal(fromEnv.port, 44996)
+    assert.equal(fromEnv.serveUrl, "http://127.0.0.1:44995")
+  } finally {
+    await fromEnv.close()
+    delete process.env.DASHBOARD_PORT
+    delete process.env.OPENCODE_SERVE_URL
+  }
+
+  // opts beat env and config
+  process.env.DASHBOARD_PORT = "44994"
+  process.env.OPENCODE_SERVE_URL = "http://127.0.0.1:44993"
+  const fromOpts = await createDashboardServer({
+    directory: cfgDir,
+    port: 0,
+    serveUrl: "http://127.0.0.1:44992",
+    host: "127.0.0.1",
+  })
+  try {
+    // port: 0 = ephemeral — proves the opt beat both env (44994) and config (44999)
+    assert.ok(fromOpts.port > 0 && fromOpts.port !== 44999 && fromOpts.port !== 44994)
+    assert.equal(fromOpts.serveUrl, "http://127.0.0.1:44992")
+  } finally {
+    await fromOpts.close()
+    delete process.env.DASHBOARD_PORT
+    delete process.env.OPENCODE_SERVE_URL
+  }
 })

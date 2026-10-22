@@ -122,6 +122,8 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
     "    reply_window_hours: 12",
     "dashboard:",
     "  bind_address: 127.0.0.2",
+    "  port: 4099",
+    "  serve_url: http://127.0.0.1:4095",
     "  auth:",
     "    mode: login+2fa",
     "    require_tls: true",
@@ -139,6 +141,8 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
   const dash = await readDashboardConfig(dir, noReject)
   assert.deepEqual(dash, {
     bind_address: "127.0.0.2",
+    port: 4099,
+    serve_url: "http://127.0.0.1:4095",
     auth: { mode: "login+2fa", require_tls: true },
   })
 })

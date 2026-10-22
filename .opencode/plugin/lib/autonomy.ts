@@ -145,6 +145,10 @@ export type CommsConfig = {
 
 export type DashboardConfig = {
   bind_address: string
+  /** Backend listen port; per-instance so Kael/Nemu never collide (4097/4099). */
+  port: number
+  /** Proxy target for `opencode serve` (transcript stream); per-instance. */
+  serve_url: string
   auth: {
     /** `off` | `login` | `login+2fa` (§10). */
     mode: string
@@ -196,6 +200,8 @@ export const DEFAULT_COMMS: CommsConfig = {
 
 export const DEFAULT_DASHBOARD: DashboardConfig = {
   bind_address: "127.0.0.1",
+  port: 4097,
+  serve_url: "http://127.0.0.1:4096",
   auth: { mode: "off", require_tls: false },
 }
 
@@ -244,8 +250,8 @@ function commsDefaults(): NestedDefaults {
 }
 
 function dashboardDefaults(): NestedDefaults {
-  const { bind_address, auth } = DEFAULT_DASHBOARD
-  return { scalars: { bind_address }, blocks: { auth } }
+  const { bind_address, port, serve_url, auth } = DEFAULT_DASHBOARD
+  return { scalars: { bind_address, port, serve_url }, blocks: { auth } }
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +457,8 @@ const COMMS_BLOCK_RULES: Record<string, Record<string, Rule>> = {
 
 const DASHBOARD_SCALAR_RULES: Record<string, Rule> = {
   bind_address: { t: "string" },
+  port: { t: "int", min: 1, max: 65535 },
+  serve_url: { t: "string" },
 }
 
 const DASHBOARD_BLOCK_RULES: Record<string, Record<string, Rule>> = {

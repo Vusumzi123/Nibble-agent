@@ -1,0 +1,19 @@
+:host {
+  display: block;
+}
+
+.stream {
+  scroll-behavior: smooth;
+}
+
+.msg__head {
+  position: sticky;
+  top: 0;
+}
+
+/* Drawer variant: the host panel owns scrolling, so drop the nested viewport. */
+:host(.transcript--fill) .stream {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}

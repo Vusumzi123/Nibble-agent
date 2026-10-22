@@ -1,0 +1,41 @@
+<div class="stream">
+  @for (m of rows(); track m.info?.id ?? $index) {
+    <article class="msg">
+      <div class="msg__head">
+        <span [class.msg__role--assistant]="role(m) === 'assistant'">{{ role(m) }}</span>
+        <span class="ms-auto">{{ fmtTime(created(m)) }}</span>
+      </div>
+      <div class="msg__body">
+        @for (p of (m.parts ?? []); track $index) {
+          @switch (p.type) {
+            @case ('text') {
+              @if (partText(p)) {
+                <pre class="part-text">{{ partText(p) }}</pre>
+              }
+            }
+            @case ('reasoning') {
+              @if (partText(p)) {
+                <pre class="part-thought">{{ partText(p) }}</pre>
+              }
+            }
+            @case ('tool') {
+              <details class="tool-card">
+                <summary>
+                  <span class="badge text-bg-warning">{{ p.tool ?? 'tool' }}</span>
+                  <span class="muted">{{ toolTitle(p) }}</span>
+                  <span class="badge text-bg-secondary ms-auto">{{ toolStatus(p) }}</span>
+                </summary>
+                @if (toolInput(p)) {
+                  <pre>{{ toolInput(p) }}</pre>
+                }
+                @if (toolOutput(p)) {
+                  <pre>{{ toolOutput(p) }}</pre>
+                }
+              </details>
+            }
+          }
+        }
+      </div>
+    </article>
+  }
+</div>

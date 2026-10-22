@@ -312,6 +312,8 @@ comms:                         # notification/approval channels (§7) — card 1
 
 dashboard:                     # local web UI (§9) — cards 8/11 read this
   bind_address: 127.0.0.1      # loopback only
+  port: 4097                   # backend listen port (per-instance: Nemu uses 4099)
+  serve_url: http://127.0.0.1:4096  # opencode serve proxy target (transcript stream)
   auth:
     mode: off                  # off | login | login+2fa (§10)
     require_tls: false

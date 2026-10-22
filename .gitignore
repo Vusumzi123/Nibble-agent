@@ -34,6 +34,9 @@ Boards/
 # Build & runtime artifacts
 node_modules/
 dist/
+# …except the vendored phosphorstrap package (its publish layout IS dist/)
+!dashboard/ui/vendor/phosphorstrap/dist/
+dashboard/ui/.angular/
 __pycache__/
 *.pyc
 .temp/

@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-10-22
+
+### Added
+
+- **Dashboard UI absorbed into the repo** — the Angular app moves from the
+  separate Nibble-dashboard checkout to `dashboard/ui/`, with Phosphorstrap
+  vendored at `dashboard/ui/vendor/phosphorstrap` (no more `file:../Phosphor`
+  sibling dependency). `npm run build` outputs to `dashboard/static/` — the
+  backend's default `staticDir` — and the built bundle is committed, so every
+  instance gets its dashboard from a plain `git pull` with no build step.
+- **`dashboard.port` + `dashboard.serve_url` config keys** — the backend
+  listen port and the `opencode serve` proxy target now live in
+  `.opencode/sysop-config.yaml` per instance (Nemu: `port: 4099`; any instance
+  whose serve runs elsewhere sets `serve_url`), resolving as
+  opts > env (`DASHBOARD_PORT` / `OPENCODE_SERVE_URL`) > config > default
+  (4097 / 4096). A wrong `serve_url` shows as
+  `Transcript unavailable — connect ECONNREFUSED`; `status` on the control
+  script now reports the target the backend actually resolved (from
+  `/api/health`). `serve_url` writes through the dashboard API are
+  loopback-only (`serve_requires_loopback`), same class of guard as
+  `bind_address`.
+- **`run.sh --dashboard`** — `./scripts/run.sh [--dashboard] [opencode args…]`
+  adopts an already-running dashboard backend or starts one via
+  `scripts/dashboard-ctl.sh` before exec'ing opencode, and stops it on exit
+  only if this run started it (same contract as the Ollama embedding server).
+
+### Changed
+
+- `scripts/dashboard-ctl.sh` prefers the integrated `dashboard/static` build
+  when auto-detecting the UI (legacy per-checkout paths remain as fallback);
+  its header now documents config-driven port/proxy defaults.
+
 ## 2026-10-21
 
 ### Added

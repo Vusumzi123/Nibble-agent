@@ -1,0 +1,250 @@
+/* Phosphorstrap — calendar (Phosphorstrap-only component, v1.1)
+   Bootstrap has no datepicker, so ph-calendar is built from scratch on the
+   token system: a date field (input + toggle) that opens a popover with a
+   month grid. Full ph- BEM-lite name: .ph-calendar, __field, __input,
+   __toggle, __popover, __header, __nav, __title, __grid, __day,
+   __footer, modifiers --open / --outside / --today / --selected / --range.
+   Behavior (open, month nav, roving-tabindex arrows, Enter, Escape) is
+   consumer JS — this file only paints it. No color literals: everything
+   reads --ph-* tokens, so both themes and community themes come free. */
+
+.ph-calendar {
+  position: relative;
+  display: block;
+}
+
+/* ---- field: Bootstrap input + toggle button, no renamed classes ---- */
+.ph-calendar__field {
+  display: flex;
+  align-items: stretch;
+  gap: var(--ph-space-2);
+}
+
+.ph-calendar__input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ph-calendar__toggle {
+  flex: 0 0 auto;
+  min-width: var(--ph-control-height);
+  padding-inline: var(--ph-space-3);
+  background-color: var(--ph-surface-raised);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius-md);
+  color: var(--ph-text);
+  font-family: var(--ph-font-mono);
+  line-height: var(--ph-leading-tight);
+  transition:
+    background-color var(--ph-transition-fast),
+    border-color var(--ph-transition-fast),
+    box-shadow var(--ph-transition-fast);
+}
+
+.ph-calendar__toggle:hover {
+  background-color: var(--ph-surface);
+  border-color: color-mix(in srgb, var(--ph-primary) 55%, var(--ph-border));
+}
+
+.ph-calendar__toggle:focus-visible {
+  border-color: var(--ph-primary);
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.3);
+  outline: none;
+}
+
+.ph-calendar.is-open .ph-calendar__toggle,
+.ph-calendar__toggle[aria-expanded="true"] {
+  border-color: var(--ph-primary);
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.28),
+    0 0 12px rgba(var(--ph-primary-rgb), 0.15);
+}
+
+/* ---- popover ---- */
+.ph-calendar__popover {
+  position: absolute;
+  z-index: 1050;
+  inset-inline-start: 0;
+  top: calc(100% + var(--ph-space-2));
+  display: none;
+  min-width: calc(var(--ph-control-height) * 7 + var(--ph-space-4));
+  padding: var(--ph-space-3);
+  background-color: var(--ph-surface-raised);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius-lg);
+  box-shadow: var(--ph-shadow-3);
+  color: var(--ph-text);
+}
+
+.ph-calendar.is-open .ph-calendar__popover,
+.ph-calendar__popover.is-open {
+  display: block;
+}
+
+/* ---- header: prev / month label / next ---- */
+.ph-calendar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ph-space-2);
+  margin-bottom: var(--ph-space-2);
+}
+
+.ph-calendar__title {
+  flex: 1 1 auto;
+  text-align: center;
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: var(--ph-leading-tight);
+  text-transform: uppercase;
+}
+
+.ph-calendar__nav {
+  flex: 0 0 auto;
+  min-width: var(--ph-control-height);
+  min-height: var(--ph-control-height);
+  background-color: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius-md);
+  color: var(--ph-text);
+  font-family: var(--ph-font-mono);
+  line-height: var(--ph-leading-tight);
+  transition:
+    background-color var(--ph-transition-fast),
+    border-color var(--ph-transition-fast),
+    box-shadow var(--ph-transition-fast);
+}
+
+.ph-calendar__nav:hover {
+  background-color: var(--ph-surface-raised);
+  border-color: color-mix(in srgb, var(--ph-primary) 55%, var(--ph-border));
+  color: var(--ph-primary);
+}
+
+.ph-calendar__nav:focus-visible {
+  border-color: var(--ph-primary);
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.3);
+  outline: none;
+}
+
+/* ---- month grid: 7 columns, 44px cells ---- */
+.ph-calendar__grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.ph-calendar__grid th {
+  padding: var(--ph-space-1) 0 var(--ph-space-2);
+  color: var(--ph-text-muted);
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: var(--ph-leading-tight);
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.ph-calendar__grid td {
+  padding: 0;
+  text-align: center;
+}
+
+.ph-calendar__day {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: var(--ph-control-height);
+  min-height: var(--ph-control-height);
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--ph-radius-sm);
+  color: var(--ph-text);
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-sm);
+  line-height: var(--ph-leading-tight);
+  transition:
+    background-color var(--ph-transition-fast),
+    border-color var(--ph-transition-fast),
+    color var(--ph-transition-fast),
+    box-shadow var(--ph-transition-fast);
+}
+
+.ph-calendar__day:hover {
+  background-color: var(--ph-surface);
+  border-color: var(--ph-border);
+}
+
+.ph-calendar__day:focus-visible {
+  border-color: var(--ph-primary);
+  box-shadow: 0 0 0 3px rgba(var(--ph-primary-rgb), 0.3);
+  outline: none;
+}
+
+.ph-calendar__day:disabled {
+  color: var(--ph-text-muted);
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* outside the displayed month — muted, still clickable (jumps month) */
+.ph-calendar__day--outside {
+  color: var(--ph-text-muted);
+  opacity: 0.6;
+}
+
+/* today — amber hairline ring, never filled */
+.ph-calendar__day--today {
+  border-color: color-mix(in srgb, var(--ph-primary) 65%, var(--ph-border));
+  color: var(--ph-primary);
+  font-weight: 600;
+}
+
+/* selected — solid amber, ink swapped to the page background for contrast */
+.ph-calendar__day--selected,
+.ph-calendar__day[aria-pressed="true"] {
+  background-color: var(--ph-primary);
+  border-color: var(--ph-primary);
+  color: var(--ph-bg);
+  font-weight: 600;
+}
+
+.ph-calendar__day--selected:hover,
+.ph-calendar__day[aria-pressed="true"]:hover {
+  background-color: color-mix(in srgb, var(--ph-primary) 88%, var(--ph-text));
+  border-color: var(--ph-primary);
+  color: var(--ph-bg);
+}
+
+/* range endpoints share the selected look; the in-between fill is applied
+   by the consumer as --range on each day */
+.ph-calendar__day--range {
+  background-color: rgba(var(--ph-primary-rgb), 0.22);
+  border-color: color-mix(in srgb, var(--ph-primary) 45%, transparent);
+  color: var(--ph-text);
+}
+
+/* ---- footer: today / clear actions (Bootstrap buttons, untouched) ---- */
+.ph-calendar__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--ph-space-2);
+  margin-top: var(--ph-space-2);
+  padding-top: var(--ph-space-2);
+  border-top: 1px solid var(--ph-border);
+}
+
+.ph-calendar__footer .btn {
+  font-family: var(--ph-font-mono);
+  letter-spacing: 0.04em;
+}
+
+/* popover alignment when the field sits near the viewport edge */
+.ph-calendar--end .ph-calendar__popover {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+}

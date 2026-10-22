@@ -326,6 +326,25 @@ export function guardLeaf(section: string, leaf: Leaf, ctx: GuardContext): { sta
       }
     }
   }
+  // The proxy target receives every session transcript; a non-loopback
+  // serve_url would ship them off-box with no auth to gate it (card 11).
+  if (section === "dashboard" && leaf.path === "serve_url") {
+    let loopback = false
+    if (typeof leaf.value === "string") {
+      try {
+        loopback = isLoopback(new URL(leaf.value).hostname)
+      } catch {
+        loopback = false
+      }
+    }
+    if (!loopback) {
+      return {
+        status: 403,
+        code: "serve_requires_loopback",
+        message: "dashboard.serve_url must be a loopback http(s) URL — the proxy streams session transcripts to it",
+      }
+    }
+  }
   return null
 }
 

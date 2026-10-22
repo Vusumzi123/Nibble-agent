@@ -1,0 +1,72 @@
+<header class="dash-bar">
+  <span class="ph-label dash-brand">nibble · heartbeat dashboard</span>
+
+  @if (store.health(); as h) {
+    <span class="dash-target" [title]="h.directory">{{ h.directory }}</span>
+  }
+
+  <div class="dash-bar__right">
+    <span class="dash-heart" [class.dash-heart--live]="store.inFlight()">
+      <span class="dash-heart__dot" aria-hidden="true"></span>
+      {{ store.inFlight() ? 'in-flight' : 'idle' }}
+    </span>
+
+    @if (store.memoryPending(); as mp) {
+      <span
+        class="dash-memory"
+        [class.dash-memory--pending]="mp.available && !mp.paused && (mp.pending_turns ?? 0) > 0"
+        [class.dash-memory--synced]="mp.available && !mp.paused && (mp.pending_turns ?? 0) === 0"
+        [class.dash-memory--paused]="mp.available && mp.paused"
+        [class.dash-memory--unknown]="!mp.available"
+        [title]="pendingTitle(mp)"
+        [attr.aria-label]="pendingTitle(mp)">
+        <span class="dash-memory__dot" aria-hidden="true"></span>
+        @if (!mp.available) {
+          memory ?
+        } @else if (mp.paused) {
+          paused · {{ mp.pending_turns ?? 0 }}
+        } @else if ((mp.pending_turns ?? 0) > 0) {
+          {{ mp.pending_turns }} to consolidate
+        } @else {
+          memory in sync
+        }
+      </span>
+    }
+
+    <div class="btn-group btn-group-sm" role="group" aria-label="Theme switcher">
+      @for (t of theme.themes; track t.id) {
+        <button
+          type="button"
+          class="btn"
+          [class.btn-primary]="theme.current() === t.id"
+          [class.btn-outline-primary]="theme.current() !== t.id"
+          [attr.aria-pressed]="theme.current() === t.id"
+          (click)="theme.set(t.id)">
+          {{ t.label }}
+        </button>
+      }
+    </div>
+  </div>
+</header>
+
+@if (store.error(); as err) {
+  <div class="alert alert-danger dash-alert" role="alert">
+    <strong>backend unreachable —</strong> {{ err }}
+  </div>
+}
+
+<div class="dash-body">
+  <nav class="dash-nav" aria-label="Views">
+    <ul class="nav nav-pills flex-column gap-1">
+      @for (item of nav; track item.path) {
+        <li class="nav-item">
+          <a class="nav-link" [routerLink]="item.path" routerLinkActive="active">{{ item.label }}</a>
+        </li>
+      }
+    </ul>
+  </nav>
+
+  <main class="dash-main">
+    <router-outlet />
+  </main>
+</div>

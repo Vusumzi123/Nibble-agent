@@ -1,0 +1,26 @@
+<h1 class="mb-1">Output &amp; thoughts</h1>
+<p class="text-muted mb-4">
+  The full child-session transcript — assistant text, reasoning traces
+  ("thoughts"), and tool calls — streamed through the backend's
+  <code>opencode serve</code> proxy. Follows the live mission, then stays on the
+  most recent one.
+</p>
+
+<div class="ph-panel mb-3">
+  <div class="ph-panel__header">
+    <span class="mono">{{ store.lastSession() ?? 'no session' }}</span>
+    @if (store.inFlight()) {
+      <span class="badge text-bg-success ms-2">live</span>
+    }
+  </div>
+  <div class="ph-panel__body">
+    @if (store.messages().length === 0) {
+      <p class="empty mb-0">
+        No session transcript yet. Run a heartbeat mission and its output will
+        appear here within a couple of seconds.
+      </p>
+    } @else {
+      <app-transcript [rows]="store.messages()" />
+    }
+  </div>
+</div>
