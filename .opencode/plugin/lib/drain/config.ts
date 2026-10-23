@@ -67,7 +67,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   continuity_sessions: 20,
   poison_attempts: 3,
   drain_prompt_max_bytes: 60000,
-  exclude_missions: ["drain", "staleness"],
+  exclude_missions: ["drain", "staleness", "dream"],
   consumer: true,
   trigger_pending: 12,
   trigger_max_age_hours: 2,

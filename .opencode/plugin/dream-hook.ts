@@ -93,6 +93,8 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 // opencode instance (D-M9 tradeoff) and never keeps the test runner alive.
 /** A dream child session that never idles is abandoned after this budget. */
 const DREAM_TICK_TIMEOUT_MS = 15 * 60_000
+/** Post-abort idle confirmation budget (plan §5.2 abortSession discipline). */
+const DREAM_ABORT_CONFIRM_MS = 10_000
 
 export default (async ({ client, directory, ...rest }) => {
   const dir = directory ?? process.cwd()
@@ -133,16 +135,20 @@ export default (async ({ client, directory, ...rest }) => {
   const spawner = (rest as { spawner?: BridgeSpawner }).spawner
   const random = (rest as { random?: () => number }).random
   const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
+  const tickTimeoutMs =
+    (rest as { tickTimeoutMs?: number }).tickTimeoutMs ?? DREAM_TICK_TIMEOUT_MS
+  const abortConfirmMs =
+    (rest as { abortConfirmMs?: number }).abortConfirmMs ?? DREAM_ABORT_CONFIRM_MS
 
   let ticking = false
 
   const childIdleResolvers = new Map<string, () => void>()
-  const waitForChildIdle = (childID: string): Promise<boolean> =>
+  const waitForChildIdle = (childID: string, budgetMs = tickTimeoutMs): Promise<boolean> =>
     new Promise((resolve) => {
       const timer = setTimeout(() => {
         childIdleResolvers.delete(childID)
         resolve(false)
-      }, DREAM_TICK_TIMEOUT_MS)
+      }, budgetMs)
       timer.unref?.()
       childIdleResolvers.set(childID, () => {
         clearTimeout(timer)
@@ -150,6 +156,35 @@ export default (async ({ client, directory, ...rest }) => {
         resolve(true)
       })
     })
+
+  /**
+   * Stop a timed-out dream/child session (docs/heartbeat-timeout-lock-resume.md
+   * §5.2). Aborts via the v2 SDK, then confirms with a FRESH bounded idle wait;
+   * a failed abort reports `ok: false` so the caller never claims a clean stop.
+   */
+  const abortSession = async (
+    childID: string,
+    reason: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await (client as any).session.abort({
+        path: { id: childID },
+        query: { directory: dir },
+      })
+      if (res?.error || (res?.response && !res.response.ok)) {
+        const message =
+          (res?.error as { message?: string } | undefined)?.message ??
+          `session.abort failed (status ${res?.response?.status ?? "unknown"})`
+        return { ok: false, error: message }
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+    const confirmed = await waitForChildIdle(childID, abortConfirmMs)
+    return confirmed
+      ? { ok: true }
+      : { ok: false, error: `session did not go idle within ${abortConfirmMs}ms of ${reason} abort` }
+  }
 
   const logTick = async (entry: Record<string, unknown>): Promise<void> => {
     try {
@@ -243,7 +278,7 @@ export default (async ({ client, directory, ...rest }) => {
       if (wake > 0) return "sleeping"
 
       // 3. Shared lock with the heartbeat (D5): overrun → skip, never queue.
-      const lock = await acquireHeartbeatLock(lockFile, nowMs)
+      const lock = await acquireHeartbeatLock(lockFile, nowMs, hbCfg.mission_lock_stale_ms)
       if (!lock) return "lock-held"
       lockHeld = true
       const nextState = await sleepStore.update((s) => ({
@@ -390,6 +425,8 @@ export default (async ({ client, directory, ...rest }) => {
       let sessionId: string | null = null
       let result: MissionResult | null = null
       let drainTool: DrainToolResult | null = null
+      let aborted: boolean | null = null
+      let abortError: string | undefined
       try {
         const created = await (client as any).session.create({
           body: { title: `dream:${brief.mission_id}` },
@@ -410,8 +447,19 @@ export default (async ({ client, directory, ...rest }) => {
         })
         if (res?.error || (res?.response && !res.response.ok)) {
           outcome = "error"
+        } else if (await idled) {
+          outcome = "completed"
         } else {
-          outcome = (await idled) ? "completed" : "timeout"
+          // Never let the child outlive its timeout (§5.2): abort it, then
+          // sample the transcript after the stop.
+          const abort = await abortSession(childID, "timeout")
+          aborted = abort.ok
+          if (abort.ok) {
+            outcome = "timeout"
+          } else {
+            outcome = "error"
+            abortError = abort.error ?? "abort failed"
+          }
         }
         const attempts = outcome === "completed" ? 5 : 1
         let rows: unknown[] = []
@@ -565,6 +613,8 @@ export default (async ({ client, directory, ...rest }) => {
         gate: "digest",
         reason,
         ...(sessionId ? { session: sessionId } : {}),
+        ...(aborted === null ? {} : { aborted }),
+        ...(abortError === undefined ? {} : { abort_error: abortError }),
         result_status: resultStatus,
         result_missing: resultMissing,
         ...(drainTool

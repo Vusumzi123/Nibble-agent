@@ -514,6 +514,11 @@ const HEARTBEAT_SCALAR_RULES: Record<string, Rule> = {
   log_compress_after: { t: "int", min: 0 },
   log_compress_level: { t: "int", min: 1, max: 9 },
   log_rotate_by: { t: "enum", values: ["size", "daily", "weekly"] },
+  mission_timeout_minutes: { t: "int", min: 0 },
+  mission_lock_stale_ms: { t: "int", min: 0 },
+  mission_lock_refresh_ms: { t: "int", min: 0 },
+  mission_summary_timeout_ms: { t: "int", min: 0 },
+  mission_max_resumes: { t: "int", min: 0 },
 }
 
 const HEARTBEAT_OPTS: NestedSectionOptions = {

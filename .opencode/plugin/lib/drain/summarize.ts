@@ -37,6 +37,7 @@ export type SummarizerClient = {
     create(args: any): Promise<{ data?: { id?: string } }>
     promptAsync(args: any): Promise<{ error?: unknown; response?: { ok?: boolean } }>
     messages(args: any): Promise<{ data?: any }>
+    abort(args: any): Promise<{ error?: unknown; response?: { ok?: boolean; status?: number } }>
   }
 }
 
@@ -271,6 +272,24 @@ export async function summarizeSession(
   }
 
   try {
+    const abortChild = async (childID: string): Promise<string | null> => {
+      try {
+        const res = await deps.client.session.abort({
+          path: { id: childID },
+          query: { directory: deps.directory },
+        })
+        if (res?.error || (res?.response && !res.response.ok)) {
+          return (
+            (res?.error as { message?: string } | undefined)?.message ??
+            `session.abort failed (status ${res?.response?.status ?? "unknown"})`
+          )
+        }
+        return null
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err)
+      }
+    }
+
     const ask = async (text: string): Promise<{ rows: unknown[]; reply: string }> => {
       const created = await deps.client.session.create({
         body: { title: SUMMARIZER_SESSION_TITLE },
@@ -292,7 +311,14 @@ export async function summarizeSession(
       if (res?.error || (res?.response && !res.response.ok)) throw new Error("promptAsync failed")
 
       const idled = await deps.waitForIdle(childID)
-      if (!idled) throw new Error("summarizer timed out")
+      if (!idled) {
+        // A timed-out child must not outlive its own wait (§5.2). Stop it
+        // before throwing so the fallback path never leaves a live session.
+        const abortError = await abortChild(childID)
+        throw new Error(
+          abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
+        )
+      }
 
       const messages = await deps.client.session.messages({
         path: { id: childID },

@@ -914,7 +914,11 @@ async function readHeartbeatLock(file: string): Promise<HeartbeatLock | null> {
  * A stale lock is stolen once; if the steal races another stealer, the loser
  * returns null (their next wake retries).
  */
-export async function acquireHeartbeatLock(file: string, nowMs: number = Date.now()): Promise<HeartbeatLock | null> {
+export async function acquireHeartbeatLock(
+  file: string,
+  nowMs: number = Date.now(),
+  staleMs: number = HEARTBEAT_LOCK_STALE_MS,
+): Promise<HeartbeatLock | null> {
   const lock: HeartbeatLock = {
     pid: process.pid,
     acquired_ms: nowMs,
@@ -934,7 +938,7 @@ export async function acquireHeartbeatLock(file: string, nowMs: number = Date.no
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null
       const held = await readHeartbeatLock(file)
-      if (!isHeartbeatLockStale(held, nowMs)) return null // fresh → overrun skip
+      if (!isHeartbeatLockStale(held, nowMs, staleMs)) return null // fresh → overrun skip
       await unlink(file).catch(() => {})
     }
   }
@@ -1044,6 +1048,18 @@ export type HeartbeatConfig = {
   log_compress_after: number
   log_compress_level: number
   log_rotate_by: string
+  /** Silence window for the mission child; 0 = never stall-abort. */
+  mission_stall_minutes: number
+  /** Optional hard wall-clock ceiling; 0 = off (not the primary trigger). */
+  mission_timeout_minutes: number
+  /** A lock held longer than this is presumed dead and stolen once. */
+  mission_lock_stale_ms: number
+  /** Refresh cadence so a live long mission never loses its own lock. */
+  mission_lock_refresh_ms: number
+  /** Bound for the LLM attempt summary spawned under the lock. */
+  mission_summary_timeout_ms: number
+  /** Resume ceiling; 0 resumes forever. */
+  mission_max_resumes: number
 }
 
 export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
@@ -1057,9 +1073,34 @@ export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
   log_compress_after: 1,
   log_compress_level: 6,
   log_rotate_by: "size",
+  mission_stall_minutes: 10,
+  mission_timeout_minutes: 0,
+  mission_lock_stale_ms: 1_800_000,
+  mission_lock_refresh_ms: 60_000,
+  mission_summary_timeout_ms: 90_000,
+  mission_max_resumes: 3,
 }
 
 const HEARTBEAT_KEYS = new Set(Object.keys(DEFAULT_HEARTBEAT_CONFIG))
+
+/** Stall window in ms; `mission_stall_minutes: 0` → 0 (never stall-abort). */
+export function missionStallMs(cfg: Pick<HeartbeatConfig, "mission_stall_minutes">): number {
+  const minutes = cfg.mission_stall_minutes
+  return minutes > 0 ? minutes * 60_000 : 0
+}
+
+/** Optional ceiling in ms; `mission_timeout_minutes <= 0` → 0 (no ceiling). */
+export function missionTimeoutMs(cfg: Pick<HeartbeatConfig, "mission_timeout_minutes">): number {
+  const minutes = cfg.mission_timeout_minutes
+  return minutes > 0 ? minutes * 60_000 : 0
+}
+
+/** Stale must be >= 3 × refresh so a live holder never risks its own lock. */
+export function effectiveMissionLockStaleMs(
+  cfg: Pick<HeartbeatConfig, "mission_lock_stale_ms" | "mission_lock_refresh_ms">,
+): number {
+  return Math.max(cfg.mission_lock_stale_ms, 3 * cfg.mission_lock_refresh_ms)
+}
 
 const HEARTBEAT_COERCE = sectionCoercer({ valueTyped: true, intPattern: /^-?\d+$/ })
 
@@ -1073,9 +1114,10 @@ export function parseHeartbeatConfig(yamlText: string): Partial<HeartbeatConfig>
 
 /** Effective `heartbeat:` config (file overlay on the defaults). Never throws. */
 export async function readHeartbeatConfig(directory: string): Promise<HeartbeatConfig> {
-  return readSection(directory, "heartbeat", DEFAULT_HEARTBEAT_CONFIG, {
+  const cfg = await readSection(directory, "heartbeat", DEFAULT_HEARTBEAT_CONFIG, {
     coerce: HEARTBEAT_COERCE,
   })
+  return { ...cfg, mission_lock_stale_ms: effectiveMissionLockStaleMs(cfg) }
 }
 
 // ---------------------------------------------------------------------------

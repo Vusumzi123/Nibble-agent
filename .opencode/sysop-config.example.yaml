@@ -49,7 +49,7 @@ drain:
   continuity_sessions: 20      # prior summaries kept for long-lived sessions
   poison_attempts: 3           # failed runs at one boundary before dropping
   drain_prompt_max_bytes: 60000
-  exclude_missions: [drain, staleness]  # mission transcripts not drained
+  exclude_missions: [drain, staleness, dream]  # mission transcripts not drained
   # Consumer loop (docs/drain-consumer-plan.md §3).
   trigger_pending: 12          # run a pass while pending >= N
   trigger_max_age_hours: 2     # or the oldest pending turn is >= T hours old
@@ -252,6 +252,13 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   log_compress_after: 1
   log_compress_level: 6
   log_rotate_by: size
+  # Mission lock / timeout / resume (plan §4.1) — hot-read at tick start.
+  # mission_timeout_minutes 0 = legacy abandon (never time out); resume 0 = forever.
+  mission_timeout_minutes: 15       # child session budget (minutes)
+  mission_lock_stale_ms: 1800000    # dead-holder steal threshold; lifted to 3x refresh
+  mission_lock_refresh_ms: 60000    # live holder re-stamps this often
+  mission_summary_timeout_ms: 90000 # bound for the attempt summary (under the lock)
+  mission_max_resumes: 3            # resumes before a timed-out mission drops
 
 idea:                          # idea missions (§17.10) — card 7a reads this
   enabled: true                # day draw + post-run dedupe/review/append gate

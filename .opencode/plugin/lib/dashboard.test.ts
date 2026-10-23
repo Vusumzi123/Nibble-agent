@@ -307,6 +307,52 @@ test("writeConfig: top-level heartbeat section is writable, validated, hot-read"
   )
 })
 
+test("writeConfig: mission-lock dials are writable; stale must exceed refresh", async () => {
+  const dir = await project()
+  const res = await writeConfig(dir, "heartbeat", {
+    mission_timeout_minutes: 20,
+    mission_lock_refresh_ms: 30_000,
+    mission_lock_stale_ms: 600_000,
+    mission_summary_timeout_ms: 45_000,
+    mission_max_resumes: 2,
+  })
+  assert.deepEqual(res.applied, {
+    mission_timeout_minutes: 20,
+    mission_lock_refresh_ms: 30_000,
+    mission_lock_stale_ms: 600_000,
+    mission_summary_timeout_ms: 45_000,
+    mission_max_resumes: 2,
+  })
+  const cfg = await configSnapshot(dir)
+  assert.equal(cfg.heartbeat.mission_timeout_minutes, 20)
+  assert.equal(cfg.heartbeat.mission_lock_refresh_ms, 30_000)
+  assert.equal(cfg.heartbeat.mission_lock_stale_ms, 600_000)
+  assert.equal(cfg.heartbeat.mission_summary_timeout_ms, 45_000)
+  assert.equal(cfg.heartbeat.mission_max_resumes, 2)
+
+  // stale <= refresh is refused and the file is untouched.
+  const before = await readConfig(dir)
+  await assert.rejects(
+    () => writeConfig(dir, "heartbeat", { mission_lock_stale_ms: 30_000 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+  assert.equal(await readConfig(dir), before)
+
+  // negative values are refused by the per-leaf int rule.
+  await assert.rejects(
+    () => writeConfig(dir, "heartbeat", { mission_timeout_minutes: -1 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+
+  // absent keys fall back to the reader's defaults.
+  const snap = await configSnapshot(await project())
+  assert.equal(snap.heartbeat.mission_timeout_minutes, 0)
+  assert.equal(snap.heartbeat.mission_lock_refresh_ms, 60_000)
+  assert.equal(snap.heartbeat.mission_lock_stale_ms, 1_800_000)
+  assert.equal(snap.heartbeat.mission_summary_timeout_ms, 90_000)
+  assert.equal(snap.heartbeat.mission_max_resumes, 3)
+})
+
 test("writeConfig: drain trigger thresholds are writable, validated, hot-read", async () => {
   const dir = await project()
   const res = await writeConfig(dir, "drain", { trigger_pending: 4, trigger_max_age_hours: 1 })

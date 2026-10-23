@@ -14,9 +14,11 @@ import {
   setStatus,
 } from "./lib/backlog.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
+import { acquireFileLock, type FileLockHandle } from "./lib/file-lock.ts"
 import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import {
+  DEFAULT_HEARTBEAT_CONFIG,
   HEARTBEAT_CURRENT_FILE,
   HEARTBEAT_STATE_FILE,
   HEARTBEAT_WAKE_CAP_MS,
@@ -30,6 +32,8 @@ import {
   effectiveFrequencyMs,
   frequencyToMs,
   idleHeartbeatCurrent,
+  missionStallMs,
+  missionTimeoutMs,
   readHeartbeatConfig,
   releaseHeartbeatLock,
   heartbeatErrorFields,
@@ -101,6 +105,9 @@ import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 
+/** Post-abort idle confirmation budget (plan 5.2) — never the tick budget. */
+const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
+
 // In-process heartbeat scheduler (kanban card D, missions-plan §12 — the
 // D-M9 locked vehicle) + outcome recording (kanban card E, plan §7): a
 // self-rescheduling `setTimeout` loop inside the opencode server plugin; no
@@ -144,9 +151,8 @@ import { nowIso, sleep } from "./lib/util.ts"
 // `.opencode/state/heartbeat.json`, the lock in `.opencode/state/heartbeat.lock`.
 
 /** A mission child session that never idles is abandoned after this budget
- *  (the lock's stale steal is the crash backstop for the whole tick). */
-const HEARTBEAT_TICK_TIMEOUT_MS = 15 * 60_000
-
+ *  unless `heartbeat.mission_timeout_minutes` overrides it (hot-read per tick;
+ *  0 = never time out). The lock's stale steal is the crash backstop. */
 export default (async ({ client, directory, ...rest }) => {
   const dir = directory ?? process.cwd()
   const { logDir, stateDir, vaultDir } = await readResolvedPaths(dir, homedir())
@@ -175,6 +181,9 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   const lockFile = join(stateDir, "heartbeat.lock")
+  // Execution lock (§5.1): serializes whole agent runs across tick and drain.
+  // Always acquired AFTER heartbeat.lock (ordering rule) and never waited on.
+  const missionLockFile = join(stateDir, "mission.lock")
   // Live status marker for the dashboard (§9.2, card 16): written on every
   // phase transition so `idle | in-flight` + the in-flight mission are
   // observable without reading in-process state. Best-effort, single writer.
@@ -253,9 +262,21 @@ export default (async ({ client, directory, ...rest }) => {
   // several due cycles (B7 backoff) without waiting out real minutes.
   // Production input never carries it.
   const wakeCapMs = (rest as { wakeCapMs?: number }).wakeCapMs ?? HEARTBEAT_WAKE_CAP_MS
-  // Test-injection seam: shrink the 15 min child budget so a timeout (and the
-  // lane-queue requeue path) is testable. Production input never carries it.
-  const tickTimeoutMs = (rest as { tickTimeoutMs?: number }).tickTimeoutMs ?? HEARTBEAT_TICK_TIMEOUT_MS
+  // Test-injection seam: shrink the stall window so a watchdog abort (and the
+  // lane-queue requeue path) is testable. Production input never carries it;
+  // otherwise the window hot-reads from `heartbeat.mission_stall_minutes` at
+  // the start of each tick.
+  const tickStallOverride = (rest as { tickTimeoutMs?: number }).tickTimeoutMs
+  let tickStallMs = tickStallOverride ?? missionStallMs(DEFAULT_HEARTBEAT_CONFIG)
+  // Test-injection seam for the optional hard ceiling. Production never
+  // carries it; the real value hot-reads from `heartbeat.mission_timeout_minutes`.
+  const tickCeilingOverride = (rest as { tickCeilingMs?: number }).tickCeilingMs
+  let tickCeilingMs = tickCeilingOverride ?? missionTimeoutMs(DEFAULT_HEARTBEAT_CONFIG)
+  // Test-injection seam: shrink the post-abort idle confirmation so a failed
+  // abort is observable without waiting the real 10 s. Production input never
+  // carries it.
+  const abortConfirmMs =
+    (rest as { abortConfirmMs?: number }).abortConfirmMs ?? HEARTBEAT_ABORT_CONFIRM_MS
   // Test-injection seam: point the drain pipe at a fixture SQLite store
   // instead of the real opencode data dir. Production input never carries it.
   const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
@@ -267,19 +288,185 @@ export default (async ({ client, directory, ...rest }) => {
   // loop). Registered BEFORE the prompt so the child's first idle is caught.
   const childIdleResolvers = new Map<string, () => void>()
 
-  const waitForChildIdle = (childID: string): Promise<boolean> =>
+  // --- Stall watchdog (docs/heartbeat-timeout-lock-resume.md §5.2) ---------
+  // Silence is measured per tracked child; activity in a descendant session
+  // bubbles up to its ancestors through `parentID`, so a working sub-agent
+  // keeps its mission alive and a silent one stalls it. Only shell-type open
+  // tools are exempt in v1 (a long silent compile is not a hang); a `task`
+  // call is deliberately not exempt.
+  type ChildActivity = { at: number; kind: string }
+  const childActivity = new Map<string, ChildActivity>()
+  const childParent = new Map<string, string>()
+  const openShellCount = new Map<string, number>()
+  const openShellCalls = new Map<string, Set<string>>()
+  const childStop = new Map<
+    string,
+    { reason: "stall" | "ceiling"; stalledForMs: number; lastActivity: string }
+  >()
+  const SHELL_TOOLS = new Set(["bash", "shell"])
+
+  /** The session plus every ancestor known from `session.created`. */
+  const ancestryOf = (sessionID: string): string[] => {
+    const chain: string[] = []
+    const seen = new Set<string>()
+    let sid: string | undefined = sessionID
+    while (sid && !seen.has(sid)) {
+      seen.add(sid)
+      chain.push(sid)
+      sid = childParent.get(sid)
+    }
+    return chain
+  }
+
+  /** Any event for a session (or a descendant) resets its ancestors' clocks. */
+  const touchActivity = (sessionID: string, kind: string): void => {
+    const at = Date.now()
+    for (const sid of ancestryOf(sessionID)) {
+      if (childActivity.has(sid)) childActivity.set(sid, { at, kind })
+    }
+  }
+
+  const trackChild = (childID: string): void => {
+    childActivity.set(childID, { at: Date.now(), kind: "session" })
+  }
+
+  /** Open/close a shell-type tool call; count it against every ancestor. */
+  const setOpenShell = (sessionID: string, callID: string, open: boolean): void => {
+    let calls = openShellCalls.get(sessionID)
+    if (open) {
+      if (calls?.has(callID)) return
+      if (!calls) {
+        calls = new Set()
+        openShellCalls.set(sessionID, calls)
+      }
+      calls.add(callID)
+    } else {
+      if (!calls?.delete(callID)) return
+    }
+    const delta = open ? 1 : -1
+    for (const sid of ancestryOf(sessionID)) {
+      openShellCount.set(sid, Math.max(0, (openShellCount.get(sid) ?? 0) + delta))
+    }
+  }
+
+  /** Drop all watchdog state for a settled child and its descendants. */
+  const releaseChild = (childID: string): void => {
+    const doomed = new Set([childID])
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const [sid, parent] of childParent) {
+        if (doomed.has(parent) && !doomed.has(sid)) {
+          doomed.add(sid)
+          grew = true
+        }
+      }
+    }
+    for (const sid of doomed) {
+      childActivity.delete(sid)
+      childStop.delete(sid)
+      childParent.delete(sid)
+      openShellCount.delete(sid)
+      openShellCalls.delete(sid)
+    }
+  }
+
+  const taskAgentName = (part: any): string => {
+    const input = part?.state?.input ?? {}
+    const name = input.subagent_type ?? input.agent ?? input.description
+    return typeof name === "string" && name.length > 0 ? name : "task"
+  }
+
+  /**
+   * Wait for a child to go idle. `confirmMs` is the post-abort confirmation:
+   * a plain bounded wait (activity must not extend it). Otherwise resolve
+   * false only after `stallMs` of silence with no exempt open shell tool, or
+   * after the optional wall-clock `ceilingMs`.
+   */
+  const waitForChildIdle = (
+    childID: string,
+    opts: { stallMs?: number; ceilingMs?: number; confirmMs?: number } = {},
+  ): Promise<boolean> =>
     new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      let timer: NodeJS.Timeout | null = null
+      const startedAt = Date.now()
+      const finish = (idle: boolean): void => {
+        if (timer) clearTimeout(timer)
         childIdleResolvers.delete(childID)
-        resolve(false) // timed out — mission abandoned for this tick
-      }, tickTimeoutMs)
+        if (idle) releaseChild(childID)
+        resolve(idle)
+      }
+      if (!childActivity.has(childID)) trackChild(childID)
+      childIdleResolvers.set(childID, () => finish(true))
+
+      if (opts.confirmMs !== undefined) {
+        timer = setTimeout(() => finish(false), opts.confirmMs)
+        timer.unref?.()
+        return
+      }
+
+      const stallMs = opts.stallMs ?? tickStallMs
+      const ceilingMs = opts.ceilingMs ?? tickCeilingMs
+      const checkEveryMs =
+        stallMs > 0 ? Math.max(10, Math.min(30_000, Math.floor(stallMs / 4))) : 30_000
+      const check = (): void => {
+        const now = Date.now()
+        const last = childActivity.get(childID)
+        const stalledForMs = now - (last?.at ?? startedAt)
+        if (ceilingMs > 0 && now - startedAt >= ceilingMs) {
+          childStop.set(childID, {
+            reason: "ceiling",
+            stalledForMs,
+            lastActivity: last?.kind ?? "session",
+          })
+          finish(false)
+          return
+        }
+        if (stallMs > 0 && (openShellCount.get(childID) ?? 0) === 0 && stalledForMs >= stallMs) {
+          childStop.set(childID, {
+            reason: "stall",
+            stalledForMs,
+            lastActivity: last?.kind ?? "session",
+          })
+          finish(false)
+          return
+        }
+        timer = setTimeout(check, checkEveryMs)
+        timer.unref?.()
+      }
+      timer = setTimeout(check, checkEveryMs)
       timer.unref?.()
-      childIdleResolvers.set(childID, () => {
-        clearTimeout(timer)
-        childIdleResolvers.delete(childID)
-        resolve(true)
-      })
     })
+
+  /**
+   * Stop a stalled child (docs/heartbeat-timeout-lock-resume.md §5.2).
+   * Aborts via the v2 SDK, then confirms the stop with a FRESH bounded idle
+   * wait. A failed abort reports `ok: false` so the caller records an error
+   * and never claims a clean stop.
+   */
+  const abortSession = async (
+    childID: string,
+    reason: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await (client as any).session.abort({
+        path: { id: childID },
+        query: { directory: dir },
+      })
+      if (res?.error || (res?.response && !res.response.ok)) {
+        const message =
+          (res?.error as { message?: string } | undefined)?.message ??
+          `session.abort failed (status ${res?.response?.status ?? "unknown"})`
+        return { ok: false, error: message }
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+    const confirmed = await waitForChildIdle(childID, { confirmMs: abortConfirmMs })
+    return confirmed
+      ? { ok: true }
+      : { ok: false, error: `session did not go idle within ${abortConfirmMs}ms of ${reason} abort` }
+  }
 
   const logTick = async (entry: Record<string, unknown>): Promise<void> => {
     try {
@@ -423,6 +610,13 @@ export default (async ({ client, directory, ...rest }) => {
     sessionId: string | null
     result: MissionResult | null
     tool: DrainToolResult | null
+    /** Present only when a timeout triggered an abort attempt. */
+    aborted?: boolean
+    abortError?: string
+    /** Why the child was stopped (`stall` | `ceiling`) and the evidence. */
+    stopReason?: "stall" | "ceiling"
+    stalledForMs?: number
+    lastActivity?: string
   }
 
   const runMissionChild = async (args: {
@@ -439,6 +633,11 @@ export default (async ({ client, directory, ...rest }) => {
     let runError: ReturnType<typeof heartbeatErrorFields> | undefined
     let result: MissionResult | null = null
     let drainTool: DrainToolResult | null = null
+    let aborted: boolean | undefined
+    let abortError: string | undefined
+    let stopReason: "stall" | "ceiling" | undefined
+    let stalledForMs: number | undefined
+    let lastActivity: string | undefined
     const slot = args.slot ?? "primary"
 
     try {
@@ -450,6 +649,7 @@ export default (async ({ client, directory, ...rest }) => {
       if (!childID) throw new Error("session.create returned no id")
       sessionId = childID
       automationChildSessions.add(childID)
+      trackChild(childID)
       await setCurrent(
         slot === "side"
           ? {
@@ -484,8 +684,25 @@ export default (async ({ client, directory, ...rest }) => {
               `promptAsync failed (status ${res?.response?.status ?? "unknown"})`,
           ),
         )
+      } else if (await idled) {
+        outcome = "completed"
       } else {
-        outcome = (await idled) ? "completed" : "timeout"
+        // Stalled (or past the optional ceiling): stop the child before
+        // sampling its transcript, and keep the lock only for the bounded
+        // abort confirm (plan §5.2).
+        const stop = childStop.get(childID)
+        stopReason = stop?.reason ?? "stall"
+        stalledForMs = stop?.stalledForMs
+        lastActivity = stop?.lastActivity
+        const abort = await abortSession(childID, stopReason)
+        aborted = abort.ok
+        if (abort.ok) {
+          outcome = "timeout"
+        } else {
+          outcome = "error"
+          abortError = abort.error ?? "abort failed"
+          runError = heartbeatErrorFields("mission", new Error(abortError))
+        }
       }
 
       let rows: unknown[] = []
@@ -514,7 +731,22 @@ export default (async ({ client, directory, ...rest }) => {
       runError = heartbeatErrorFields("mission", err)
     }
 
-    return { outcome, tokenCost, summary, runError, sessionId, result, tool: drainTool }
+    if (sessionId) releaseChild(sessionId)
+
+    return {
+      outcome,
+      tokenCost,
+      summary,
+      runError,
+      sessionId,
+      result,
+      tool: drainTool,
+      ...(aborted === undefined ? {} : { aborted }),
+      ...(abortError === undefined ? {} : { abortError }),
+      ...(stopReason === undefined ? {} : { stopReason }),
+      ...(stalledForMs === undefined ? {} : { stalledForMs }),
+      ...(lastActivity === undefined ? {} : { lastActivity }),
+    }
   }
 
   type Decided = {
@@ -578,6 +810,7 @@ export default (async ({ client, directory, ...rest }) => {
     if (ticking) return "lock-held" // in-process single-flight
     ticking = true
     let lockHeld = false
+    let missionLock: FileLockHandle | null = null
     // Troubleshooting trail: which stage the tick is in, and the ledger
     // closure once it exists — so ANY failure below leaves one
     // `outcome: "error"` ledger line with a phase-tagged error, never silent.
@@ -592,6 +825,12 @@ export default (async ({ client, directory, ...rest }) => {
       // heartbeat.
       const hbCfg = await readHeartbeatConfig(dir)
       if (!hbCfg.enabled) return "sleeping"
+      // Hot-read the child budget: a config flip applies from the next tick
+      // (the test seam wins when injected so timeout/requeue stays testable).
+      // Hot-read the watchdog dials: a config flip applies from the next tick
+      // (the test seams win when injected so timeout/requeue stays testable).
+      if (tickStallOverride === undefined) tickStallMs = missionStallMs(hbCfg)
+      if (tickCeilingOverride === undefined) tickCeilingMs = missionTimeoutMs(hbCfg)
 
       const autonomy = await readAutonomyConfig(dir)
 
@@ -615,7 +854,7 @@ export default (async ({ client, directory, ...rest }) => {
 
       // 4. Cross-instance lock; a fresh lock means another instance is inside
       // a tick (overrun semantics) — skip, retry next wake.
-      const lock = await acquireHeartbeatLock(lockFile, nowMs)
+      const lock = await acquireHeartbeatLock(lockFile, nowMs, hbCfg.mission_lock_stale_ms)
       if (!lock) return "lock-held"
       lockHeld = true
       const prevState = state
@@ -753,6 +992,31 @@ export default (async ({ client, directory, ...rest }) => {
       }
       let queues = enqueueItems(await loadQueues(join(stateDir, LANES_FILE)), collectItems(producerCtx))
       queues = pruneQueues(queues, nowMs, (item) => itemStillDue(producerCtx, item)).queues
+
+      // §5.1: one mission.lock for the whole dispatch section, taken before the
+      // first child (side or primary) and before any queue write. A held lock
+      // means another agent is working: skip dispatch, leave lanes.json
+      // byte-identical, and journal why. The heartbeat.lock is already held, so
+      // the ordering is heartbeat.lock -> mission.lock.
+      if (autonomy.heartbeat.in_progress_lock) {
+        missionLock = await acquireFileLock(missionLockFile, {
+          refreshMs: hbCfg.mission_lock_refresh_ms,
+          staleMs: hbCfg.mission_lock_stale_ms,
+        })
+        if (!missionLock) {
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: "silent",
+            token_cost: 0,
+            gate: "lock",
+            reason: "mission-lock-held",
+            queues: queueDepth(queues),
+          })
+          return "fired"
+        }
+      }
+
       await saveQueues(join(stateDir, LANES_FILE), queues)
 
       const contextFor = (d: HeartbeatDigest): string =>
@@ -889,6 +1153,11 @@ export default (async ({ client, directory, ...rest }) => {
         result_status: resultStatusOf(r),
         result_missing: !r.result,
         requeued,
+        ...(r.aborted === undefined ? {} : { aborted: r.aborted }),
+        ...(r.abortError === undefined ? {} : { abort_error: r.abortError }),
+        ...(r.stopReason === undefined ? {} : { stop_reason: r.stopReason }),
+        ...(r.stalledForMs === undefined ? {} : { stalled_for_ms: r.stalledForMs }),
+        ...(r.lastActivity === undefined ? {} : { last_activity: r.lastActivity }),
         ...(r.tool
           ? {
               tool_status: r.tool.status,
@@ -917,6 +1186,8 @@ export default (async ({ client, directory, ...rest }) => {
           side_session: r.sessionId,
           side_result_status: resultStatusOf(r),
           side_requeued: requeued,
+          ...(r.aborted === undefined ? {} : { side_aborted: r.aborted }),
+          ...(r.abortError === undefined ? {} : { side_abort_error: r.abortError }),
         }
       }
 
@@ -1209,6 +1480,9 @@ export default (async ({ client, directory, ...rest }) => {
       return "fired"
     } finally {
       ticking = false
+      // Release in reverse acquisition order: mission.lock first, then
+      // heartbeat.lock. The attempt has been captured by now (ledger/backlog).
+      if (missionLock) await missionLock.release().catch(() => {})
       if (lockHeld) await releaseHeartbeatLock(lockFile).catch(() => {})
       // Close the live marker: idle once the tick ends (success, error, or a
       // lock-held skip) — the dashboard never shows a stale in-flight state.
@@ -1350,10 +1624,50 @@ export default (async ({ client, directory, ...rest }) => {
       drain_run: drainRunTool,
     },
     event: async ({ event }) => {
-      if (event.type !== "session.idle") return
-      const sid = event.properties.sessionID
-      if (!sid) return
-      childIdleResolvers.get(sid)?.()
+      const properties = (event as any).properties ?? {}
+      if (event.type === "session.idle") {
+        const sid = properties.sessionID
+        if (sid) childIdleResolvers.get(sid)?.()
+        return
+      }
+      if (event.type === "session.created") {
+        // `parentID` is what makes descendant liveness bubble up (§5.2).
+        const info = properties.info ?? {}
+        if (typeof info.id === "string" && typeof info.parentID === "string") {
+          childParent.set(info.id, info.parentID)
+        }
+        if (typeof info.id === "string") touchActivity(info.id, "session")
+        return
+      }
+      if (event.type === "message.part.updated") {
+        const part = properties.part ?? {}
+        const sid = part.sessionID
+        if (typeof sid !== "string") return
+        if (part.type === "tool") {
+          const tool = typeof part.tool === "string" ? part.tool : "tool"
+          const callID = String(part.callID ?? part.id ?? tool)
+          const status = part.state?.status
+          if (SHELL_TOOLS.has(tool)) {
+            setOpenShell(sid, callID, status === "running" || status === "pending")
+          }
+          touchActivity(sid, tool === "task" ? `task:${taskAgentName(part)}` : `tool:${tool}`)
+        } else {
+          touchActivity(sid, part.type === "text" ? "text" : String(part.type ?? "part"))
+        }
+        return
+      }
+      if (event.type === "message.updated") {
+        const info = properties.info ?? {}
+        if (typeof info.sessionID === "string") touchActivity(info.sessionID, "model")
+        return
+      }
+      if (event.type === "session.updated") {
+        const info = properties.info ?? {}
+        if (typeof info.id === "string") touchActivity(info.id, "session")
+        return
+      }
+      const sid = properties.sessionID ?? properties.info?.sessionID ?? properties.info?.id
+      if (typeof sid === "string") touchActivity(sid, "event")
     },
   }
 }) satisfies Plugin

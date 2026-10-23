@@ -2,15 +2,16 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawnConsolidationChild, type ConsolidationClient } from "./spawn.ts"
 
-type Calls = { create: any[]; prompt: any[]; messages: any[] }
+type Calls = { create: any[]; prompt: any[]; messages: any[]; abort: any[] }
 
 function client(opts: {
   failCreate?: boolean
   failPrompt?: boolean
   promptErrorResponse?: boolean
+  failAbort?: boolean
   rows?: unknown[]
 } = {}): { client: ConsolidationClient; calls: Calls } {
-  const calls: Calls = { create: [], prompt: [], messages: [] }
+  const calls: Calls = { create: [], prompt: [], messages: [], abort: [] }
   return {
     calls,
     client: {
@@ -29,6 +30,11 @@ function client(opts: {
         async messages(args) {
           calls.messages.push(args)
           return { data: opts.rows ?? [] }
+        },
+        async abort(args) {
+          calls.abort.push(args)
+          if (opts.failAbort) return { error: { message: "abort rejected" } }
+          return { response: { ok: true } }
         },
       },
     },
@@ -82,15 +88,46 @@ test("omits the model when writer_model is empty", async () => {
   assert.equal("model" in calls.prompt[0].body, false)
 })
 
-test("timeouts are non-fatal and reported", async () => {
-  const { client: c } = client({ rows: ROWS })
+test("timeouts are non-fatal, abort the child, and are reported", async () => {
+  const { client: c, calls } = client({ rows: ROWS })
+  const waits = [false, true]
+  const result = await spawnConsolidationChild(c, {
+    directory: "/work",
+    prompt: "x",
+    waitForIdle: async () => waits.shift() ?? true,
+    abortConfirmMs: 50,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.error, "timeout")
+  assert.equal(calls.abort.length, 1, "timed-out writer is aborted")
+  assert.equal(calls.abort[0].path.id, "ses_writer")
+  assert.equal(calls.abort[0].query.directory, "/work")
+})
+
+test("a failed abort is recorded instead of claiming a stop", async () => {
+  const { client: c, calls } = client({ rows: ROWS, failAbort: true })
   const result = await spawnConsolidationChild(c, {
     directory: "/work",
     prompt: "x",
     waitForIdle: async () => false,
+    abortConfirmMs: 10,
   })
   assert.equal(result.ok, false)
-  assert.equal(result.error, "timeout")
+  assert.match(result.error ?? "", /timeout; abort failed: abort rejected/)
+  assert.equal(calls.abort.length, 1)
+})
+
+test("an unconfirmed abort is reported, never a clean timeout", async () => {
+  const { client: c, calls } = client({ rows: ROWS })
+  const result = await spawnConsolidationChild(c, {
+    directory: "/work",
+    prompt: "x",
+    waitForIdle: async () => false,
+    abortConfirmMs: 10,
+  })
+  assert.equal(result.ok, false)
+  assert.match(result.error ?? "", /abort not confirmed within 10ms/)
+  assert.equal(calls.abort.length, 1)
 })
 
 test("prompt/create failures return ok:false instead of throwing", async () => {

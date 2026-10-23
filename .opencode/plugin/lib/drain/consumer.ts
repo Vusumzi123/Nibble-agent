@@ -22,6 +22,8 @@
 //
 // Loaded via relative import only.
 import { join } from "node:path"
+import { readAutonomyConfig } from "../autonomy.ts"
+import { readHeartbeatConfig } from "../heartbeat.ts"
 import { atomicWrite } from "../fsx.ts"
 import { nowIso } from "../util.ts"
 import { readDrainConfig, type DrainConfig } from "./config.ts"
@@ -274,6 +276,25 @@ export function startDrainConsumer(deps: DrainConsumerDeps): DrainConsumerHandle
         break
       }
 
+      // §5.1: per-child mission.lock settings, hot-read so a dial flip applies
+      // on the next pass. A read failure fails open (no lock), never a crash.
+      let missionLock: { file: string; refreshMs: number; staleMs: number } | null = null
+      try {
+        const [autonomyCfg, hbCfg] = await Promise.all([
+          readAutonomyConfig(deps.directory),
+          readHeartbeatConfig(deps.directory),
+        ])
+        if (autonomyCfg.heartbeat.in_progress_lock) {
+          missionLock = {
+            file: join(deps.stateDir, "mission.lock"),
+            refreshMs: hbCfg.mission_lock_refresh_ms,
+            staleMs: hbCfg.mission_lock_stale_ms,
+          }
+        }
+      } catch (err) {
+        deps.onWarn?.("drain consumer: mission lock config read failed", err)
+      }
+
       const result = await runDrainPipe({
         directory: deps.directory,
         stateDir: deps.stateDir,
@@ -285,6 +306,7 @@ export function startDrainConsumer(deps: DrainConsumerDeps): DrainConsumerHandle
         registerChild: deps.registerChild,
         ...(deps.dbFile === undefined ? {} : { dbFile: deps.dbFile }),
         ...(deps.ledger ? { ledger: deps.ledger } : {}),
+        missionLock,
         trigger: "consumer",
         pass: passes,
         onWarn: deps.onWarn,
@@ -292,6 +314,12 @@ export function startDrainConsumer(deps: DrainConsumerDeps): DrainConsumerHandle
 
       if (result.lockHeld) {
         // §2.4/§5.1: a lock-held wake never reaches a pass.
+        stopped = "lock-held"
+        break
+      }
+
+      if (result.stopped === "mission-lock-held") {
+        // §5.1: another agent is working; stop the wake, back off normally.
         stopped = "lock-held"
         break
       }

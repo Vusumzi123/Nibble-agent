@@ -379,6 +379,46 @@ test("lock-held skip: a fresh heartbeat.lock skips the tick and is not stolen", 
   assert.equal(held.pid, 4242)
 })
 
+// §5.1 execution lock: a foreign mission.lock means another agent is working.
+// The tick skips dispatch, journals gate:lock, creates no session, and leaves
+// lanes.json byte-identical (no enqueue/prune write reaches disk).
+test("mission-lock-held skip: dispatch is skipped and the lane queues are untouched", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  await writeMission(dir)
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  const queueText = JSON.stringify({ primary: [], side: [] })
+  await writeFile(join(stateDir, "lanes.json"), queueText, "utf8")
+  await writeFile(
+    join(stateDir, "heartbeat.json"),
+    JSON.stringify({ last_tick: Date.now() - 13 * HOUR, ticks: 0 }),
+    "utf8",
+  )
+  const foreign = {
+    pid: process.ppid,
+    acquired_ms: Date.now(),
+    heartbeat_ms: Date.now(),
+  }
+  await writeFile(join(stateDir, "mission.lock"), JSON.stringify(foreign), "utf8")
+
+  const client = mockClient()
+  await createHook({ client, directory: dir } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+
+  const [t] = await readTickLog(dir)
+  assert.equal(t.gate, "lock")
+  assert.equal(t.reason, "mission-lock-held")
+  assert.equal(t.outcome, "silent")
+  assert.equal(client.calls.create, 0, "no child is dispatched while the lock is held")
+  assert.equal(
+    await readFile(join(stateDir, "lanes.json"), "utf8"),
+    queueText,
+    "the queues are byte-identical",
+  )
+  const held = JSON.parse(await readFile(join(stateDir, "mission.lock"), "utf8"))
+  assert.equal(held.pid, process.ppid, "the foreign lock is not stolen")
+})
+
 // The full mission-execution path (§12.1 step 6 + §7 recording): JEV verdict
 // → one child session with the fixed brief → session.idle → ledger line with
 // token_cost → backlog record + one-way view refresh → lock released.
@@ -405,6 +445,12 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.ok(text.includes("Verdict: mission:drain — Drain conversation backlog into the vault"))
   assert.ok(text.includes("Do the drain thing."))
   assert.ok(text.includes("~50 tokens"), "the child is told the configured budget")
+
+  // §5.1: mission.lock is held across the child dispatch.
+  const held = JSON.parse(
+    await readFile(join(dir, ".opencode", "state", "mission.lock"), "utf8"),
+  )
+  assert.equal(held.pid, process.pid)
 
   // 2. The child idles → the tick completes.
   await hooks.event({
@@ -441,11 +487,19 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   const view = await readFile(join(dir, "Brain", "Backlog.md"), "utf8")
   assert.ok(view.includes("Drain conversation backlog into the vault"))
 
-  // 6. Single-flight released: exactly one session, lock gone.
+  // 6. Single-flight released: exactly one session, both locks gone.
   assert.equal(client.calls.create, 1)
   await waitFor(async () => {
     try {
       await readFile(join(dir, ".opencode", "state", "heartbeat.lock"), "utf8")
+      return false
+    } catch {
+      return true
+    }
+  })
+  await waitFor(async () => {
+    try {
+      await readFile(join(dir, ".opencode", "state", "mission.lock"), "utf8")
       return false
     } catch {
       return true
@@ -1198,8 +1252,14 @@ test("digest fallback: confident no_reply still ends no_reply despite pending tu
 
 // A client with distinct session ids per child so two children in one tick
 // can idle independently (missionClient's fixed id would collide).
-function laneClient() {
-  const calls = { create: 0, creates: [] as any[], prompts: [] as any[], ids: [] as string[] }
+function laneClient(opts: { abortFails?: boolean } = {}) {
+  const calls = {
+    create: 0,
+    creates: [] as any[],
+    prompts: [] as any[],
+    ids: [] as string[],
+    aborts: [] as any[],
+  }
   return {
     calls,
     session: {
@@ -1213,6 +1273,11 @@ function laneClient() {
       },
       promptAsync: async (args: any) => {
         calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      abort: async (args: any) => {
+        calls.aborts.push(args)
+        if (opts.abortFails) return { response: { ok: false, status: 500 }, error: { message: "abort refused" } }
         return { response: { ok: true, status: 200 } }
       },
       messages: async () => ({
@@ -1395,17 +1460,32 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
 
   const client = laneClient()
   const { spawner } = sequenceSpawner(["no_reply"])
-  // 50 ms child budget, and the test never sends session.idle → timeout.
-  await createHook({ client, directory: dir, spawner, tickTimeoutMs: 50 } as any)
+  // 50 ms child budget, and the test never sends session.idle before the
+  // timeout → the run aborts the child, then confirms with its own budget.
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  assert.equal(client.calls.aborts[0].path.id, client.calls.ids[0], "aborts the child session")
+  assert.equal(client.calls.aborts[0].query.directory, dir)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
 
   await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
   const [tick] = await readTickLog(dir)
   assert.equal(tick.side_mission, "drain")
   assert.equal(tick.side_outcome, "timeout")
+  assert.equal(tick.side_aborted, true, "the abort was confirmed")
   assert.equal(tick.side_requeued, true)
   assert.equal(tick.runs.length, 1)
   assert.equal(tick.runs[0].requeued, true)
   assert.equal(tick.runs[0].lane, "side")
+  assert.equal(tick.runs[0].aborted, true)
+  assert.equal(tick.runs[0].abort_error, undefined)
 
   const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
   assert.equal(lanes.side.length, 1, "the item is back in the queue")
@@ -1413,4 +1493,166 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
   assert.equal(lanes.side[0].requeue_count, 1)
   assert.equal(lanes.side[0].requeue_reason, "timeout")
   assert.ok(lanes.side[0].payload.original_enqueued_ms < lanes.side[0].enqueued_ms, "tail = fresh timestamp")
+})
+
+test("a failed abort is recorded as an error, never a clean stop", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  consumer: false",
+    "",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "lanes-abort-fail")
+
+  const client = laneClient({ abortFails: true })
+  const { spawner } = sequenceSpawner(["no_reply"])
+  await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "error", "a failed abort is not booked as a timeout")
+  assert.equal(tick.side_aborted, false)
+  assert.equal(tick.side_abort_error, "abort refused")
+  assert.equal(tick.side_requeued, false)
+  assert.equal(tick.runs[0].aborted, false)
+  assert.equal(tick.runs[0].abort_error, "abort refused")
+
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
+  assert.equal(lanes.side.length, 0, "a failed abort drops the item instead of requeueing it")
+})
+
+// Plan 5.2 / P3c: the stall watchdog measures silence, not wall-clock.
+const stallProject = () =>
+  project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  consumer: false",
+    "",
+  ])
+
+const partEvent = (sessionID: string, part: Record<string, unknown> = {}) =>
+  ({
+    event: {
+      type: "message.part.updated",
+      properties: { part: { type: "text", sessionID, ...part } },
+    },
+  }) as any
+
+test("a stall watchdog keeps waiting while the child is active", async () => {
+  const dir = await stallProject()
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "stall-active")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 200,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1, 8000)
+  const sid = client.calls.ids[0]
+  // Keep talking for well past the 200 ms window, in sub-window slices.
+  for (let i = 0; i < 6; i++) {
+    await delay(100)
+    await hooks.event(partEvent(sid))
+  }
+  assert.equal(client.calls.aborts.length, 0, "activity kept the child alive")
+
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "completed")
+  assert.equal(tick.side_requeued, false)
+})
+
+test("silence during an open shell tool is exempt until the tool closes", async () => {
+  const dir = await stallProject()
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "stall-shell")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 150,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1, 8000)
+  const sid = client.calls.ids[0]
+  await hooks.event(
+    partEvent(sid, { type: "tool", tool: "bash", callID: "c1", state: { status: "running" } }),
+  )
+  await delay(500)
+  assert.equal(client.calls.aborts.length, 0, "a long silent shell call is exempt")
+
+  await hooks.event(
+    partEvent(sid, { type: "tool", tool: "bash", callID: "c1", state: { status: "completed" } }),
+  )
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "timeout")
+  assert.equal(tick.runs[0].stop_reason, "stall")
+  assert.equal(tick.runs[0].last_activity, "tool:bash")
+  assert.ok(tick.runs[0].stalled_for_ms >= 100, "the ledger records the silence")
+})
+
+test("descendant activity keeps the mission child alive (no task exemption)", async () => {
+  const dir = await stallProject()
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "stall-descendant")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 200,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1, 8000)
+  const sid = client.calls.ids[0]
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "ses_sub", parentID: sid } } },
+  } as any)
+  for (let i = 0; i < 6; i++) {
+    await delay(100)
+    await hooks.event(partEvent("ses_sub"))
+  }
+  assert.equal(client.calls.aborts.length, 0, "the sub-agent's events bubbled up")
+
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "completed")
 })

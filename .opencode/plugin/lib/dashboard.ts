@@ -43,6 +43,7 @@ import {
   frequencyToMs,
   readHeartbeatConfig,
   readHeartbeatCurrent,
+  type HeartbeatConfig,
   type HeartbeatCurrent,
 } from "./heartbeat.ts"
 import { readAll, readBacklogConfig, resolveBacklogFile, type BacklogEntry } from "./backlog.ts"
@@ -348,6 +349,33 @@ export function guardLeaf(section: string, leaf: Leaf, ctx: GuardContext): { sta
   return null
 }
 
+// Cross-field guard: the reader lifts mission_lock_stale_ms to at least
+// 3 × mission_lock_refresh_ms, so a write with stale ≤ refresh would either be
+// silently rewritten or, worse, let a live holder's lock be stolen. Refuse it
+// up front (the per-leaf min:0 rules cannot see the pair).
+export function heartbeatLockProblems(
+  current: Pick<HeartbeatConfig, "mission_lock_stale_ms" | "mission_lock_refresh_ms">,
+  requested: Record<string, unknown>,
+): RoundTripProblem[] {
+  const num = (path: string, fallback: number): number => {
+    const value = requested[path]
+    return typeof value === "number" ? value : fallback
+  }
+  const refresh = num("mission_lock_refresh_ms", current.mission_lock_refresh_ms)
+  const stale = num("mission_lock_stale_ms", current.mission_lock_stale_ms)
+  if (stale <= refresh) {
+    return [
+      {
+        path: "mission_lock_stale_ms",
+        reason: `must be greater than mission_lock_refresh_ms (${refresh}ms)`,
+        expected: `> ${refresh}`,
+        actual: stale,
+      },
+    ]
+  }
+  return []
+}
+
 // ---------------------------------------------------------------------------
 // The write path
 
@@ -390,6 +418,13 @@ export async function writeConfig(
   for (const leaf of leaves) {
     edits[leaf.path] = renderYamlScalar(leaf.value, leaf.path)
     requested[leaf.path] = leaf.value
+  }
+
+  if (section === "heartbeat") {
+    const problems = heartbeatLockProblems(await readHeartbeatConfig(directory), requested)
+    if (problems.length > 0) {
+      throw new DashboardError(400, "invalid_value", "mission-lock settings failed cross-field validation", problems)
+    }
   }
 
   const file = join(directory, SYSCONFIG)

@@ -33,14 +33,15 @@ type FakeOptions = {
   failCreate?: boolean
   failPrompt?: boolean
   failMessages?: boolean
+  failAbort?: boolean
   tokens?: { input?: number; output?: number; reasoning?: number }
 }
 
 function fakeClient(opts: FakeOptions = {}): {
   client: SummarizerClient
-  calls: { create: any[]; prompt: any[]; messages: any[] }
+  calls: { create: any[]; prompt: any[]; messages: any[]; abort: any[] }
 } {
-  const calls = { create: [] as any[], prompt: [] as any[], messages: [] as any[] }
+  const calls = { create: [] as any[], prompt: [] as any[], messages: [] as any[], abort: [] as any[] }
   let replyIndex = 0
   const client: SummarizerClient = {
     session: {
@@ -68,6 +69,11 @@ function fakeClient(opts: FakeOptions = {}): {
             },
           ],
         }
+      },
+      async abort(args) {
+        calls.abort.push(args)
+        if (opts.failAbort) return { error: { message: "abort rejected" } }
+        return { response: { ok: true } }
       },
     },
   }
@@ -212,10 +218,11 @@ test("a malformed reply is retried once with a correction note", async () => {
 })
 
 test("timeouts and spawn errors degrade to the fallback", async () => {
+  const timedOutClient = fakeClient({ reply: REPLY })
   const timedOut = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
     {
-      client: fakeClient({ reply: REPLY }).client,
+      client: timedOutClient.client,
       directory: "/work",
       maxItems: 6,
       waitForIdle: async () => false,
@@ -223,6 +230,21 @@ test("timeouts and spawn errors degrade to the fallback", async () => {
   )
   assert.equal(timedOut.degraded, "summarizer-fallback")
   assert.match(timedOut.error ?? "", /timed out/)
+  assert.equal(timedOutClient.calls.abort.length, 1, "timed-out child is aborted")
+  assert.equal(timedOutClient.calls.abort[0].path.id, "ses_sum")
+
+  const failedAbort = fakeClient({ reply: REPLY, failAbort: true })
+  const abortResult = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    {
+      client: failedAbort.client,
+      directory: "/work",
+      maxItems: 6,
+      waitForIdle: async () => false,
+    },
+  )
+  assert.equal(abortResult.degraded, "summarizer-fallback")
+  assert.match(abortResult.error ?? "", /abort failed: abort rejected/)
 
   const crashed = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },

@@ -164,8 +164,12 @@ function readBacklog(dir: string): Promise<any[]> {
 }
 
 // A child session whose final assistant line is the given text with token usage.
-function dreamClient(text: string, tokens = { input: 100, output: 50 }) {
-  const calls = { create: 0, prompts: [] as any[] }
+function dreamClient(
+  text: string,
+  tokens = { input: 100, output: 50 },
+  opts: { abortFails?: boolean } = {},
+) {
+  const calls = { create: 0, prompts: [] as any[], aborts: [] as any[] }
   return {
     calls,
     session: {
@@ -184,6 +188,12 @@ function dreamClient(text: string, tokens = { input: 100, output: 50 }) {
       },
       promptAsync: async (args: any) => {
         calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+      abort: async (args: any) => {
+        calls.aborts.push(args)
+        if (opts.abortFails)
+          return { response: { ok: false, status: 500 }, error: { message: "abort refused" } }
         return { response: { ok: true, status: 200 } }
       },
     },
@@ -567,4 +577,80 @@ test("malformed dream outcome: skipped, wobbled, bucket untouched", async () => 
   assert.ok((mood.valence ?? 0) < 0, "the wobble landed")
   const sleep = await readSleep(dir)
   assert.equal(sleep.noop_streak, 1, "no landed effect counts toward the backoff")
+})
+
+// Plan §5.2 / card P3a-f: a timed-out child is aborted, never left running.
+test("a timed-out child is aborted and the timeout is booked after the stop", async () => {
+  const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
+  await writeNightMissions(dir)
+  await writeSleep(dir)
+  const dbFile = await writePendingTurn(dir)
+  const client = dreamClient("drained the turns")
+  const { spawner } = countingSpawner()
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    random: () => 1,
+    drainDbFile: dbFile,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+  } as any)
+
+  const waitFor = async (fn: () => Promise<boolean>, ms = 8000): Promise<void> => {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      if (await fn()) return
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error("waitFor timeout")
+  }
+
+  // The test never idles the child before the timeout → the hook aborts it.
+  await waitFor(() => client.calls.aborts.length === 1)
+  assert.equal(client.calls.aborts[0].path.id, "ses_child", "aborts the child session")
+  assert.equal(client.calls.aborts[0].query.directory, dir)
+  await idle(hooks)
+  await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
+
+  const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
+  assert.equal(t.outcome, "timeout")
+  assert.equal(t.aborted, true, "the abort was confirmed")
+  assert.equal(t.abort_error, undefined)
+  assert.equal(t.token_cost, 150, "the transcript is sampled after the abort")
+})
+
+test("a failed dream abort is recorded as an error, never a clean stop", async () => {
+  const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
+  await writeNightMissions(dir)
+  await writeSleep(dir)
+  const dbFile = await writePendingTurn(dir)
+  const client = dreamClient("drained the turns", undefined, { abortFails: true })
+  const { spawner } = countingSpawner()
+  await createHook({
+    client,
+    directory: dir,
+    spawner,
+    random: () => 1,
+    drainDbFile: dbFile,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+  } as any)
+
+  const waitFor = async (fn: () => Promise<boolean>, ms = 8000): Promise<void> => {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      if (await fn()) return
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    throw new Error("waitFor timeout")
+  }
+
+  await waitFor(() => client.calls.aborts.length === 1)
+  await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
+  const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
+  assert.equal(t.outcome, "error", "a failed abort is not booked as a timeout")
+  assert.equal(t.aborted, false)
+  assert.equal(t.abort_error, "abort refused")
+  assert.equal(t.result_status, "error")
 })

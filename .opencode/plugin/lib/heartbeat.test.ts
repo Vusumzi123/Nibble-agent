@@ -27,6 +27,7 @@ import {
   digestVerdictFromResult,
   digestVerdictFromValue,
   effectiveFrequencyMs,
+  effectiveMissionLockStaleMs,
   frequencyToMs,
   isAllQuiet,
   isHeartbeatLockStale,
@@ -34,6 +35,8 @@ import {
   idleHeartbeatCurrent,
   isQuietNow,
   missionContextHeader,
+  missionStallMs,
+  missionTimeoutMs,
   moodDispatchBias,
   parseHeartbeatConfig,
   parseWindow,
@@ -1129,6 +1132,24 @@ test("acquireHeartbeatLock: a malformed lock is stolen", async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
+test("acquireHeartbeatLock: the configured stale threshold is honored", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hb-lock-cfg-stale-"))
+  const file = join(dir, "heartbeat.lock")
+  const now = 1_000_000_000_000
+  await writeFile(
+    file,
+    JSON.stringify({ pid: 999, acquired_ms: now - 60_000, acquired_at: "held" }),
+    "utf8",
+  )
+  // Fresh under the default 30 min threshold: skip.
+  assert.equal(await acquireHeartbeatLock(file, now), null)
+  // The same lock is already stale under a tighter config threshold.
+  const stolen = await acquireHeartbeatLock(file, now, 30_000)
+  assert.ok(stolen)
+  await releaseHeartbeatLock(file)
+  await rm(dir, { recursive: true, force: true })
+})
+
 // ---------------------------------------------------------------------------
 // `heartbeat:` config block (card E, plan §7)
 
@@ -1180,6 +1201,66 @@ test("readHeartbeatConfig: defaults without a file, overlay with one", async () 
   assert.equal(cfg.long_silence_factor, 0)
   assert.equal(cfg.log, "x.log")
   assert.equal(cfg.log_keep_generations, DEFAULT_HEARTBEAT_CONFIG.log_keep_generations)
+  await rm(dir, { recursive: true, force: true })
+})
+
+// Plan 4.1: the mission timing dials are hot-read per tick; the stall window
+// is the primary trigger (default 10 min) and the wall-clock ceiling is off
+// (default 0). 0 minutes means "never stall-abort".
+test("readHeartbeatConfig: mission dials hot-read and 0 disables the stall window", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hb-mission-cfg-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  const file = join(dir, ".opencode", "sysop-config.yaml")
+  await writeFile(
+    file,
+    "heartbeat:\n  mission_stall_minutes: 3\n  mission_timeout_minutes: 7\n  mission_lock_stale_ms: 400000\n  mission_lock_refresh_ms: 60000\n  mission_summary_timeout_ms: 45000\n  mission_max_resumes: 5\n",
+    "utf8",
+  )
+  const cfg = await readHeartbeatConfig(dir)
+  assert.equal(cfg.mission_stall_minutes, 3)
+  assert.equal(cfg.mission_timeout_minutes, 7)
+  assert.equal(cfg.mission_lock_stale_ms, 400000)
+  assert.equal(cfg.mission_lock_refresh_ms, 60000)
+  assert.equal(cfg.mission_summary_timeout_ms, 45000)
+  assert.equal(cfg.mission_max_resumes, 5)
+  assert.equal(missionStallMs(cfg), 3 * 60_000)
+  assert.equal(missionTimeoutMs(cfg), 7 * 60_000)
+
+  // Shipped defaults: stall watchdog on, wall-clock ceiling off.
+  const defaults = await readHeartbeatConfig(await mkdtemp(join(tmpdir(), "hb-mission-def-")))
+  assert.equal(defaults.mission_stall_minutes, 10)
+  assert.equal(defaults.mission_timeout_minutes, 0)
+  assert.equal(missionStallMs(defaults), 10 * 60_000)
+  assert.equal(missionTimeoutMs(defaults), 0)
+
+  // A second read sees the edit — the reader is not cached.
+  await writeFile(file, "heartbeat:\n  mission_timeout_minutes: 2\n", "utf8")
+  const next = await readHeartbeatConfig(dir)
+  assert.equal(missionTimeoutMs(next), 2 * 60_000)
+
+  await writeFile(file, "heartbeat:\n  mission_stall_minutes: 0\n", "utf8")
+  assert.equal(missionStallMs(await readHeartbeatConfig(dir)), 0)
+  await rm(dir, { recursive: true, force: true })
+})
+
+test("effectiveMissionLockStaleMs: stale is lifted to 3 × refresh at read time", async () => {
+  assert.equal(
+    effectiveMissionLockStaleMs({ mission_lock_stale_ms: 100, mission_lock_refresh_ms: 60_000 }),
+    180_000,
+  )
+  assert.equal(
+    effectiveMissionLockStaleMs({ mission_lock_stale_ms: 1_800_000, mission_lock_refresh_ms: 60_000 }),
+    1_800_000,
+  )
+  const dir = await mkdtemp(join(tmpdir(), "hb-stale-lift-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "sysop-config.yaml"),
+    "heartbeat:\n  mission_lock_stale_ms: 100\n  mission_lock_refresh_ms: 600000\n",
+    "utf8",
+  )
+  const cfg = await readHeartbeatConfig(dir)
+  assert.equal(cfg.mission_lock_stale_ms, 1_800_000)
   await rm(dir, { recursive: true, force: true })
 })
 

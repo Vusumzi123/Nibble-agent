@@ -49,7 +49,7 @@
     <label class="setup-field setup-field--check">
       <input class="form-check-input" type="checkbox"
              [checked]="inProgressLock()" (change)="inProgressLock.set($any($event.target).checked)">
-      <span>in-progress lock — one mission at a time</span>
+      <span>in-progress lock — enforce one mission at a time (also gates drain children)</span>
     </label>
   </div>
   <div class="ph-panel__body border-top">
@@ -76,6 +76,55 @@
         A tick gap ≥ factor × frequency feeds the <code>long_silence</code> mood event; 0 disables.
       </span>
     </label>
+  </div>
+  <div class="ph-panel__body border-top">
+    <div class="setup-subheader">Mission lock</div>
+    <div class="setup-grid">
+      <label class="setup-field">
+        <span class="setup-field__label">mission timeout <span class="muted">(minutes)</span></span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionTimeoutMinutes()" (input)="missionTimeoutMinutes.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          0 keeps the legacy abandon (never time out); otherwise the child is aborted at this budget.
+        </span>
+      </label>
+
+      <label class="setup-field">
+        <span class="setup-field__label">lock stale <span class="muted">(ms)</span></span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionLockStaleMs()" (input)="missionLockStaleMs.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          A lock held longer than this is presumed dead and stolen once; must exceed refresh.
+        </span>
+      </label>
+
+      <label class="setup-field">
+        <span class="setup-field__label">lock refresh <span class="muted">(ms)</span></span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionLockRefreshMs()" (input)="missionLockRefreshMs.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          Live holders re-stamp the lock this often; the stale threshold is lifted to 3× this.
+        </span>
+      </label>
+
+      <label class="setup-field">
+        <span class="setup-field__label">summary timeout <span class="muted">(ms)</span></span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionSummaryTimeoutMs()" (input)="missionSummaryTimeoutMs.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          Bound for the LLM attempt summary spawned under the lock on a timeout.
+        </span>
+      </label>
+
+      <label class="setup-field">
+        <span class="setup-field__label">resume ceiling</span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionMaxResumes()" (input)="missionMaxResumes.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          Resumes before a timed-out mission is dropped; 0 resumes forever.
+        </span>
+      </label>
+    </div>
   </div>
   <div class="ph-panel__body border-top">
     <button class="btn btn-primary" [disabled]="savingHeartbeat()" (click)="saveHeartbeat()">

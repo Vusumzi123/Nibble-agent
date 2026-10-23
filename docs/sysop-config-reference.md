@@ -136,7 +136,7 @@ fully-reported sessions.
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
 | `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 8). |
-| `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness]`. |
+| `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness, dream]`. |
 | `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |
 | `settle_seconds` | A session idle for less than this is not consumed — the half-written-turn guard (default 120). |
@@ -527,11 +527,19 @@ anchors at column 0, so the two never collide.
 | --- | ------- |
 | `enabled` | kill switch. `false` → the loop sleeps on the 60 s wake cap (hot; no restart). Also parks the dream timer — one lock, one engine (card G shares `heartbeat.lock` and this switch). |
 | `long_silence_factor` | a tick whose gap since the previous tick is ≥ factor × frequency feeds the `long_silence` mood event; `0` disables the feed. |
+| `mission_timeout_minutes` | child session budget in minutes (`0` = the legacy abandon, never time out). Hot-read at tick start. |
+| `mission_lock_stale_ms` | a `state/mission.lock` held longer than this is presumed dead and stolen once. Lifted to at least 3 × `mission_lock_refresh_ms` at read time. |
+| `mission_lock_refresh_ms` | cadence at which a live lock holder re-stamps the lock, so a long mission never loses its own lock. |
+| `mission_summary_timeout_ms` | bound for the LLM attempt summary spawned under the lock after a timeout; on expiry the summarizer child is aborted and the deterministic fallback is used. |
+| `mission_max_resumes` | resume ceiling for a timed-out mission (`0` = resume forever); past the ceiling the item drops and the ledger journals `resume_abandoned`. |
 | `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, pid, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
 | `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
 Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every
-tick. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`
+tick. The five mission-lock keys are also hot-read at tick start. The nested
+`autonomy.heartbeat.in_progress_lock` dial is now enforced: `true` takes
+`state/mission.lock` around each child (tick and drain), `false` restores the
+legacy no-lock path. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`
 with `result.token_cost` filled and refreshes the derived view one-way.
 B7 day-side backoff (missions-plan §7): consecutive `no_reply` ticks on an
 identical `digest_hash` stretch the day cadence ×2 at streak 2 and ×4 at 3+

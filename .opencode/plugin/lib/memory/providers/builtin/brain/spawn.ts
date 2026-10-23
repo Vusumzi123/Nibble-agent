@@ -15,6 +15,7 @@ export type ConsolidationClient = {
     create(args: any): Promise<{ data?: { id?: string } }>
     promptAsync(args: any): Promise<{ error?: unknown; response?: { ok?: boolean } }>
     messages(args: any): Promise<{ data?: any }>
+    abort(args: any): Promise<{ error?: unknown; response?: { ok?: boolean; status?: number } }>
   }
 }
 
@@ -26,6 +27,8 @@ export type SpawnOptions = {
   /** Bounded wait for the child to go idle; false = timeout. */
   waitForIdle: (sessionID: string) => Promise<boolean>
   registerChild?: (sessionID: string) => void
+  /** Post-abort idle confirmation budget (default 10 s, abortSession discipline). */
+  abortConfirmMs?: number
 }
 
 export type SpawnResult = {
@@ -35,6 +38,43 @@ export type SpawnResult = {
   tokens: number | null
   cost: number | null
   error?: string
+}
+
+const ABORT_CONFIRM_MS = 10_000
+
+/** Race a bounded idle wait against a fresh confirmation budget. */
+function waitWithin(wait: Promise<boolean>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = ms > 0 ? setTimeout(() => resolve(false), ms) : null
+    timer?.unref?.()
+    const settle = (value: boolean): void => {
+      if (timer) clearTimeout(timer)
+      resolve(value)
+    }
+    wait.then(settle, () => settle(false))
+  })
+}
+
+async function abortChild(
+  client: ConsolidationClient,
+  directory: string,
+  sessionID: string,
+): Promise<string | null> {
+  try {
+    const res = await client.session.abort({
+      path: { id: sessionID },
+      query: { directory },
+    })
+    if (res?.error || (res?.response && !res.response.ok)) {
+      return (
+        (res?.error as { message?: string } | undefined)?.message ??
+        `session.abort failed (status ${res?.response?.status ?? "unknown"})`
+      )
+    }
+    return null
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
 }
 
 function lastAssistantText(rows: unknown[]): string {
@@ -100,6 +140,31 @@ export async function spawnConsolidationChild(
     }
 
     if (!(await opts.waitForIdle(sessionID))) {
+      // Never leave the writer alive past its own timeout (§5.2): abort, then
+      // confirm with a FRESH bounded idle wait before reporting the timeout.
+      const abortError = await abortChild(client, opts.directory, sessionID)
+      if (abortError) {
+        return {
+          ok: false,
+          sessionID,
+          reply: "",
+          tokens: null,
+          cost: null,
+          error: `timeout; abort failed: ${abortError}`,
+        }
+      }
+      const confirmMs = opts.abortConfirmMs ?? ABORT_CONFIRM_MS
+      const confirmed = await waitWithin(opts.waitForIdle(sessionID), confirmMs)
+      if (!confirmed) {
+        return {
+          ok: false,
+          sessionID,
+          reply: "",
+          tokens: null,
+          cost: null,
+          error: `timeout; abort not confirmed within ${confirmMs}ms`,
+        }
+      }
       return { ok: false, sessionID, reply: "", tokens: null, cost: null, error: "timeout" }
     }
 

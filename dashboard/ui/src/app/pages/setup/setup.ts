@@ -21,6 +21,11 @@ export class SetupPage {
 
   protected readonly hbEnabled = signal(true);
   protected readonly longSilence = signal(3);
+  protected readonly missionTimeoutMinutes = signal(15);
+  protected readonly missionLockStaleMs = signal(1800000);
+  protected readonly missionLockRefreshMs = signal(60000);
+  protected readonly missionSummaryTimeoutMs = signal(90000);
+  protected readonly missionMaxResumes = signal(3);
 
   protected readonly triggerPending = signal(12);
   protected readonly triggerMaxAgeHours = signal(2);
@@ -46,6 +51,11 @@ export class SetupPage {
     this.inProgressLock.set(c.autonomy.heartbeat.in_progress_lock);
     this.hbEnabled.set(c.heartbeat.enabled);
     this.longSilence.set(c.heartbeat.long_silence_factor);
+    this.missionTimeoutMinutes.set(c.heartbeat.mission_timeout_minutes);
+    this.missionLockStaleMs.set(c.heartbeat.mission_lock_stale_ms);
+    this.missionLockRefreshMs.set(c.heartbeat.mission_lock_refresh_ms);
+    this.missionSummaryTimeoutMs.set(c.heartbeat.mission_summary_timeout_ms);
+    this.missionMaxResumes.set(c.heartbeat.mission_max_resumes);
     if (c.drain) {
       this.triggerPending.set(c.drain.trigger_pending);
       this.triggerMaxAgeHours.set(c.drain.trigger_max_age_hours);
@@ -86,9 +96,37 @@ export class SetupPage {
     this.notice.set(null);
     this.error.set(null);
     try {
+      const timeout = this.missionTimeoutMinutes();
+      const stale = this.missionLockStaleMs();
+      const refresh = this.missionLockRefreshMs();
+      const summary = this.missionSummaryTimeoutMs();
+      const resumes = this.missionMaxResumes();
+      if (!Number.isInteger(timeout) || timeout < 0) {
+        throw new Error('mission timeout must be a whole number of minutes >= 0');
+      }
+      if (!Number.isInteger(stale) || stale < 0) {
+        throw new Error('mission lock stale must be a whole number of ms >= 0');
+      }
+      if (!Number.isInteger(refresh) || refresh < 0) {
+        throw new Error('mission lock refresh must be a whole number of ms >= 0');
+      }
+      if (!Number.isInteger(summary) || summary < 0) {
+        throw new Error('mission summary timeout must be a whole number of ms >= 0');
+      }
+      if (!Number.isInteger(resumes) || resumes < 0) {
+        throw new Error('mission max resumes must be a whole number >= 0');
+      }
+      if (stale <= refresh) {
+        throw new Error('mission lock stale must be greater than refresh');
+      }
       const result = await this.api.writeConfig('heartbeat', {
         enabled: this.hbEnabled(),
         long_silence_factor: this.longSilence(),
+        mission_timeout_minutes: timeout,
+        mission_lock_stale_ms: stale,
+        mission_lock_refresh_ms: refresh,
+        mission_summary_timeout_ms: summary,
+        mission_max_resumes: resumes,
       });
       this.notice.set(`heartbeat saved: ${Object.keys(result.applied).join(', ')}`);
       await this.store.refreshConfig();

@@ -59,6 +59,7 @@ export type MemoryWriteClient = {
     create(args: any): Promise<{ data?: { id?: string } }>
     promptAsync(args: any): Promise<{ error?: unknown; response?: { ok?: boolean } }>
     messages(args: any): Promise<{ data?: any }>
+    abort(args: any): Promise<{ error?: unknown; response?: { ok?: boolean; status?: number } }>
   }
 }
 

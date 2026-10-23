@@ -29,3 +29,12 @@
   gap: var(--ph-space-2);
   font-size: var(--ph-text-sm);
 }
+
+.setup-subheader {
+  font-size: var(--ph-text-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ph-text-muted);
+  margin-bottom: var(--ph-space-2);
+}
