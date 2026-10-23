@@ -214,6 +214,21 @@ test("itemRunnable: primary items track the candidate list, side items re-check 
   assert.equal(itemStillDue(night, asSide("mission:staleness")), true, "waits for the day window")
 })
 
+test("itemRunnable: a primary resume runs even when the digest drops the mission", () => {
+  const drain = mission("drain", ["candidacy: turns-pending", "lane: side", "menus: [day, night]"])
+  const emptyCtx = ctx({ missions: [drain] })
+  const resumedPrimary = {
+    id: "mission:research",
+    lane: "primary",
+    payload: { resume: true },
+  } as never
+  assert.equal(itemRunnable(emptyCtx, resumedPrimary), true)
+
+  const noTurns = ctx({ missions: [drain], signals: signals({ unconsumed_turns: 0 }) })
+  const resumedSide = { id: "mission:drain", lane: "side", payload: { resume: true } } as never
+  assert.equal(itemRunnable(noTurns, resumedSide), false, "side resumes still obey status")
+})
+
 test("itemStillDue: primary survives, side drops when the status is gone", () => {
   const drain = mission("drain", ["candidacy: turns-pending", "lane: side", "menus: [day, night]"])
   const gone = ctx({ missions: [drain], signals: signals({ unconsumed_turns: 0 }) })

@@ -1260,6 +1260,9 @@ function laneClient(opts: { abortFails?: boolean } = {}) {
     ids: [] as string[],
     aborts: [] as any[],
   }
+  // P4c: a resume summary spawns the tool-free session-summarizer. Its reply
+  // must be strict JSON; every other session keeps returning the child rows.
+  const summarizerSessions = new Set<string>()
   return {
     calls,
     session: {
@@ -1273,6 +1276,7 @@ function laneClient(opts: { abortFails?: boolean } = {}) {
       },
       promptAsync: async (args: any) => {
         calls.prompts.push(args)
+        if (args?.body?.agent === "session-summarizer") summarizerSessions.add(args.path.id)
         return { response: { ok: true, status: 200 } }
       },
       abort: async (args: any) => {
@@ -1280,23 +1284,57 @@ function laneClient(opts: { abortFails?: boolean } = {}) {
         if (opts.abortFails) return { response: { ok: false, status: 500 }, error: { message: "abort refused" } }
         return { response: { ok: true, status: 200 } }
       },
-      messages: async () => ({
-        data: [
-          {
-            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 20 } },
-            parts: [
-              {
-                type: "tool",
-                tool: "mission_result",
-                state: { input: { status: "completed", summary: "done" } },
-              },
-              { type: "text", text: "done" },
-            ],
-          },
-        ],
-      }),
+      messages: async (args: any) =>
+        summarizerSessions.has(args?.path?.id)
+          ? {
+              data: [
+                {
+                  info: { role: "assistant", id: "a2", tokens: { input: 5, output: 5 } },
+                  parts: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({
+                        done: "drained 1 turn",
+                        remaining: "finish the lane",
+                        next_steps: ["finish the lane"],
+                        notes: "resume carries the summary",
+                      }),
+                    },
+                  ],
+                },
+              ],
+            }
+          : {
+              data: [
+                {
+                  info: { role: "assistant", id: "a1", tokens: { input: 100, output: 20 } },
+                  parts: [
+                    {
+                      type: "tool",
+                      tool: "mission_result",
+                      state: { input: { status: "completed", summary: "done" } },
+                    },
+                    { type: "text", text: "done" },
+                  ],
+                },
+              ],
+            },
     },
   }
+}
+
+/** P4c: resolve the summarizer child so settlement does not wait its 90 s cap. */
+async function settleSummarizer(client: any, hooks: any, timeoutMs = 8000): Promise<any> {
+  await waitFor(
+    () => client.calls.prompts.some((p: any) => p.body?.agent === "session-summarizer"),
+    timeoutMs,
+  )
+  const prompt = client.calls.prompts.find((p: any) => p.body?.agent === "session-summarizer")
+  await delay(50)
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: prompt.path.id } },
+  } as any)
+  return prompt
 }
 
 function writeLaneMission(
@@ -1474,6 +1512,7 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
   assert.equal(client.calls.aborts[0].path.id, client.calls.ids[0], "aborts the child session")
   assert.equal(client.calls.aborts[0].query.directory, dir)
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  await settleSummarizer(client, hooks)
 
   await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
   const [tick] = await readTickLog(dir)
@@ -1493,6 +1532,14 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
   assert.equal(lanes.side[0].requeue_count, 1)
   assert.equal(lanes.side[0].requeue_reason, "timeout")
   assert.ok(lanes.side[0].payload.original_enqueued_ms < lanes.side[0].enqueued_ms, "tail = fresh timestamp")
+  assert.equal(lanes.side[0].payload.resume, true)
+  assert.equal(lanes.side[0].payload.prior_session, client.calls.ids[0])
+  assert.equal(lanes.side[0].payload.summary.done, "drained 1 turn")
+  assert.equal(tick.runs[0].timeout_stopped, true)
+  assert.equal(tick.runs[0].prior_session, client.calls.ids[0])
+  assert.equal(tick.runs[0].resume_item, "mission:drain")
+  assert.equal(tick.runs[0].summarizer, "llm")
+  assert.equal(tick.runs[0].resume_abandoned, undefined)
 })
 
 test("a failed abort is recorded as an error, never a clean stop", async () => {
@@ -1617,6 +1664,7 @@ test("silence during an open shell tool is exempt until the tool closes", async 
   )
   await waitFor(() => client.calls.aborts.length === 1, 8000)
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await settleSummarizer(client, hooks)
   await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
   const [tick] = await readTickLog(dir)
   assert.equal(tick.side_outcome, "timeout")
@@ -1655,4 +1703,220 @@ test("descendant activity keeps the mission child alive (no task exemption)", as
   await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
   const [tick] = await readTickLog(dir)
   assert.equal(tick.side_outcome, "completed")
+})
+
+test("a background task child is aborted when its mission child aborts", async () => {
+  const dir = await stallProject()
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "orphan-abort")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 100,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1, 8000)
+  const sid = client.calls.ids[0]
+  // A background task child: opencode attaches no abort listener, so the
+  // mission abort does not cascade to it on its own (P3a-f2).
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "ses_bg", parentID: sid } } },
+  } as any)
+  await hooks.event(partEvent("ses_bg"))
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await waitFor(() => client.calls.aborts.length === 2, 8000)
+  await settleSummarizer(client, hooks)
+
+  const abortedIds = client.calls.aborts.map((a) => a.path.id)
+  assert.ok(abortedIds.includes(sid), "the mission child is aborted")
+  assert.ok(abortedIds.includes("ses_bg"), "the background child is cancelled too")
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "timeout")
+  assert.equal(tick.runs[0].orphan_abort, 1)
+  assert.equal(tick.runs[0].orphan_abort_error, undefined)
+  assert.equal(tick.side_orphan_abort, 1)
+})
+
+test("a foreground task child already settled is not double-aborted", async () => {
+  const dir = await stallProject()
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "orphan-foreground")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 100,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1, 8000)
+  const sid = client.calls.ids[0]
+  // opencode's foreground listener cancels this child and it goes idle before
+  // the mission abort; the harness must not abort it a second time.
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "ses_fg", parentID: sid } } },
+  } as any)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_fg" } } } as any)
+
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: sid } } } as any)
+  await delay(150)
+  await settleSummarizer(client, hooks)
+
+  assert.equal(client.calls.aborts.length, 1, "only the mission child is aborted")
+  assert.equal(client.calls.aborts[0].path.id, sid)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.side_outcome, "timeout")
+  assert.equal(tick.runs[0].orphan_abort, undefined)
+  assert.equal(tick.side_orphan_abort, undefined)
+})
+
+// P4c (§5.5/§5.6): the resume item's summary reaches the next dispatch as the
+// === RESUMED MISSION === block, and the ledger records the seam.
+test("a resumed mission carries the === RESUMED MISSION === block into the next prompt", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  consumer: false",
+    "",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "resume-block")
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+    wakeCapMs: 25,
+  } as any)
+
+  // Tick 1: the child stalls, the summarizer runs, the item resumes.
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  await settleSummarizer(client, hooks)
+  await waitFor(async () => (await readTickLog(dir)).length >= 1, 8000)
+
+  // Force the next tick due.
+  const stateFile = join(dir, ".opencode", "state", "heartbeat.json")
+  const cur = JSON.parse(await readFile(stateFile, "utf8").catch(() => "{}"))
+  await writeFile(stateFile, JSON.stringify({ ...cur, last_tick: Date.now() - 13 * HOUR }), "utf8")
+
+  const childPrompts = () =>
+    client.calls.prompts.filter((p: any) => p.body?.agent !== "session-summarizer")
+  await waitFor(() => childPrompts().length === 2, 8000)
+  const resumed = childPrompts()[1]
+  const text = String(resumed.body.parts[0].text)
+  assert.match(text, /^=== RESUMED MISSION — previous attempt stalled ===$/m)
+  assert.match(text, /This mission was stopped for 1 minute without activity on/)
+  assert.match(text, new RegExp(`session ${client.calls.ids[0]}, aborted=true`))
+  assert.match(text, /^Completed: drained 1 turn$/m)
+  assert.match(text, /^Not finished: finish the lane$/m)
+  assert.match(text, /^Continue from there — do not restart work that is already done\.$/m)
+  assert.match(text, /^ {2}1\. finish the lane$/m)
+  assert.match(text, /^Notes: resume carries the summary$/m)
+  assert.match(text, /^=== END RESUMED MISSION ===$/m)
+
+  // Tick 2 completes normally.
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: resumed.path.id } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).length >= 2, 8000)
+  const ticks = await readTickLog(dir)
+  assert.equal(ticks[1].side_outcome, "completed")
+})
+
+test("the fourth stall drops the item and journals resume_abandoned", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  consumer: false",
+    "",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "resume-cap")
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+  // A resume item already at the ceiling: the next stall must drop it without
+  // spawning a summarizer nobody will consume.
+  await writeFile(
+    join(dir, ".opencode", "state", "lanes.json"),
+    JSON.stringify({
+      primary: [],
+      side: [
+        {
+          id: "mission:drain",
+          kind: "mission",
+          lane: "side",
+          producer: "timeout",
+          enqueued_ms: Date.now() - 60_000,
+          requeue_count: 3,
+          requeue_reason: "timeout",
+          payload: {
+            resume: true,
+            prior_session: "ses_old",
+            stopped_at: new Date().toISOString(),
+            aborted: true,
+            summary: { done: "old work", remaining: "the rest", next_steps: [], notes: "" },
+          },
+        },
+      ],
+    }),
+    "utf8",
+  )
+
+  const client = laneClient()
+  const { spawner } = sequenceSpawner(["no_reply"])
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    spawner,
+    tickTimeoutMs: 50,
+    abortConfirmMs: 50,
+  } as any)
+
+  await waitFor(() => client.calls.aborts.length === 1, 8000)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.runs[0].outcome, "timeout")
+  assert.equal(tick.runs[0].resume_abandoned, true)
+  assert.equal(tick.runs[0].summarizer, null)
+  assert.equal(tick.runs[0].resume_item, undefined)
+  assert.equal(
+    client.calls.prompts.filter((p: any) => p.body?.agent === "session-summarizer").length,
+    0,
+    "the capped drop never spawns the summarizer",
+  )
+
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
+  assert.equal(lanes.side.length, 0, "the item drops at the ceiling")
 })

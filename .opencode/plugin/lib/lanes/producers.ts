@@ -186,6 +186,8 @@ export function itemRunnable(ctx: ProducerCtx, item: QueueItem): boolean {
   const id = missionIdOf(item)
   if (id === null) return false
   if (item.lane === "primary") {
+    // A stalled attempt resumes even when the digest no longer re-offers it.
+    if (item.payload?.resume === true) return true
     return ctx.candidates.some((c) => c.id === id)
   }
   const mission = ctx.missions.find((m) => m.id === id)

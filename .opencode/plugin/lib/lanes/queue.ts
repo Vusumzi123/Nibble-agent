@@ -23,6 +23,7 @@
 // Everything here is pure except loadQueues/saveQueues; never throws.
 import { atomicRead, atomicWrite } from "../fsx.ts"
 import type { MissionLane } from "../missions.ts"
+import type { ResumePayload } from "../mission-resume.ts"
 
 export const LANES_FILE = "lanes.json"
 
@@ -200,6 +201,38 @@ export function requeueTail(
       ...(item.payload?.original_enqueued_ms === undefined
         ? { original_enqueued_ms: item.enqueued_ms }
         : {}),
+    },
+  }
+}
+
+/**
+ * Stall path: requeue the item carrying what the next attempt needs to
+ * continue instead of restarting (plan 5.4). Same id, so a producer that
+ * re-collects the mission next tick dedupes against this item and keeps its
+ * resume payload. The reason strings stay "timeout" (P3c kept that label as
+ * the queue-side alias of a stall). Returns null past MAX_REQUEUES — the
+ * caller drops the item and journals resume_abandoned.
+ */
+export function stallResumeItem(
+  item: QueueItem,
+  resume: Omit<ResumePayload, "resume" | "timeout_count">,
+  nowMs: number,
+): QueueItem | null {
+  if (item.requeue_count >= MAX_REQUEUES) return null
+  return {
+    ...item,
+    enqueued_ms: nowMs,
+    producer: "timeout",
+    requeue_count: item.requeue_count + 1,
+    requeue_reason: "timeout",
+    payload: {
+      ...item.payload,
+      ...(item.payload?.original_enqueued_ms === undefined
+        ? { original_enqueued_ms: item.enqueued_ms }
+        : {}),
+      ...resume,
+      resume: true,
+      timeout_count: item.requeue_count + 1,
     },
   }
 }

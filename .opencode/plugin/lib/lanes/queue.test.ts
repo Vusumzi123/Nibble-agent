@@ -18,6 +18,7 @@ import {
   queuesEmpty,
   requeueTail,
   saveQueues,
+  stallResumeItem,
   type QueueItem,
 } from "./queue.ts"
 
@@ -169,4 +170,63 @@ test("depth caps drop the oldest items", () => {
 
 test("LANES_FILE lands under state/", () => {
   assert.equal(LANES_FILE, "lanes.json")
+})
+
+const SUMMARY = { done: "wrote queue.ts", remaining: "wire the hook", next_steps: ["hook"], notes: "" }
+
+function resumePayload(over = {}) {
+  return {
+    prior_session: "ses_abc",
+    stopped_at: "2026-10-23T18:00:00.000Z",
+    aborted: true,
+    summary: SUMMARY,
+    stalled_for_ms: 600_000,
+    last_activity: "tool:bash",
+    ...over,
+  }
+}
+
+test("stallResumeItem requeues at the tail with the resume payload", () => {
+  const it = item("mission:p4", { lane: "primary", requeue_count: 1 })
+  const requeued = stallResumeItem(it, resumePayload(), T0 + 5_000)!
+  assert.equal(requeued.id, "mission:p4")
+  assert.equal(requeued.kind, "mission")
+  assert.equal(requeued.lane, "primary")
+  assert.equal(requeued.producer, "timeout")
+  assert.equal(requeued.requeue_reason, "timeout")
+  assert.equal(requeued.requeue_count, 2)
+  assert.equal(requeued.enqueued_ms, T0 + 5_000)
+  assert.equal(requeued.payload?.original_enqueued_ms, T0)
+  assert.equal(requeued.payload?.resume, true)
+  assert.equal(requeued.payload?.timeout_count, 2)
+  assert.equal(requeued.payload?.prior_session, "ses_abc")
+  assert.deepEqual(requeued.payload?.summary, SUMMARY)
+  assert.equal(requeued.payload?.stalled_for_ms, 600_000)
+  assert.equal(requeued.payload?.last_activity, "tool:bash")
+})
+
+test("stallResumeItem keeps an existing original_enqueued_ms and expires_ms", () => {
+  const it = item("mission:later", {
+    lane: "primary",
+    requeue_count: 0,
+    expires_ms: T0 + 60_000,
+    payload: { original_enqueued_ms: T0 - 1_000 },
+  })
+  const requeued = stallResumeItem(it, resumePayload(), T0 + 5_000)!
+  assert.equal(requeued.payload?.original_enqueued_ms, T0 - 1_000)
+  assert.equal(requeued.expires_ms, T0 + 60_000)
+})
+
+test("the 4th stall drops the item", () => {
+  const hot = item("mission:p4", { requeue_count: MAX_REQUEUES })
+  assert.equal(stallResumeItem(hot, resumePayload(), T0), null)
+})
+
+test("a producer re-collect after a resume dedupes and keeps the resume payload", () => {
+  const resumed = stallResumeItem(item("mission:p4", { lane: "primary" }), resumePayload(), T0 + 5_000)!
+  let q = enqueueItems(emptyQueues(), [resumed])
+  q = enqueueItems(q, [item("mission:p4", { lane: "primary", producer: "tick", enqueued_ms: T0 + 9_000 })])
+  assert.equal(q.primary.length, 1)
+  assert.equal(q.primary[0].enqueued_ms, T0 + 5_000, "the existing resume item wins")
+  assert.equal(q.primary[0].payload?.resume, true)
 })

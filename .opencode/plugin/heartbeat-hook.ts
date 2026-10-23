@@ -73,6 +73,7 @@ import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./l
 import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
   LANES_FILE,
+  MAX_REQUEUES,
   type QueueItem,
   dequeuePrimary,
   dequeueSide,
@@ -81,8 +82,8 @@ import {
   pruneQueues,
   queueDepth,
   queuesEmpty,
-  requeueTail,
   saveQueues,
+  stallResumeItem,
 } from "./lib/lanes/queue.ts"
 import {
   type ProducerCtx,
@@ -93,6 +94,13 @@ import {
   missionItemId,
 } from "./lib/lanes/producers.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
+import {
+  deterministicResumeSummary,
+  renderMissionTranscript,
+  resumeContextBlock,
+  summarizeMissionAttempt,
+  type ResumePayload,
+} from "./lib/mission-resume.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
 import { startDrainConsumer, type DrainConsumerHandle } from "./lib/drain/consumer.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
@@ -318,6 +326,19 @@ export default (async ({ client, directory, ...rest }) => {
     return chain
   }
 
+  // Descendants opencode's task listener already cancelled emit `session.idle`
+  // before the mission abort; they must not be aborted a second time (P3a-f2).
+  const settledSessions = new Set<string>()
+
+  /** Every known session below `rootID` (excluding the root itself). */
+  const descendantsOf = (rootID: string): string[] => {
+    const out: string[] = []
+    for (const sid of childParent.keys()) {
+      if (sid !== rootID && ancestryOf(sid).includes(rootID)) out.push(sid)
+    }
+    return out
+  }
+
   /** Any event for a session (or a descendant) resets its ancestors' clocks. */
   const touchActivity = (sessionID: string, kind: string): void => {
     const at = Date.now()
@@ -366,6 +387,7 @@ export default (async ({ client, directory, ...rest }) => {
       childActivity.delete(sid)
       childStop.delete(sid)
       childParent.delete(sid)
+      settledSessions.delete(sid)
       openShellCount.delete(sid)
       openShellCalls.delete(sid)
     }
@@ -439,15 +461,59 @@ export default (async ({ client, directory, ...rest }) => {
     })
 
   /**
+   * Cancel descendant task sessions after a confirmed mission abort (P3a-f2).
+   * opencode only cascades to FOREGROUND task children; background (and
+   * promoted) tasks attach no abort listener and would keep running/writing.
+   * Best effort and bounded: each abort is a single SDK call, no idle confirm,
+   * so a descendant that never reports idle cannot stretch the tick. A failed
+   * call is recorded, never counted as stopped.
+   */
+  const abortDescendants = async (
+    ids: string[],
+  ): Promise<{ aborted: string[]; error?: string }> => {
+    const aborted: string[] = []
+    const errors: string[] = []
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const res = await (client as any).session.abort({
+            path: { id },
+            query: { directory: dir },
+          })
+          if (res?.error || (res?.response && !res.response.ok)) {
+            const message =
+              (res?.error as { message?: string } | undefined)?.message ??
+              `session.abort failed (status ${res?.response?.status ?? "unknown"})`
+            errors.push(`${id}: ${message}`)
+            return
+          }
+          aborted.push(id)
+        } catch (err) {
+          errors.push(`${id}: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }),
+    )
+    aborted.sort()
+    return { aborted, ...(errors.length > 0 ? { error: errors.join("; ") } : {}) }
+  }
+
+  /**
    * Stop a stalled child (docs/heartbeat-timeout-lock-resume.md §5.2).
    * Aborts via the v2 SDK, then confirms the stop with a FRESH bounded idle
    * wait. A failed abort reports `ok: false` so the caller records an error
-   * and never claims a clean stop.
+   * and never claims a clean stop. On a confirmed stop, descendant task
+   * sessions are cancelled too (P3a-f2); their ids are captured up front
+   * because the primary confirm releases the session tree.
    */
   const abortSession = async (
     childID: string,
     reason: string,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  ): Promise<{
+    ok: boolean
+    error?: string
+    orphans?: { aborted: string[]; error?: string }
+  }> => {
+    const orphans = descendantsOf(childID).filter((id) => !settledSessions.has(id))
     try {
       const res = await (client as any).session.abort({
         path: { id: childID },
@@ -463,9 +529,14 @@ export default (async ({ client, directory, ...rest }) => {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
     const confirmed = await waitForChildIdle(childID, { confirmMs: abortConfirmMs })
-    return confirmed
-      ? { ok: true }
-      : { ok: false, error: `session did not go idle within ${abortConfirmMs}ms of ${reason} abort` }
+    if (!confirmed) {
+      return {
+        ok: false,
+        error: `session did not go idle within ${abortConfirmMs}ms of ${reason} abort`,
+      }
+    }
+    if (orphans.length === 0) return { ok: true }
+    return { ok: true, orphans: await abortDescendants(orphans) }
   }
 
   const logTick = async (entry: Record<string, unknown>): Promise<void> => {
@@ -617,6 +688,19 @@ export default (async ({ client, directory, ...rest }) => {
     stopReason?: "stall" | "ceiling"
     stalledForMs?: number
     lastActivity?: string
+    /** Descendant sessions cancelled after a confirmed abort (P3a-f2). */
+    orphanAborted?: string[]
+    orphanAbortError?: string
+    /** ISO time the stall watchdog stopped the child (resume payload). */
+    stoppedAt?: string
+    /** Transcript rows sampled after the stop (summary source, P4c). */
+    transcriptRows?: unknown[]
+    /** Id of the resume item this run re-enqueued (P4c ledger). */
+    resumeItem?: string
+    /** Which summary path fed the resume item; null when capped before summarizing. */
+    summarizer?: "llm" | "fallback" | null
+    /** The resume ceiling dropped this run's item instead of re-enqueueing it. */
+    resumeAbandoned?: boolean
   }
 
   const runMissionChild = async (args: {
@@ -638,6 +722,10 @@ export default (async ({ client, directory, ...rest }) => {
     let stopReason: "stall" | "ceiling" | undefined
     let stalledForMs: number | undefined
     let lastActivity: string | undefined
+    let orphanAborted: string[] | undefined
+    let orphanAbortError: string | undefined
+    let stoppedAt: string | undefined
+    let transcriptRows: unknown[] | undefined
     const slot = args.slot ?? "primary"
 
     try {
@@ -694,8 +782,13 @@ export default (async ({ client, directory, ...rest }) => {
         stopReason = stop?.reason ?? "stall"
         stalledForMs = stop?.stalledForMs
         lastActivity = stop?.lastActivity
+        stoppedAt = new Date().toISOString()
         const abort = await abortSession(childID, stopReason)
         aborted = abort.ok
+        if (abort.orphans) {
+          orphanAborted = abort.orphans.aborted
+          orphanAbortError = abort.orphans.error
+        }
         if (abort.ok) {
           outcome = "timeout"
         } else {
@@ -725,6 +818,7 @@ export default (async ({ client, directory, ...rest }) => {
       drainTool = findDrainToolResult(rows)
       if (drainTool) tokenCost += drainTool.tokens
       if (!summary && result?.summary) summary = result.summary
+      transcriptRows = rows
     } catch (err) {
       void diag.error("[heartbeat-hook] mission run failed:", err)
       outcome = "error"
@@ -746,6 +840,10 @@ export default (async ({ client, directory, ...rest }) => {
       ...(stopReason === undefined ? {} : { stopReason }),
       ...(stalledForMs === undefined ? {} : { stalledForMs }),
       ...(lastActivity === undefined ? {} : { lastActivity }),
+      ...(orphanAborted === undefined ? {} : { orphanAborted }),
+      ...(orphanAbortError === undefined ? {} : { orphanAbortError }),
+      ...(stoppedAt === undefined ? {} : { stoppedAt }),
+      ...(transcriptRows === undefined ? {} : { transcriptRows }),
     }
   }
 
@@ -1031,6 +1129,18 @@ export default (async ({ client, directory, ...rest }) => {
           },
           { tokenBudget: autonomy.mission_token_budget },
         )
+      // P4c (§5.5): a dequeued item that carries a resume payload injects the
+      // continuation block AFTER the mission context header, for both lanes.
+      const resumeBlockFor = (item: QueueItem | null | undefined): string => {
+        const payload = item?.payload as Partial<ResumePayload> | undefined
+        if (!payload || payload.resume !== true || !payload.summary) return ""
+        try {
+          return resumeContextBlock(payload as ResumePayload)
+        } catch {
+          // A malformed legacy payload must never fail the dispatch.
+          return ""
+        }
+      }
 
       // Both queues empty: nothing to do this tick — silent, zero LLM calls.
       if (queuesEmpty(queues)) {
@@ -1063,6 +1173,7 @@ export default (async ({ client, directory, ...rest }) => {
               sideMission,
               undefined,
               contextFor(digest),
+              resumeBlockFor(sidePick.item),
             )
           : null
         if (sideMission && sideBrief) {
@@ -1100,15 +1211,23 @@ export default (async ({ client, directory, ...rest }) => {
         const id = v.kind === "mission" ? v.id : null
         if (!id) return null
         const mission = allMissions.find((m) => m.id === id)
-        const brief = assembleMissionBrief(v, mission, undefined, contextFor(d))
-        if (!brief || !mission) return null
+        if (!mission) return null
+        // The dequeued item is needed BEFORE the brief is assembled: a resume
+        // item injects the === RESUMED MISSION === block (plan §5.5).
+        const pick = dequeuePrimary(queues, missionItemId(mission.id))
+        if (pick) queues = pick.rest
+        const brief = assembleMissionBrief(
+          v,
+          mission,
+          undefined,
+          contextFor(d),
+          resumeBlockFor(pick?.item),
+        )
+        if (!brief) return null
         // Record the attempt before dispatch: a declined mission still counts
         // as the last mission, so a no-repeat mission is not re-offered next
         // tick (the digest reads this back through `last_mission`).
         await stateStore.update((s) => ({ ...s, last_mission: mission.id }))
-        // JEV's pick leaves the primary queue; a timeout re-enqueues it.
-        const pick = dequeuePrimary(queues, missionItemId(mission.id))
-        if (pick) queues = pick.rest
         const extra =
           ideaCfg.enabled && brief.mission_id === "idea-generate"
             ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
@@ -1127,10 +1246,82 @@ export default (async ({ client, directory, ...rest }) => {
       // Item settlement (docs/heartbeat-lanes.md): a timeout re-enqueues at
       // the queue tail with the reason recorded; error/declined/completed
       // drop. Past MAX_REQUEUES a timeout drops too.
-      const settleItem = (laneRun: { item: QueueItem | null; run: ChildRun }): boolean => {
+      // P4c (§5.3/§5.6): summarize the stopped attempt UNDER the mission.lock
+      // hold before the item is re-enqueued. The summarizer has its own bound
+      // (`mission_summary_timeout_ms`) and always degrades to the deterministic
+      // summary instead of blocking or throwing the tick away.
+      const summarizeResume = async (
+        mission: Mission,
+        run: ChildRun,
+      ): Promise<{
+        payload: Omit<ResumePayload, "resume" | "timeout_count">
+        summarizer: "llm" | "fallback"
+      }> => {
+        const rows = run.transcriptRows ?? []
+        let summarized: Awaited<ReturnType<typeof summarizeMissionAttempt>>
+        try {
+          summarized = await summarizeMissionAttempt(
+            {
+              transcript: renderMissionTranscript(rows),
+              mission: { id: mission.id, title: mission.title },
+              rows,
+            },
+            {
+              client: client as any,
+              directory: dir,
+              timeoutMs: hbCfg.mission_summary_timeout_ms,
+              // A plain bounded wait (not the stall window): activity may not
+              // extend the summarizer's own budget.
+              waitForIdle: (sid, ms) => waitForChildIdle(sid, { confirmMs: Math.max(1, ms) }),
+              registerChild: (sid) => automationChildSessions.add(sid),
+              onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+            },
+          )
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          summarized = {
+            summary: deterministicResumeSummary(rows, message),
+            degraded: "summarizer-fallback",
+            error: message,
+            promptBytes: 0,
+            wallMs: 0,
+          }
+        }
+        return {
+          payload: {
+            prior_session: run.sessionId ?? "unknown",
+            stopped_at: run.stoppedAt ?? new Date().toISOString(),
+            aborted: run.aborted === true,
+            summary: summarized.summary,
+            ...(run.stalledForMs === undefined ? {} : { stalled_for_ms: run.stalledForMs }),
+            ...(run.lastActivity === undefined ? {} : { last_activity: run.lastActivity }),
+          },
+          summarizer: summarized.degraded === "summarizer-fallback" ? "fallback" : "llm",
+        }
+      }
+      const settleItem = async (laneRun: {
+        item: QueueItem | null
+        mission: Mission
+        run: ChildRun
+      }): Promise<boolean> => {
         if (!laneRun.item || laneRun.run.outcome !== "timeout") return false
-        const requeued = requeueTail(laneRun.item, "timeout", Date.now())
-        if (!requeued) return false
+        const run = laneRun.run
+        // Past the resume ceiling the item drops: do not spend an LLM call on
+        // a summary nobody will consume, and journal resume_abandoned.
+        if (laneRun.item.requeue_count >= MAX_REQUEUES) {
+          run.summarizer = null
+          run.resumeAbandoned = true
+          return false
+        }
+        const resume = await summarizeResume(laneRun.mission, run)
+        run.summarizer = resume.summarizer
+        const requeued = stallResumeItem(laneRun.item, resume.payload, Date.now())
+        if (!requeued) {
+          run.summarizer = null
+          run.resumeAbandoned = true
+          return false
+        }
+        run.resumeItem = requeued.id
         queues = enqueueItems(queues, [requeued])
         return true
       }
@@ -1158,6 +1349,15 @@ export default (async ({ client, directory, ...rest }) => {
         ...(r.stopReason === undefined ? {} : { stop_reason: r.stopReason }),
         ...(r.stalledForMs === undefined ? {} : { stalled_for_ms: r.stalledForMs }),
         ...(r.lastActivity === undefined ? {} : { last_activity: r.lastActivity }),
+        ...(r.orphanAborted === undefined
+          ? {}
+          : { orphan_abort: r.orphanAborted.length }),
+        ...(r.orphanAbortError === undefined ? {} : { orphan_abort_error: r.orphanAbortError }),
+        ...(r.outcome === "timeout" ? { timeout_stopped: true } : {}),
+        ...(r.outcome === "timeout" && r.sessionId ? { prior_session: r.sessionId } : {}),
+        ...(r.resumeItem === undefined ? {} : { resume_item: r.resumeItem }),
+        ...(r.summarizer === undefined ? {} : { summarizer: r.summarizer }),
+        ...(r.resumeAbandoned === undefined ? {} : { resume_abandoned: r.resumeAbandoned }),
         ...(r.tool
           ? {
               tool_status: r.tool.status,
@@ -1188,6 +1388,12 @@ export default (async ({ client, directory, ...rest }) => {
           side_requeued: requeued,
           ...(r.aborted === undefined ? {} : { side_aborted: r.aborted }),
           ...(r.abortError === undefined ? {} : { side_abort_error: r.abortError }),
+          ...(r.orphanAborted === undefined
+            ? {}
+            : { side_orphan_abort: r.orphanAborted.length }),
+          ...(r.orphanAbortError === undefined
+            ? {}
+            : { side_orphan_abort_error: r.orphanAbortError }),
         }
       }
 
@@ -1195,7 +1401,7 @@ export default (async ({ client, directory, ...rest }) => {
       if (!first) {
         // No primary mission this tick (JEV silence). The side lane may
         // still have done the tick's work — never book that as "silent".
-        const sideRequeued = sideRun ? settleItem(sideRun) : false
+        const sideRequeued = sideRun ? await settleItem(sideRun) : false
         await saveQueues(join(stateDir, LANES_FILE), queues)
         if (sideRun) {
           const sideResultStatus = resultStatusOf(sideRun.run)
@@ -1295,9 +1501,9 @@ export default (async ({ client, directory, ...rest }) => {
 
       // Settle every dispatched item: a timeout re-enqueues at the queue tail
       // with the reason recorded; completed/error/declined drop.
-      const sideRequeued = sideRun ? settleItem(sideRun) : false
-      const firstRequeued = settleItem(first)
-      const secondRequeued = secondRun ? settleItem(secondRun) : false
+      const sideRequeued = sideRun ? await settleItem(sideRun) : false
+      const firstRequeued = await settleItem(first)
+      const secondRequeued = secondRun ? await settleItem(secondRun) : false
       await saveQueues(join(stateDir, LANES_FILE), queues)
 
       const run = chosen.run
@@ -1627,16 +1833,23 @@ export default (async ({ client, directory, ...rest }) => {
       const properties = (event as any).properties ?? {}
       if (event.type === "session.idle") {
         const sid = properties.sessionID
-        if (sid) childIdleResolvers.get(sid)?.()
+        if (sid) {
+          settledSessions.add(sid)
+          childIdleResolvers.get(sid)?.()
+        }
         return
       }
       if (event.type === "session.created") {
-        // `parentID` is what makes descendant liveness bubble up (§5.2).
+        // `parentID` is what makes descendant liveness bubble up (§5.2) and
+        // what lets an abort cascade to background task children (P3a-f2).
         const info = properties.info ?? {}
         if (typeof info.id === "string" && typeof info.parentID === "string") {
           childParent.set(info.id, info.parentID)
         }
-        if (typeof info.id === "string") touchActivity(info.id, "session")
+        if (typeof info.id === "string") {
+          settledSessions.delete(info.id)
+          touchActivity(info.id, "session")
+        }
         return
       }
       if (event.type === "message.part.updated") {

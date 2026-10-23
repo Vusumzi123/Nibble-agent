@@ -798,11 +798,13 @@ export function assembleMissionBrief(
   mission: Mission | undefined,
   fixedPrompt: string = HEARTBEAT_FIXED_PROMPT,
   context?: string,
+  resumeContext?: string,
 ): MissionBrief | null {
   if (verdict.kind === "no_reply") return null
   if (!mission || mission.id !== verdict.id) return null
   const prompt = [
     context?.trim() ?? "",
+    resumeContext?.trim() ?? "",
     fixedPrompt.trim(),
     `Verdict: mission:${mission.id} — ${mission.title}`,
     mission.body,

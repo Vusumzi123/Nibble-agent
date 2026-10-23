@@ -114,14 +114,37 @@ test("resumeContextBlock renders the resumed-mission block", () => {
     stopped_at: "2026-10-23T17:00:00.000Z",
     aborted: true,
     timeout_count: 1,
+    stalled_for_ms: 10 * 60_000,
+    last_activity: "tool:bash",
     summary: { done: "render", remaining: "tests", next_steps: ["run tests"], notes: "cap is 24KB" },
   }
   const block = resumeContextBlock(payload)
-  assert.match(block, /^=== RESUMED MISSION - previous attempt stopped ===$/m)
-  assert.match(block, /[Ss]topped at the mission timeout on 2026-10-23T17:00:00\.000Z \(session ses_1, aborted=true\)/)
-  assert.match(block, /Completed: render \/ Not finished: tests/)
-  assert.match(block, /Remaining steps, in order: run tests \/ Notes: cap is 24KB/)
+  assert.match(block, /^=== RESUMED MISSION — previous attempt stalled ===$/m)
+  assert.match(
+    block,
+    /This mission was stopped for 10 minutes without activity on 2026-10-23T17:00:00\.000Z \(last activity: tool:bash; session ses_1, aborted=true\)\./,
+  )
+  assert.match(block, /^Completed: render$/m)
+  assert.match(block, /^Not finished: tests$/m)
+  assert.match(block, /^ {2}1\. run tests$/m)
+  assert.match(block, /^Notes: cap is 24KB$/m)
   assert.match(block, /=== END RESUMED MISSION ===$/)
+})
+
+test("resumeContextBlock degrades when the stall evidence is absent", () => {
+  const payload: ResumePayload = {
+    resume: true,
+    prior_session: "ses_2",
+    stopped_at: "2026-10-23T17:00:00.000Z",
+    aborted: false,
+    summary: { done: "", remaining: "", next_steps: [], notes: "" },
+  }
+  const block = resumeContextBlock(payload)
+  assert.match(block, /This mission was stopped on 2026-10-23T17:00:00\.000Z \(session ses_2, aborted=false\)\./)
+  assert.match(block, /^Completed: unknown$/m)
+  assert.match(block, /^Not finished: unknown$/m)
+  assert.match(block, /^ {2}none recorded$/m)
+  assert.match(block, /^Notes: none$/m)
 })
 
 type FakeOptions = {

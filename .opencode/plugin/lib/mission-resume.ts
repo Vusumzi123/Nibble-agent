@@ -33,6 +33,9 @@ export type ResumePayload = {
   aborted: boolean
   timeout_count?: number
   summary: ResumeSummary
+  /** Silence evidence from the stall watchdog (P3c). */
+  stalled_for_ms?: number
+  last_activity?: string
 }
 
 export type MissionRef = { id: string; title?: string }
@@ -184,15 +187,32 @@ export function parseResumeReply(reply: string): ResumeSummary | null {
   return summary
 }
 
-/** The block P4c appends to the resumed mission brief. */
+/** The block P4c appends to the resumed mission brief (§5.5). */
 export function resumeContextBlock(payload: ResumePayload): string {
-  const steps = payload.summary.next_steps.length > 0 ? payload.summary.next_steps.join(" / ") : "none recorded"
+  const stallMinutes =
+    payload.stalled_for_ms !== undefined && Number.isFinite(payload.stalled_for_ms)
+      ? Math.max(1, Math.round(payload.stalled_for_ms / 60_000))
+      : null
+  const stopped =
+    stallMinutes !== null
+      ? `This mission was stopped for ${stallMinutes} minute${stallMinutes === 1 ? "" : "s"} ` +
+        `without activity on ${payload.stopped_at} (last activity: ${payload.last_activity ?? "unknown"}; ` +
+        `session ${payload.prior_session}, aborted=${payload.aborted}).`
+      : `This mission was stopped on ${payload.stopped_at} ` +
+        `(session ${payload.prior_session}, aborted=${payload.aborted}).`
+  const steps =
+    payload.summary.next_steps.length > 0
+      ? payload.summary.next_steps.map((step, i) => `  ${i + 1}. ${step}`)
+      : ["  none recorded"]
   return [
-    "=== RESUMED MISSION - previous attempt stopped ===",
-    `Stopped at the mission timeout on ${payload.stopped_at} (session ${payload.prior_session}, aborted=${payload.aborted}).`,
-    `Completed: ${payload.summary.done || "unknown"} / Not finished: ${payload.summary.remaining || "unknown"}`,
-    "Continue from there - do not restart work that is already done.",
-    `Remaining steps, in order: ${steps} / Notes: ${payload.summary.notes || "none"}`,
+    "=== RESUMED MISSION — previous attempt stalled ===",
+    stopped,
+    `Completed: ${payload.summary.done || "unknown"}`,
+    `Not finished: ${payload.summary.remaining || "unknown"}`,
+    "Continue from there — do not restart work that is already done.",
+    "Remaining steps, in order:",
+    ...steps,
+    `Notes: ${payload.summary.notes || "none"}`,
     "=== END RESUMED MISSION ===",
   ].join("\n")
 }
