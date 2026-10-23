@@ -79,10 +79,12 @@ window makes it runnable again. "Strict FIFO" therefore means FIFO among the
 items that can actually run right now.
 
 An item is *runnable* when its mission is enabled, the menu window and
-autonomy level allow it, and its status predicate still holds. It is *still
-due* (i.e. not pruned) as long as its status predicate holds — pruning drops
-work that vanished (turns consumed elsewhere, note refreshed), not work that
-merely waits for its window.
+autonomy level allow it, and its status predicate still holds. A **resume
+item** (`payload.resume: true`) is runnable on the primary lane even when the
+JEV digest no longer re-offers that mission; a side resume still obeys its
+status predicate. It is *still due* (i.e. not pruned) as long as its status
+predicate holds — pruning drops work that vanished (turns consumed elsewhere,
+note refreshed), not work that merely waits for its window.
 
 ## The tick, step by step
 
@@ -101,6 +103,50 @@ merely waits for its window.
    JEV call entirely (`reason: "no-candidates"`).
 7. Items settle, queues persist, one NDJSON ledger line records everything.
 
+## Stop discipline
+
+The child is not killed on wall-clock. The **stall watchdog** aborts it after
+`heartbeat.mission_stall_minutes` (default 10) with **no activity**: any event
+from the child or a descendant session (text, tool start/end, token update,
+`session.updated`) resets the window. An open `bash`/`shell` call is exempt —
+a long silent compile is not a hang; a `task` call is not exempt. An optional
+hard **ceiling** (`mission_timeout_minutes`, default 0 = off) is the
+pathological backstop; the watchdog and the ceiling cannot both be off (the
+config writer refuses it).
+
+On a trigger the child is aborted (`session.abort`) and confirmed with a
+fresh, bounded ~10 s idle wait; messages are sampled **after** the abort so
+the attempt's work is captured. A failed abort becomes `outcome: "error"`
+with `aborted: false` and `abort_error` — the ledger never claims a stop that
+did not happen. opencode only cascades an abort to foreground task children,
+so descendants that would otherwise keep running are cancelled best-effort and
+recorded as `orphan_abort` / `orphan_abort_error`.
+
+With `autonomy.heartbeat.in_progress_lock` on (the default), one
+`state/mission.lock` is held across the whole dispatch section — taken after
+`heartbeat.lock`, before the first child (side or primary), released in the
+tick's `finally`. A live holder makes this tick skip dispatch entirely:
+`lanes.json` stays byte-identical and the line carries `gate: "lock",
+reason: "mission-lock-held"`. The lock is refreshed while held; only a stale
+lock whose holder is dead is stolen, and `mission_lock_stale_ms` is lifted to
+at least 3 × `mission_lock_refresh_ms` at read time. The drain pipe takes the
+same lock per child unit (summarizer, writer chunk), so the two loops never
+run a child concurrently even though they own different loop locks.
+
+## Resume
+
+A stalled attempt is summarized under the lock (bounded by
+`mission_summary_timeout_ms`, default 90 s) before its item is re-enqueued.
+The summarizer child is aborted on expiry and the deterministic fallback (last
+assistant text + tool outcomes) is used instead; the summary never throws.
+
+The requeued item keeps its id and lane, so a producer that re-collects the
+same mission dedupes against it and the resume payload wins. On the next
+dispatch the brief appends a `=== RESUMED MISSION ===` block after the mission
+context header — stopped time, prior session, completed / not finished,
+remaining steps and notes — for both lanes. The child continues from there
+instead of restarting.
+
 ## Failure policy
 
 | Run outcome | Item fate |
@@ -108,7 +154,12 @@ merely waits for its window.
 | `completed` | dropped (done) |
 | `declined` | dropped — "nothing to do". Side declines **never** reroll (`on_decline` is ignored on the side lane). |
 | `error` | dropped — the producers re-collect next tick if the work is still due |
-| `timeout` | **re-enqueued at the queue tail** with `requeue_reason: "timeout"` and `requeue_count + 1` (fresh `enqueued_ms` = tail; the original wait survives in `payload.original_enqueued_ms`). Past `MAX_REQUEUES` (3) the item drops. |
+| `timeout` | **re-enqueued with a resume payload**: same id/lane, `producer` and `requeue_reason` stay `"timeout"`, `requeue_count + 1`, fresh `enqueued_ms` at the tail (the original wait survives in `payload.original_enqueued_ms`). The payload carries `resume: true`, `prior_session`, `stopped_at`, `aborted`, `timeout_count`, `stalled_for_ms`, `last_activity`, and the attempt `summary` (`done`, `remaining`, `next_steps`, `notes`). Past `MAX_REQUEUES` (3) the item drops; the ledger journals `resume_abandoned` and no summarizer is spawned. |
+
+An aborted child may have left a half-written file, card, or vote. That is a
+known, accepted risk of stopping a child: the abort is best-effort and the
+stop is not rolled back. Each mission that writes incrementally tracks the
+partial-write risk as a follow-up rather than fixing it in the harness.
 
 ## Backoff interaction
 
@@ -126,6 +177,9 @@ One NDJSON line per tick (`logs/heartbeat.log`), as before, plus:
 | --- | --- |
 | `side_mission`, `side_outcome`, `side_token_cost`, `side_session`, `side_result_status`, `side_requeued` | the side run, when one happened |
 | `runs[]` | every dispatched run: `{ mission, lane, outcome, token_cost, over_budget, session, result_status, result_missing, requeued, tool_*? }` |
+| `runs[].stop_reason`, `stalled_for_ms`, `last_activity`, `aborted`, `abort_error` | how a stopped child was stopped (stall vs ceiling) and whether the abort was confirmed |
+| `runs[].timeout_stopped`, `prior_session`, `resume_item`, `summarizer`, `resume_abandoned` | resume outcome: the stop was a timeout, the resumed attempt's prior session, the requeued item, `"llm"`/`"fallback"`/`null`, and the capped-drop marker |
+| `runs[].orphan_abort`, `orphan_abort_error` (and `side_*` twins) | descendant task sessions cancelled after the abort, or why they could not be |
 | `queues` | `{ primary, side }` depth after settlement |
 
 Legacy top-level fields describe the **primary** run (`mission`, `session`,
@@ -194,9 +248,11 @@ Contract notes:
 
 | File | Role |
 | --- | --- |
-| `.opencode/plugin/lib/lanes/queue.ts` | item/queue types, dedupe-enqueue, FIFO dequeue, timeout requeue, prune, `state/lanes.json` persistence |
-| `.opencode/plugin/lib/lanes/producers.ts` | producer interface, the shipped producers, the registry, runnability/due checks |
-| `.opencode/plugin/heartbeat-hook.ts` | the tick: producers → side dequeue → JEV → settle → ledger |
+| `.opencode/plugin/lib/lanes/queue.ts` | item/queue types, dedupe-enqueue, FIFO dequeue, timeout/resume requeue, prune, `state/lanes.json` persistence |
+| `.opencode/plugin/lib/lanes/producers.ts` | producer interface, the shipped producers, the registry, runnability/due checks (resume-aware) |
+| `.opencode/plugin/lib/mission-resume.ts` | transcript render (capped, tool outputs stripped), bounded attempt summary + fallback, `=== RESUMED MISSION ===` block |
+| `.opencode/plugin/lib/file-lock.ts` | generic refresh/stale/dead-holder lock used by `heartbeat.lock`, `drain.lock` and `mission.lock` |
+| `.opencode/plugin/heartbeat-hook.ts` | the tick: producers → lock → side dequeue → JEV → stall/abort → summary → settle → ledger |
 | `.opencode/plugin/lib/missions.ts` | `lane: primary \| side` frontmatter key |
 | `.opencode/plugin/lib/heartbeat.ts` | side filter in `buildCandidates`, `HEARTBEAT_CODE_FILES` guard |
 | `.opencode/missions/drain.md`, `staleness.md` | shipped `lane: side` missions |

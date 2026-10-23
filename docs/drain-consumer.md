@@ -24,12 +24,16 @@ drain loop (demand)    ──> one bounded pass ──> summarize + writer
   stops because the backlog is below the trigger, a ceiling tripped, or a stop
   condition fired.
 
-They share no lock: a 15-minute drain pass can never burn a tick, and the
-primary lane is untouched.
+They do not share a loop lock: a 15-minute drain pass can never burn a tick,
+and the primary lane is untouched. They do share `state/mission.lock` per
+child unit when `autonomy.heartbeat.in_progress_lock` is on (the default):
+the tick takes it after `heartbeat.lock`, the pipe after `drain.lock` (never
+the reverse), so a drain summarizer/writer and a mission child never run at
+the same time. A live holder ends the pass with `mission-lock-held`.
 
 ## One pass
 
-One pass is `runDrainPipe` (lib/drain/pipe.ts), now bounded three ways:
+One pass is `runDrainPipe` (lib/drain/pipe.ts), now bounded four ways:
 
 1. **The writer gate is inside the pipe** (§2.4). Every caller — the consumer,
    the `drain_run` tool (dream, manual, mission) — serializes through
@@ -40,13 +44,21 @@ One pass is `runDrainPipe` (lib/drain/pipe.ts), now bounded three ways:
    (`process.kill(pid, 0)` fails) — a hung-but-alive holder is never stolen
    from. Acquisition is try-only: **callers never wait**. The tool returns
    `status: "skipped", reason: "lock-held"` (the mission declines via
-   roll-mission); the consumer skips the wake and reschedules.
-2. **A per-pass token budget** (`token_budget`, default 80 000, 0 =
+   roll-mission); the consumer skips the wake and reschedules. Around each
+   **child unit** the pipe also takes `state/mission.lock` (only when
+   `autonomy.heartbeat.in_progress_lock` is on), releasing it after that unit
+   idles or aborts; a held mission.lock stops the pass at the unit boundary.
+2. **Every child is stopped, not abandoned.** A summarizer or writer child
+   that exceeds its wait is aborted (`session.abort` plus a bounded idle
+   confirm) before the pipe returns, so no child outlives its own timeout and
+   a half-open unit cannot keep writing while the lock is released. A failed
+   abort is logged; it is never reported as a clean stop.
+3. **A per-pass token budget** (`token_budget`, default 80 000, 0 =
    unlimited) is checked *between units* — before each summarizer and before
    each writer chunk — never mid-unit. A budget-stopped pass advances only the
    sessions whose items were fully reported; the rest stay above their marks
    for the next wake. `token_budget` is a **ceiling, not a target**.
-3. **Cursor v2** (§2.3): discovery is watermark-based (cheap); fetch uses each
+4. **Cursor v2** (§2.3): discovery is watermark-based (cheap); fetch uses each
    session's own mark. A resumed or late-discovered session is re-read from
    its mark, so no turn can fall below a global high-water mark and be
    skipped. The watermark never advances past a marked session that still has
@@ -84,6 +96,7 @@ summaries) by starting unknown marks at `session.time_created`, floored at
 | `wake-wall` | `max_wall_minutes` reached — yield |
 | `max-passes` | `max_passes_per_wake` backstop hit (rare — observable budgets decide first) |
 | `lock-held` | another writer holds `drain.lock`; passes: 0, reschedule at poll |
+| `mission-lock-held` | another agent holds `state/mission.lock`; the pass stops at a child-unit boundary, completed units stay advanced |
 | `no-progress` | a pass consumed nothing and wrote nothing — back off poll × 4 |
 | `config-changed` | level/enabled/consumer/provider changed mid-wake — re-read |
 | `crash` | an exception escaped the loop — release, reset marker, poll × 4 |
@@ -145,6 +158,12 @@ All dials hot-read: a config flip applies without a restart. `consumer: false`
 is the rollback path — drain returns to the side lane (the producers
 re-collect it, the queued item prunes back in) and the consumer idles.
 
+`mission.lock` is not a drain dial: it lives in the `heartbeat:` section
+(`mission_lock_refresh_ms`, `mission_lock_stale_ms`) and is taken only while
+`autonomy.heartbeat.in_progress_lock` is true. Its stale threshold is lifted
+to at least 3 × the refresh interval at read time, the same rule as
+`drain.lock`.
+
 ## Rollback
 
 Set `drain.consumer: false`. Within one poll the consumer idles, the
@@ -154,7 +173,8 @@ item becomes runnable. No restart needed; one release of dual support.
 ## Failure isolation
 
 The consumer body copies `runTick`'s boundary (§2.7): try/catch/finally, an
-unref'd timer, `void loop().catch(…)`. An exception releases the lock, resets
+unref'd timer, `void loop().catch(…)`. An exception releases `drain.lock` and
+any held `mission.lock`, resets
 `drain.current.json` to idle, logs `stopped: "crash"`, and backs off
 poll × 4 — the tick loop in the same process keeps firing on schedule. The
 SQLite reads are synchronous, so a wedged query stalls both loops; the
