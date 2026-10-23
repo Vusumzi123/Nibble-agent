@@ -6,7 +6,8 @@
 #   - CSRF-gated mutations; loopback bind only (auth = card 11).
 #
 # Usage: ./scripts/dashboard.sh [project-dir]
-# Env:    DASHBOARD_PORT (default 4097), OPENCODE_SERVE_URL (default http://127.0.0.1:4096)
+# Env:    DASHBOARD_PORT (default dashboard.port, 0 = auto),
+#         OPENCODE_SERVE_URL (explicit proxy target; unset = live pointer/discovery)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

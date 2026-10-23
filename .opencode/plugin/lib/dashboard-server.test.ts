@@ -531,3 +531,63 @@ test("port + serve_url resolve opts > env > dashboard.* config > default", async
     delete process.env.OPENCODE_SERVE_URL
   }
 })
+
+// --- runtime pointer + live proxy resolution (dynamic ports) ---------------
+
+test("the bound URL is published to state/dashboard-url and removed on close", async () => {
+  const dir = await project()
+  const handle = await createDashboardServer({ directory: dir, port: 0, host: "127.0.0.1" })
+  const pointer = join(dir, ".opencode", "state", "dashboard-url")
+  try {
+    assert.equal((await readFile(pointer, "utf8")).trim(), handle.url)
+    assert.equal((await call(handle, "GET", "/api/health")).body.serve_ok, false)
+  } finally {
+    await handle.close()
+  }
+  await assert.rejects(() => readFile(pointer, "utf8"), /ENOENT/)
+})
+
+test("an automatic target follows a live pointer, and 503s when it is dead", async () => {
+  const dir = await project()
+  delete process.env.OPENCODE_SERVE_URL
+  const pointer = join(dir, ".opencode", "state", "serve-url")
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+
+  await writeFile(pointer, `http://127.0.0.1:${(upstream.address() as { port: number }).port}\n`, "utf8")
+  const live = await createDashboardServer({ directory: dir, port: 0, host: "127.0.0.1" })
+  try {
+    const res = await call(live, "GET", "/api/serve/doc")
+    assert.equal(res.status, 200)
+    assert.equal((await call(live, "GET", "/api/health")).body.serve_ok, true)
+  } finally {
+    await live.close()
+  }
+
+  await writeFile(pointer, "http://127.0.0.1:1\n", "utf8")
+  const dead = await createDashboardServer({ directory: dir, port: 0, host: "127.0.0.1" })
+  try {
+    const res = await call(dead, "GET", "/api/serve/doc")
+    assert.equal(res.status, 503)
+    assert.equal(res.body.error, "serve_unavailable")
+    assert.equal((await call(dead, "GET", "/api/health")).body.serve_ok, false)
+  } finally {
+    await dead.close()
+  }
+})
+
+test("a busy requested port falls back to an ephemeral one", async () => {
+  const dir = await project()
+  const blocker = createServer()
+  const busyPort = await new Promise<number>((resolve) =>
+    blocker.listen(0, "127.0.0.1", () => resolve((blocker.address() as { port: number }).port)),
+  )
+  const handle = await createDashboardServer({ directory: dir, port: busyPort, host: "127.0.0.1" })
+  try {
+    assert.notEqual(handle.port, busyPort)
+    assert.ok(handle.port > 0)
+    assert.equal((await call(handle, "GET", "/api/health")).status, 200)
+  } finally {
+    await handle.close()
+    await new Promise<void>((resolve) => blocker.close(() => resolve()))
+  }
+})

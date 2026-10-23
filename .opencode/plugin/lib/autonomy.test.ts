@@ -123,6 +123,7 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
     "dashboard:",
     "  bind_address: 127.0.0.2",
     "  port: 4099",
+    "  serve_port: 4199",
     "  serve_url: http://127.0.0.1:4095",
     "  auth:",
     "    mode: login+2fa",
@@ -142,6 +143,7 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
   assert.deepEqual(dash, {
     bind_address: "127.0.0.2",
     port: 4099,
+    serve_port: 4199,
     serve_url: "http://127.0.0.1:4095",
     auth: { mode: "login+2fa", require_tls: true },
   })

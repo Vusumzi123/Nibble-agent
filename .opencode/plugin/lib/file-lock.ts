@@ -3,12 +3,15 @@
 // One lock file serializes a class of writers regardless of caller. The
 // properties come straight from the drain lock this was extracted from:
 //
-// - Record: `{ pid, acquired_ms, heartbeat_ms }`. An unref'd `setInterval`
-//   refreshes `heartbeat_ms` while held, so a single long unit cannot lose the
-//   lock (a timer, not a unit boundary).
-// - Stale means `heartbeat_ms` older than `staleMs` (default 3 × refresh); a
-//   steal additionally requires a dead holder (`process.kill(pid, 0)` →
-//   `ESRCH`) — a hung-but-alive holder is never stolen from.
+// - Record: `{ pid, acquired_ms, heartbeat_ms, pid_start? }`. An unref'd
+//   `setInterval` refreshes `heartbeat_ms` while held, so a single long unit
+//   cannot lose the lock (a timer, not a unit boundary).
+// - A DEAD holder is stealable immediately, even when its heartbeat is fresh
+//   (a SIGKILLed process leaves a fresh record). An ALIVE holder is never
+//   stolen from, however old its heartbeat — it may be hung, not gone.
+//   `pid_start` (Linux `/proc/<pid>/stat` field 22) guards against PID reuse.
+// - `isFileLockStale` remains the display heuristic (dashboard "lock_stale");
+//   acquisition uses holder liveness, not age.
 // - Acquire is TRY-ONLY: callers never wait on the lock. A held lock is data
 //   for the caller (skip the work).
 //
@@ -16,6 +19,7 @@
 // uses this directly.
 //
 // Loaded via relative import only.
+import { readFileSync } from "node:fs"
 import { mkdir, open, unlink } from "node:fs/promises"
 import { dirname } from "node:path"
 import { atomicRead, atomicWrite } from "./fsx.ts"
@@ -24,6 +28,8 @@ export type FileLockRecord = {
   pid: number
   acquired_ms: number
   heartbeat_ms: number
+  /** Process start-time (Linux `stat` field 22); guards against PID reuse. */
+  pid_start?: string
 }
 
 export type FileLockHandle = {
@@ -54,35 +60,57 @@ async function readFileLock(file: string): Promise<FileLockRecord | null> {
       pid: Number(parsed.pid) || 0,
       acquired_ms: Number(parsed.acquired_ms) || 0,
       heartbeat_ms: parsed.heartbeat_ms,
+      ...(typeof parsed.pid_start === "string" ? { pid_start: parsed.pid_start } : {}),
     }
   } catch {
     return null
   }
 }
 
-/** Dead check: only a holder whose process is gone may be stolen from. */
-function holderDead(pid: number): boolean {
+/** Linux start-time for a pid, or null when `/proc` is unavailable. */
+export function procStart(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    const close = stat.lastIndexOf(")")
+    if (close < 0) return null
+    // Fields after `comm`: state is index 0, so starttime (field 22) is 19.
+    return stat.slice(close + 2).split(" ")[19] ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Dead check: only a holder whose process is gone may be stolen from.
+ * A recycled PID (same number, different start-time) counts as dead.
+ */
+export function holderDead(pid: number, start?: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return true
   try {
     process.kill(pid, 0)
-    return false
   } catch (err) {
-    // ESRCH: no such process (dead). EPERM: alive but not ours (not dead).
+    // ESRCH: no such process (dead). EPERM: alive but not ours (alive).
     return (err as NodeJS.ErrnoException)?.code === "ESRCH"
   }
+  if (start) {
+    const current = procStart(pid)
+    if (current !== null && current !== start) return true
+  }
+  return false
 }
 
 export type AcquireFileLockOpts = {
   nowMs?: number
   refreshMs?: number
+  /** Kept for compatibility; acquisition decides on holder liveness, not age. */
   staleMs?: number
 }
 
 /**
- * Try to acquire the lock. Returns a handle on success, null when a fresh (or
- * alive-but-stale) lock is held by someone else or on an unexpected IO error.
- * A dead-and-stale lock is stolen once; a steal race loses to the winner
- * (their writer just runs).
+ * Try to acquire the lock. Returns a handle on success, null when a live
+ * holder has it or on an unexpected IO error. A dead holder is stolen from
+ * immediately (fresh heartbeat or not); an alive holder is never stolen from,
+ * however stale its heartbeat — it may be hung, not gone.
  */
 export async function acquireFileLock(
   file: string,
@@ -90,8 +118,13 @@ export async function acquireFileLock(
 ): Promise<FileLockHandle | null> {
   const nowMs = opts.nowMs ?? Date.now()
   const refreshMs = Math.max(1_000, opts.refreshMs ?? 60_000)
-  const staleMs = Math.max(refreshMs, opts.staleMs ?? 3 * refreshMs)
-  const record: FileLockRecord = { pid: process.pid, acquired_ms: nowMs, heartbeat_ms: nowMs }
+  const start = procStart(process.pid)
+  const record: FileLockRecord = {
+    pid: process.pid,
+    acquired_ms: nowMs,
+    heartbeat_ms: nowMs,
+    ...(start !== null ? { pid_start: start } : {}),
+  }
 
   await mkdir(dirname(file), { recursive: true }).catch(() => {})
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -106,8 +139,7 @@ export async function acquireFileLock(
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null
       const held = await readFileLock(file)
-      if (!isFileLockStale(held, nowMs, staleMs)) return null // fresh → caller skips
-      if (held && !holderDead(held.pid)) return null // alive → never steal
+      if (held && !holderDead(held.pid, held.pid_start)) return null // alive → never steal
       await unlink(file).catch(() => {})
     }
   }

@@ -1,48 +1,101 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn, type ChildProcess } from "node:child_process"
 import { closeSync, mkdirSync, openSync } from "node:fs"
+import { readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { readDashboardConfig } from "./lib/autonomy.ts"
 import { createDiagnostics } from "./lib/logging.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
+import { firstReachable } from "./lib/serve-target.ts"
 
 // Dashboard lifecycle tie (dashboard-ctl.sh remains the manual escape hatch).
 //
-// Starting opencode starts the local dashboard backend as a child of this
-// process; disposing the plugin (opencode exit) stops the child it started.
-// An already-healthy backend — another opencode instance or a manual
-// `dashboard-ctl.sh start` — is adopted untouched, so this hook never kills a
-// server it does not own.
+// `scripts/run.sh` starts the backend itself and exports
+// `DASHBOARD_AUTOSTART=0`; the hook still publishes the live `serve-url`
+// pointer before returning. On a bare `opencode` launch the hook starts the
+// backend (dynamic port by default) and publishes `state/dashboard-url`, which
+// later starts adopt instead of spawning a duplicate.
 //
-// Opt out with `DASHBOARD_AUTOSTART=0`. A hard SIGKILL of opencode skips the
-// dispose/exit handlers, so the child survives that one case; use
-// `scripts/dashboard-ctl.sh stop` to clear it.
+// A hard SIGKILL of opencode skips the dispose/exit handlers, so the child
+// survives that one case; use `scripts/dashboard-ctl.sh stop` to clear it.
 const HEALTH_TIMEOUT_MS = 1200
-const START_GRACE_MS = 150
+const READY_TIMEOUT_MS = 3000
 
 let owned: ChildProcess | null = null
 let starting = false
 
-async function healthy(url: string): Promise<boolean> {
+type Health = { ok: boolean; serveUrl: string | null }
+
+async function health(url: string): Promise<Health> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) })
-    return res.ok
+    const res = await fetch(`${url.replace(/\/+$/, "")}/api/health`, {
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    })
+    if (!res.ok) return { ok: false, serveUrl: null }
+    const body = (await res.json()) as { serve_url?: unknown; serve_ok?: unknown }
+    return {
+      ok: true,
+      serveUrl: typeof body.serve_url === "string" ? body.serve_url : null,
+    }
   } catch {
-    return false
+    return { ok: false, serveUrl: null }
   }
 }
 
-export default (async ({ directory }) => {
+async function readPointer(file: string): Promise<string> {
+  try {
+    return (await readFile(file, "utf8")).trim()
+  } catch {
+    return ""
+  }
+}
+
+export default (async ({ directory, serverUrl }) => {
   const dir = directory ?? process.cwd()
+  const cfg = await readDashboardConfig(dir)
+  const { logDir, stateDir } = await readResolvedPaths(dir, homedir())
+  const diag = createDiagnostics({ logDir, home: homedir(), channel: "dashboard-hook" })
+  try {
+    mkdirSync(stateDir, { recursive: true })
+  } catch {
+    /* read-only state dir: pointers stay unwritten, the rest still works */
+  }
+
+  // Publish a *reachable* proxy target. `serverUrl` is a placeholder
+  // (http://localhost:4096) when opencode runs its server in-process, so probe
+  // before trusting it; fall back to an explicit env URL, the last-good
+  // pointer, or an opencode process discovered in this directory.
+  const fromInstance = (() => {
+    try {
+      return serverUrl ? new URL(serverUrl).origin : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const serveUrlFile = join(stateDir, "serve-url")
+  const prior = await readPointer(serveUrlFile)
+  const target = await firstReachable(
+    [fromInstance, process.env.OPENCODE_SERVE_URL, prior],
+    dir,
+  )
+  if (target) {
+    try {
+      await writeFile(serveUrlFile, `${target}\n`, "utf8")
+    } catch (err) {
+      await diag.error("[dashboard-hook] could not write state/serve-url:", err)
+    }
+  } else {
+    await diag.warn(
+      `[dashboard-hook] no reachable opencode server (instance ${fromInstance ?? "unknown"}); leaving the pointer untouched`,
+    )
+  }
+
+  // run.sh supervises the backend; its pointer is already live.
   if (process.env.DASHBOARD_AUTOSTART === "0") return {}
 
-  const cfg = await readDashboardConfig(dir)
-  const { logDir } = await readResolvedPaths(dir, homedir())
+  const dashboardUrlFile = join(stateDir, "dashboard-url")
   const host = cfg.bind_address === "0.0.0.0" || cfg.bind_address === "::" ? "127.0.0.1" : cfg.bind_address
-  const url = `http://${host}:${cfg.port}/api/health`
-  const diag = createDiagnostics({ logDir, home: homedir(), channel: "dashboard-hook" })
-
   const stopOwned = (signal: NodeJS.Signals): void => {
     const child = owned
     owned = null
@@ -54,8 +107,17 @@ export default (async ({ directory }) => {
     }
   }
 
-  // Adopt a running backend: it is not ours, so dispose leaves it alone.
-  if (await healthy(url)) return { dispose: async () => {} }
+  // Adopt a live backend: it is not ours, so dispose leaves it alone.
+  const existing = await readPointer(dashboardUrlFile)
+  const live = existing !== "" ? await health(existing) : { ok: false, serveUrl: null }
+  if (live.ok) {
+    if (target && live.serveUrl && live.serveUrl !== target) {
+      await diag.warn(
+        `[dashboard-hook] dashboard proxies ${live.serveUrl}, expected ${target}; leaving it untouched — run scripts/dashboard-ctl.sh restart`,
+      )
+    }
+    return { dispose: async () => {} }
+  }
 
   if (!starting) {
     starting = true
@@ -69,7 +131,11 @@ export default (async ({ directory }) => {
           {
             cwd: dir,
             stdio: ["ignore", fd, fd],
-            env: { ...process.env, DASHBOARD_STATIC_DIR: join(dir, "dashboard/static") },
+            env: {
+              ...process.env,
+              DASHBOARD_PORT: String(cfg.port),
+              DASHBOARD_STATIC_DIR: join(dir, "dashboard/static"),
+            },
           },
         )
         owned = child
@@ -77,12 +143,27 @@ export default (async ({ directory }) => {
           if (owned === child) owned = null
         })
         child.once("error", (err) => void diag.error("[dashboard-hook] spawn failed:", err))
-        // A synchronous exit hook covers the paths where `dispose` never runs
-        // (SIGTERM/SIGINT handlers in opencode, normal process exit).
+        // A synchronous exit hook covers the paths where `dispose` never runs.
         process.once("exit", () => stopOwned("SIGKILL"))
-        await new Promise((resolve) => setTimeout(resolve, START_GRACE_MS))
-        if (child.exitCode !== null) {
-          await diag.error(`[dashboard-hook] backend exited early (code ${child.exitCode})`)
+
+        // Wait for the backend to publish its bound URL (dynamic ports included).
+        const deadline = Date.now() + READY_TIMEOUT_MS
+        let ready = false
+        while (Date.now() < deadline) {
+          if (child.exitCode !== null) break
+          const url = await readPointer(dashboardUrlFile)
+          if (url !== "" && (await health(url)).ok) {
+            ready = true
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        if (!ready) {
+          await diag.warn(
+            child.exitCode !== null
+              ? `[dashboard-hook] backend exited early (code ${child.exitCode})`
+              : "[dashboard-hook] backend did not become healthy within 3s",
+          )
         }
       } finally {
         closeSync(fd)
@@ -94,6 +175,9 @@ export default (async ({ directory }) => {
 
   return {
     dispose: async () => {
+      // The backend removes its own pointer on SIGTERM. If opencode is
+      // SIGKILLed the pointer survives, but every reader probes liveness and
+      // the next start overwrites it — never delete a backend we do not own.
       stopOwned("SIGTERM")
     },
   }

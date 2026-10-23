@@ -15,22 +15,36 @@ autonomy harness phases = roadmap.
 ```bash
 git clone https://github.com/Vusumzi123/Nibble-agent.git && cd Nibble-agent
 ./scripts/setup.sh            # install deps, connect a model, generate your local layer
-./scripts/run.sh              # start Ollama (if needed) + opencode; stops Ollama on exit
+./scripts/run.sh              # Ollama + opencode + dashboard; stops only what it started
 ```
 
 `setup.sh` is idempotent — it skips anything already done (files, packages, model choice).
 
-`run.sh` is the recommended entry point: it starts the Ollama embedding server on
-demand, waits for it, launches `opencode`, and stops Ollama again when opencode
-exits — **only if the script started it** (a pre-existing server is left alone).
-Run plain `opencode` instead if you don't want Ollama (the MCP then falls back to
-local transformer embeddings).
+`run.sh` is the recommended entry point and the instance supervisor. It starts
+the machine-shared Ollama on demand, resolves ports, starts the dashboard
+backend, runs `opencode --port <serve-port>`, publishes the live URLs, and stops
+whatever it started when opencode exits.
 
-The dashboard backend (config API + web UI) is tied to the opencode process:
-`dashboard-hook` starts it as a child on launch and stops it on exit; an
-already-running backend (another opencode instance or a manual start) is left
-alone. Reset it with `./scripts/dashboard-ctl.sh restart` (`stop`, `status`,
-`logs` also work). Set `DASHBOARD_AUTOSTART=0` to disable the autostart.
+Ports are **dynamic by default** (`dashboard.port: 0` / `dashboard.serve_port:
+0`), so several Nibble copies can run side by side on one machine without
+colliding. A pinned port is honoured when free; when it is busy the launcher
+picks a free one, logs it to `.opencode/logs/run.log`, and leaves the config
+untouched. The resolved addresses are printed at startup and written to
+`.opencode/state/`:
+
+- `serve-url` — `http://127.0.0.1:<port>` of this instance's opencode server
+- `dashboard-url` — `http://127.0.0.1:<port>` of its dashboard
+- `runtime.json` — both, plus pids and requested/actual port fallbacks
+
+Override with `--serve-port N` / `--dashboard-port N` (or
+`NIBBLE_SERVE_PORT` / `DASHBOARD_PORT`), or skip the dashboard with
+`--no-dashboard`. `--headless` runs the side servers without a TUI (useful for
+tests and daemon-like setups). Run plain `opencode` instead if you don't want
+Ollama (the MCP then falls back to local transformer embeddings); in that mode
+`dashboard-hook` starts the dashboard on a dynamic port and publishes the same
+pointers. Reset the backend with `./scripts/dashboard-ctl.sh restart` (`stop`,
+`status`, `logs` also work). Set `DASHBOARD_AUTOSTART=0` to disable the hook's
+autostart.
 
 ## Requirements
 

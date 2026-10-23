@@ -2,6 +2,28 @@
 
 ## 2026-10-23
 
+### Added
+
+- **Dynamic per-instance ports + `run.sh` supervisor** — `scripts/run.sh` now
+  owns the whole instance: it resolves ports (`--serve-port` / `--dashboard-port`
+  > env > `dashboard.serve_port` / `dashboard.port` > auto), starts the
+  machine-shared Ollama and the dashboard backend, runs
+  `opencode --port <serve-port>`, and publishes `state/serve-url`,
+  `state/dashboard-url` and `state/runtime.json`. Ports default to `0`
+  (kernel-assigned), so several Nibble copies coexist on one host; a pinned
+  port that is busy falls back to a free one and is logged — the config is
+  never rewritten. `--no-dashboard`, `--headless` and `--print-urls` cover
+  daemon/test/manual use.
+- **`dashboard.serve_port`** — the opencode TUI's listen port, next to
+  `dashboard.port` and `dashboard.serve_url`. The example config now ships
+  `0`/`0`/`""` (auto), which is what a fresh clone gets.
+- **Live proxy resolution + `state/dashboard-url`** — the dashboard publishes
+  the port it actually bound; `scripts/dashboard-ctl.sh` and the hook resolve
+  that pointer instead of guessing. Automatic proxy targets are liveness-checked
+  per request with `/proc` discovery as a fallback, so a dead pointer answers
+  `503 serve_unavailable` instead of a stale `502`, while an explicitly pinned
+  target still surfaces `502 serve_unreachable`.
+
 ### Fixed
 
 - **Drain summarizer truncating its JSON tail** — the child now requests
@@ -12,6 +34,12 @@
   format, and the `error`, `format`, `reply_bytes`, `reply_closed` and
   `repaired` fields now reach `drain.log`. Every agent `model:` pin is removed;
   model selection comes from config or inheritance.
+- **A dead lock holder with a fresh heartbeat blocked the lock for the full
+  stale window** — acquisition now steals from a dead holder immediately (the
+  SIGKILL shape: fresh `heartbeat_ms`, no process) and only refuses an *alive*
+  holder, however stale. Records carry the process start-time so a recycled PID
+  is recognised as dead. This removes the 30-minute drain starvation after a
+  crashed heartbeat.
 - **Drain stall on an already-consumed discovery batch** — when the oldest
   `batch_sessions` were all consumed (no eligible turns above their marks),
   the pipe returned `nothing` without moving the watermark, so the same batch

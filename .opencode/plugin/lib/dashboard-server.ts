@@ -11,17 +11,22 @@
 // Origin header (when present) and a valid `X-CSRF-Token` from GET /api/csrf.
 //
 // Runnable: `node .opencode/plugin/lib/dashboard-server.ts [project-dir]`
-// (launchers: scripts/run.sh --dashboard, scripts/dashboard-ctl.sh). Port and
-// proxy target resolve as opts > env (DASHBOARD_PORT / OPENCODE_SERVE_URL) >
-// dashboard.port / dashboard.serve_url config > defaults (4097 / 4096).
+// (launchers: scripts/run.sh, scripts/dashboard-ctl.sh). Port and proxy target
+// resolve as opts > env (DASHBOARD_PORT / OPENCODE_SERVE_URL) >
+// dashboard.port / dashboard.serve_port / dashboard.serve_url config >
+// defaults (0 = auto / auto). The bound URL is published to
+// `state/dashboard-url`; an automatic proxy target is liveness-checked per
+// request and a dead one answers 503 instead of a stale 502.
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { request as httpsRequest } from "node:https"
-import { readFile, stat } from "node:fs/promises"
+import { readFile, stat, unlink } from "node:fs/promises"
 import { extname, join, resolve, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { errText } from "./util.ts"
 import { NESTED_WRITABLE_SECTIONS, readDashboardConfig } from "./autonomy.ts"
+import { atomicWrite } from "./fsx.ts"
 import { readResolvedPaths } from "./paths.ts"
+import { firstReachable, probeServe } from "./serve-target.ts"
 import {
   DashboardError,
   backlogSnapshot,
@@ -49,12 +54,14 @@ const MAX_BODY_BYTES = 1024 * 1024
 
 export type DashboardServerOpts = {
   directory: string
-  /** 0 = ephemeral (tests). Default DASHBOARD_PORT env, else dashboard.port, else 4097. */
+  /** 0 = ephemeral (default). Else DASHBOARD_PORT env, else dashboard.port. */
   port?: number
   /** Defaults to the `dashboard.bind_address` config value. */
   host?: string
-  /** Proxy target for `opencode serve`. Default OPENCODE_SERVE_URL env, else dashboard.serve_url, else 4096. */
+  /** Explicit proxy target. Default OPENCODE_SERVE_URL env, else the live pointer, else dashboard.serve_url. */
   serveUrl?: string
+  /** Bind an ephemeral port when the requested one is busy (default true). */
+  portFallback?: boolean
   /** Static UI root. Default `<directory>/dashboard/static`. */
   staticDir?: string
   csrfTtlMs?: number
@@ -106,12 +113,12 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
 
-/** Env var → positive int, or null when unset/invalid (config wins over garbage). */
+/** Env var → port, or null when unset/invalid (config wins over garbage). */
 function envInt(name: string): number | null {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === "") return null
   const n = Number(raw)
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null
 }
 
 function hostIsLoopback(req: IncomingMessage): boolean {
@@ -255,8 +262,36 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
     throw new DashboardError(403, "bind_requires_auth", `refusing to bind non-loopback ${host} while auth is card 11`)
   }
   const port = opts.port ?? envInt("DASHBOARD_PORT") ?? dash.port
-  const serveUrl = opts.serveUrl ?? process.env.OPENCODE_SERVE_URL ?? dash.serve_url
-  const serveBase = new URL(serveUrl)
+
+  // Static target (no probing) for `handle.serveUrl`, `/api/health`, and the
+  // startup log: opts > env > live pointer > config. The proxy uses
+  // `resolveLiveServeUrl` so an automatic target is never trusted blindly.
+  const pointerFile = async (): Promise<string> =>
+    join((await readResolvedPaths(directory)).stateDir, "serve-url")
+  const readPointer = async (): Promise<string> => {
+    try {
+      return (await readFile(await pointerFile(), "utf8")).trim()
+    } catch {
+      return ""
+    }
+  }
+  const staticServeUrl = (await readPointer()) || dash.serve_url
+  const serveUrl = opts.serveUrl ?? process.env.OPENCODE_SERVE_URL ?? staticServeUrl
+
+  // An explicit target (opts/env) is honoured as-is: a caller that pinned a URL
+  // wants the real proxy error, not a discovery fallback. Otherwise probe the
+  // pointer/config and fall back to a process discovered in this directory.
+  const pinned = opts.serveUrl !== undefined || process.env.OPENCODE_SERVE_URL !== undefined
+  let liveCache: { at: number; url: string | null } | null = null
+  async function resolveLiveServeUrl(force = false): Promise<string | null> {
+    if (pinned) return serveUrl || null
+    const now = Date.now()
+    if (!force && liveCache && now - liveCache.at < 2000) return liveCache.url
+    const found = await firstReachable([await readPointer(), dash.serve_url], directory)
+    liveCache = { at: now, url: found }
+    return found
+  }
+
   const staticDir = opts.staticDir ?? join(directory, "dashboard", "static")
   const csrf = createCsrfStore(opts.csrfTtlMs !== undefined ? { ttlMs: opts.csrfTtlMs } : {})
 
@@ -299,10 +334,15 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
 
     // --- API ---
     if (path === "/api/health" && method === "GET") {
+      const live = await resolveLiveServeUrl()
+      // A pinned target is not probed by the resolver (its proxy error must
+      // surface as 502), but health still reports the truth.
+      const serveOk = live === null ? false : pinned ? await probeServe(live) : true
       json(res, 200, {
         ok: true,
         directory,
-        serve_url: serveUrl,
+        serve_url: live ?? serveUrl,
+        serve_ok: serveOk,
         writable_sections: [...NESTED_WRITABLE_SECTIONS],
         auth: "csrf",
       })
@@ -433,7 +473,15 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
     // --- proxy to opencode serve (chat, SSE, OpenAPI) ---
     if (path === "/api/serve" || path.startsWith("/api/serve/")) {
       const suffix = path.slice("/api/serve".length) + url.search
-      await proxyServe(req, res, suffix, serveBase)
+      const target = await resolveLiveServeUrl()
+      if (!target) {
+        throw new DashboardError(
+          503,
+          "serve_unavailable",
+          "no live opencode server for this project — start one with scripts/run.sh",
+        )
+      }
+      await proxyServe(req, res, suffix, new URL(target))
       return
     }
 
@@ -446,27 +494,72 @@ export async function createDashboardServer(opts: DashboardServerOpts): Promise<
     json(res, 404, { error: "not_found", message: `${method} ${path}` })
   }
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(port, host, () => {
-      server.removeListener("error", reject)
-      resolve()
+  function listenOn(requested: number): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const onError = (err: unknown): void => {
+        server.removeListener("listening", onListening)
+        reject(err)
+      }
+      const onListening = (): void => {
+        server.removeListener("error", onError)
+        const address = server.address()
+        resolve(typeof address === "object" && address !== null ? address.port : requested)
+      }
+      server.once("error", onError)
+      server.once("listening", onListening)
+      server.listen(requested, host)
     })
-  })
-  const addr = server.address()
-  const actualPort = typeof addr === "object" && addr !== null ? addr.port : port
+  }
+
+  let actualPort: number
+  try {
+    actualPort = await listenOn(port)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === "EADDRINUSE" && port !== 0 && opts.portFallback !== false) {
+      process.stderr.write(`[dashboard] port ${port} is in use; binding an ephemeral port\n`)
+      actualPort = await listenOn(0)
+    } else {
+      throw err
+    }
+  }
   const urlHost = host.includes(":") ? `[${host}]` : host
+  const url = `http://${urlHost}:${actualPort}`
+
+  // Publish the bound URL so launchers/hooks/status resolve a dynamic port.
+  // Best effort: a read-only/unwritable state dir must not break the server.
+  let dashboardUrlFile: string | null = null
+  try {
+    dashboardUrlFile = join((await readResolvedPaths(directory)).stateDir, "dashboard-url")
+    await atomicWrite(dashboardUrlFile, `${url}\n`)
+  } catch {
+    dashboardUrlFile = null
+  }
 
   return {
     server,
     host,
     port: actualPort,
-    url: `http://${urlHost}:${actualPort}`,
+    url,
     serveUrl,
     csrf,
     close: () =>
       new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()))
+        server.close((err) => {
+          if (err) {
+            reject(err)
+            return
+          }
+          const pointer = dashboardUrlFile
+          if (pointer) {
+            void readFile(pointer, "utf8")
+              .then((current) => (current.trim() === url ? unlink(pointer) : undefined))
+              .catch(() => {})
+              .finally(() => resolve())
+            return
+          }
+          resolve()
+        })
         server.closeAllConnections?.()
       }),
   }
@@ -485,7 +578,7 @@ if (invokedDirectly) {
   const staticDir = process.env.DASHBOARD_STATIC_DIR
   const handle = await createDashboardServer({ directory, ...(staticDir ? { staticDir } : {}) })
   console.log(
-    `autonomy-dashboard-api listening on ${handle.url} (proxy -> ${handle.serveUrl}${staticDir ? `, ui -> ${staticDir}` : ""})`,
+    `autonomy-dashboard-api listening on ${handle.url} (proxy -> ${handle.serveUrl || "<auto>"}${staticDir ? `, ui -> ${staticDir}` : ""})`,
   )
   const shutdown = () => {
     void handle.close().then(() => process.exit(0))

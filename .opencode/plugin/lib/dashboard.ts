@@ -330,8 +330,9 @@ export function guardLeaf(section: string, leaf: Leaf, ctx: GuardContext): { sta
   // The proxy target receives every session transcript; a non-loopback
   // serve_url would ship them off-box with no auth to gate it (card 11).
   if (section === "dashboard" && leaf.path === "serve_url") {
-    let loopback = false
-    if (typeof leaf.value === "string") {
+    // "" = automatic (live pointer / discovery); anything else must be loopback.
+    let loopback = typeof leaf.value === "string" && leaf.value.trim() === ""
+    if (!loopback && typeof leaf.value === "string") {
       try {
         loopback = isLoopback(new URL(leaf.value).hostname)
       } catch {

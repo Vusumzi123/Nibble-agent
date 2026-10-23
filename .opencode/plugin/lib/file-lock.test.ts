@@ -127,3 +127,36 @@ test("isFileLockStale: null/malformed/old-heartbeat are stale", () => {
     false,
   )
 })
+
+test("a FRESH lock held by a dead process is stolen immediately", async () => {
+  const file = await tmpLock()
+  const record: FileLockRecord = {
+    pid: 999_999, // dead
+    acquired_ms: Date.now(),
+    heartbeat_ms: Date.now(), // fresh: SIGKILL leaves exactly this shape
+  }
+  await writeFile(file, JSON.stringify(record), "utf8")
+
+  const stolen = await acquireFileLock(file, { refreshMs: 1_000, staleMs: 3_000 })
+  assert.ok(stolen, "liveness, not heartbeat age, decides the steal")
+  await stolen!.release()
+})
+
+test("a recycled PID (different start-time) is treated as dead", async () => {
+  const file = await tmpLock()
+  const record: FileLockRecord = {
+    pid: process.pid, // alive, but from a different incarnation
+    acquired_ms: Date.now(),
+    heartbeat_ms: Date.now(),
+    pid_start: "0",
+  }
+  await writeFile(file, JSON.stringify(record), "utf8")
+
+  const stolen = await acquireFileLock(file, { refreshMs: 1_000, staleMs: 3_000 })
+  if (process.platform === "linux") {
+    assert.ok(stolen, "a stale pid_start marks the holder as gone")
+    await stolen!.release()
+  } else {
+    assert.equal(stolen, null, "without /proc the guard is skipped")
+  }
+})

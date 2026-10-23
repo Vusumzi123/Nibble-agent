@@ -6,10 +6,12 @@
 # opencode owns its lifecycle. `status` reports whether the proxy target is
 # reachable.
 #
-# Port and proxy target come from `dashboard.port` / `dashboard.serve_url` in
-# .opencode/sysop-config.yaml (env DASHBOARD_PORT / OPENCODE_SERVE_URL
-# override). The static UI is served from <target>/dashboard/static — the
-# committed `npm run build` output of dashboard/ui.
+# Port and proxy target come from `dashboard.port` (0 = auto) /
+# `dashboard.serve_url` in .opencode/sysop-config.yaml (env DASHBOARD_PORT /
+# OPENCODE_SERVE_URL override). The bound URL is published to
+# state/dashboard-url so dynamic ports resolve without parsing logs. The static
+# UI is served from <target>/dashboard/static — the committed `npm run build`
+# output of dashboard/ui.
 #
 # Usage:
 #   ./scripts/dashboard-ctl.sh start
@@ -20,7 +22,7 @@
 #
 # Env:
 #   DASHBOARD_TARGET     project to observe        (default: parent of scripts/)
-#   DASHBOARD_PORT       backend port override     (default: dashboard.port config)
+#   DASHBOARD_PORT       backend port override     (default: dashboard.port; 0 = auto)
 #   OPENCODE_SERVE_URL   proxy target override     (default: dashboard.serve_url config)
 #   DASHBOARD_STATIC_DIR built UI directory        (default: <target>/dashboard/static)
 #   NODE_BIN             node executable           (default: command -v node)
@@ -59,15 +61,16 @@ config_scalar() {
 }
 
 PORT="${DASHBOARD_PORT:-$(config_scalar port)}"
-PORT="${PORT:-4097}"
+PORT="${PORT:-0}" # 0 = auto (kernel-assigned); a pinned port falls back if busy
 # Display-only fallback for `status` when the backend is down; when it is up,
 # status reports the proxy target from /api/health (config-aware).
 SERVE_URL="${OPENCODE_SERVE_URL:-$(config_scalar serve_url)}"
-SERVE_URL="${SERVE_URL:-http://127.0.0.1:4096}"
+SERVE_URL="${SERVE_URL:-}"
 BACKEND="$TARGET/.opencode/plugin/lib/dashboard-server.ts"
 STATE_DIR="$TARGET/.opencode/state"
 LOG_DIR="$TARGET/.opencode/logs"
 PID_FILE="$STATE_DIR/dashboard.pid"
+URL_FILE="$STATE_DIR/dashboard-url"
 LOG_FILE="$LOG_DIR/dashboard.log"
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 
@@ -81,8 +84,23 @@ http_code() {
   printf '%s' "${code:-000}"
 }
 
+# The backend publishes its bound URL (dynamic ports included). The configured
+# port is only a fallback for `status` when nothing has been published yet.
+running_url() {
+  local url
+  url="$(cat "$URL_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -n "$url" ]; then
+    printf '%s' "$url"
+  elif [ "$PORT" != "0" ]; then
+    printf 'http://127.0.0.1:%s' "$PORT"
+  fi
+}
+
 health_code() {
-  http_code "http://127.0.0.1:$PORT/api/health"
+  local url
+  url="$(running_url)"
+  [ -n "$url" ] || { printf '000'; return 0; }
+  http_code "$url/api/health"
 }
 
 alive() {
@@ -156,7 +174,7 @@ resolve_ui() {
 }
 
 do_start() {
-  local pid code ui i
+  local pid ui i url
   pid="$(current_pid || true)"
   if [ -n "$pid" ]; then
     echo "dashboard: already running (pid $pid)"
@@ -174,31 +192,29 @@ do_start() {
     return 1
   fi
 
-  code="$(health_code)"
-  case "$code" in
-    "" | "000") ;;
-    *)
-      echo "error: port $PORT already answers (HTTP $code) but no matching dashboard-server process; refusing to start" >&2
-      return 1
-      ;;
-  esac
-
   mkdir -p "$STATE_DIR" "$LOG_DIR"
   ui="$(resolve_ui)"
 
-  echo "dashboard: starting on http://127.0.0.1:$PORT"
+  if [ "$PORT" = "0" ]; then
+    echo "dashboard: starting on an auto-assigned port"
+  else
+    echo "dashboard: starting on http://127.0.0.1:$PORT"
+  fi
   (
     cd "$TARGET"
     if [ -n "$ui" ]; then
       export DASHBOARD_STATIC_DIR="$ui"
     fi
-    nohup "$NODE_BIN" "$BACKEND" "$TARGET" >> "$LOG_FILE" 2>&1 </dev/null &
+    DASHBOARD_PORT="$PORT" nohup "$NODE_BIN" "$BACKEND" "$TARGET" >> "$LOG_FILE" 2>&1 </dev/null &
     printf '%s\n' "$!" > "$PID_FILE"
   )
 
+  # The server publishes state/dashboard-url once it is listening, so a
+  # kernel-assigned port is discovered without parsing logs.
   for i in $(seq 1 50); do
-    if [ "$(health_code)" = "200" ]; then
-      echo "dashboard: up (pid $(cat "$PID_FILE"))  log: $LOG_FILE"
+    url="$(cat "$URL_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -n "$url" ] && [ "$(http_code "$url/api/health")" = "200" ]; then
+      echo "dashboard: up at $url (pid $(cat "$PID_FILE"))  log: $LOG_FILE"
       return 0
     fi
     sleep 0.2
@@ -236,26 +252,33 @@ do_stop() {
     fi
   fi
 
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$URL_FILE"
   echo "dashboard: stopped"
 }
 
 do_status() {
-  local pid code proxy ui hcode health_serve
+  local pid code proxy ui hcode health_serve url
   pid="$(current_pid || true)"
   ui="$(resolve_ui)"
+  url="$(running_url)"
   hcode="$(health_code)"
   echo "target: $TARGET"
-  echo "url:    http://127.0.0.1:$PORT"
+  if [ -n "$url" ]; then
+    echo "url:    $url"
+  elif [ "$PORT" = "0" ]; then
+    echo "url:    <auto>"
+  else
+    echo "url:    http://127.0.0.1:$PORT"
+  fi
   echo "ui:     ${ui:-<built-in $TARGET/dashboard/static>}"
   echo "log:    $LOG_FILE"
 
   # When the backend is up, /api/health reports the serve_url it resolved
-  # (opts > env > dashboard.serve_url config > default) — trust that over
+  # (opts > env > live pointer > dashboard.serve_url config) — trust that over
   # this script's env-derived guess.
   health_serve=""
-  if [ "$hcode" = "200" ]; then
-    health_serve="$("${CURL[@]}" "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+  if [ "$hcode" = "200" ] && [ -n "$url" ]; then
+    health_serve="$("${CURL[@]}" "$url/api/health" 2>/dev/null \
       | sed -n 's/.*"serve_url": *"\([^"]*\)".*/\1/p')" || true
   fi
   proxy="${health_serve:-$SERVE_URL}"
@@ -263,14 +286,22 @@ do_status() {
   if [ -n "$pid" ]; then
     echo "state:  running (pid $pid)"
     echo "health: HTTP $hcode"
-    echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
+    if [ -n "$proxy" ]; then
+      echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
+    else
+      echo "proxy:  <none>"
+    fi
   else
     if [ "$hcode" = "000" ]; then
       echo "state:  stopped"
     else
-      echo "state:  stopped (port $PORT held by a foreign process, HTTP $hcode)"
+      echo "state:  stopped (a foreign process answers at $url, HTTP $hcode)"
     fi
-    echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
+    if [ -n "$proxy" ]; then
+      echo "proxy:  $proxy (HTTP $(http_code "$proxy/"))"
+    else
+      echo "proxy:  <none>"
+    fi
   fi
 }
 
