@@ -146,10 +146,13 @@ export function startDrainConsumer(deps: DrainConsumerDeps): DrainConsumerHandle
   /** Pending + oldest age against the effective watermark (§2.5). */
   const readTrigger = async (cfg: DrainConfig): Promise<TriggerState> => {
     try {
-      const { lastTs } = await effectiveCursorLastTs(deps.stateDir, cfg, now())
+      const { lastTs, marks } = await effectiveCursorLastTs(deps.stateDir, cfg, now())
       const common = {
         projectDir: deps.directory,
         lastTs,
+        // Count against each session's own mark too: turns consolidated above
+        // the watermark are not pending and must not trigger a wake.
+        marks,
         ...(deps.dbFile === undefined ? {} : { dbFile: deps.dbFile }),
         excludeMissions: cfg.exclude_missions,
       }

@@ -15,6 +15,7 @@ import {
 } from "./consumer.ts"
 import { createDrainLedger, DRAIN_LEDGER_FILE } from "./ledger.ts"
 import { acquireDrainLock, drainLockFile } from "./lock.ts"
+import { defaultCursor, resolveCursorFile, saveCursor } from "./cursor.ts"
 import { createBrainProvider } from "../memory/providers/builtin/brain.ts"
 import type { MemoryProvider } from "../memory/types.ts"
 
@@ -179,6 +180,28 @@ test("idle marker: state file is written when the backlog is below the trigger",
   assert.equal(marker.state, "idle")
   assert.equal(marker.pending, 2)
   assert.ok(marker.next_due > Date.now(), "a next wake is scheduled")
+  handle.stop()
+})
+
+test("the trigger counts per-session marks, not just the watermark", async () => {
+  const base = await workspace()
+  const cfg = config({ trigger_pending: 1 })
+  const dbFile = await seedDb({ turns: 2, sessionTime: 1_000 })
+  // The watermark sits below both turns, but the session's mark already covers
+  // them: nothing is pending, so a watermark-only count would wake needlessly.
+  await saveCursor(resolveCursorFile(base.stateDir), {
+    ...defaultCursor(),
+    watermark_ts: 500,
+    sessions: { "top-1": { last_ts: 1_001, summary: "" } },
+  })
+  const handle = startDrainConsumer({ ...deps({ ...base, dbFile }, cfg) })
+
+  const summary = await handle.wake()
+  assert.equal(summary, null, "consumed turns do not trigger a wake")
+
+  const marker = JSON.parse(await readFile(join(base.stateDir, DRAIN_CURRENT_FILE), "utf8"))
+  assert.equal(marker.state, "idle")
+  assert.equal(marker.pending, 0)
   handle.stop()
 })
 
