@@ -138,6 +138,56 @@ async function seedDb(
   return file
 }
 
+/** An old session with no eligible text (already consumed) ahead of a newer
+ *  session that still has a text turn — the head-of-line stall shape. */
+async function seedConsumedHeadDb(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "drain-pipe-db-"))
+  const file = join(dir, "opencode.db")
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+  `)
+  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
+    "old-consumed",
+    null,
+    PROJECT,
+    1000,
+  )
+  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+    "m-old",
+    "old-consumed",
+    1000,
+    JSON.stringify({ role: "assistant" }),
+  )
+  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+    "m-old-p",
+    "m-old",
+    JSON.stringify({ type: "tool" }),
+  )
+  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
+    "new-work",
+    null,
+    PROJECT,
+    4000,
+  )
+  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+    "m-new",
+    "new-work",
+    4000,
+    JSON.stringify({ role: "user" }),
+  )
+  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
+    "m-new-p",
+    "m-new",
+    JSON.stringify({ type: "text", text: "run sudo systemctl restart wg0" }),
+  )
+  db.close()
+  return file
+}
+
 function config(overrides: Partial<DrainConfig> = {}): DrainConfig {
   return {
     ...DEFAULT_DRAIN,
@@ -251,15 +301,33 @@ test("lookback still picks up a session inside the window", async () => {
   assert.ok(result.cursorAfter >= now - 300_000)
 })
 
-test("nothing to do leaves the cursor untouched", async () => {
+test("a discovered session with no eligible turns is consumed, not left pending", async () => {
   const base = { ...(await workspace()), dbFile: await seedDb({ text: "   " }) }
   const { client } = fakeClient()
   const result = await runDrainPipe(deps(base, client))
 
   assert.equal(result.outcome, "nothing")
-  assert.equal(result.cursorAfter, 0)
+  assert.equal(result.sessions, 1, "the discovered session is reported")
+  assert.equal(result.cursorAfter, 1000, "the watermark advances over it")
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.watermark_ts, 0)
+  assert.equal(cursor.watermark_ts, 1000)
+})
+
+test("a consumed discovery batch cannot block newer turns (head-of-line)", async () => {
+  const base = { ...(await workspace()), dbFile: await seedConsumedHeadDb() }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const one = { config: { batch_sessions: 1 } }
+
+  const first = await runDrainPipe(deps(base, client, one))
+  assert.equal(first.outcome, "nothing")
+  assert.equal(first.sessions, 1)
+  assert.equal(first.cursorAfter, 1000, "the consumed head is skipped so the queue can move")
+
+  const second = await runDrainPipe(deps(base, client, one))
+  assert.equal(second.outcome, "completed")
+  assert.equal(second.sessions, 1)
+  assert.equal(second.items, 1)
+  assert.equal(second.cursorAfter, 4000, "the newer turn is discovered on the next pass")
 })
 
 test("disabled config is a no-op", async () => {

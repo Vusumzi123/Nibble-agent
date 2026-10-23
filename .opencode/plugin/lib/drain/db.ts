@@ -46,9 +46,12 @@ export type DrainSource = {
   degraded?: DrainDegraded
   discover(lastTs: number, limit: number): Promise<DrainSession[]>
   fetch(sessionID: string, lastTs: number, limit: number): Promise<DrainTurn[]>
-  unconsumedCount(lastTs: number): Promise<number>
+  /** Turns above `lastTs` and each session's own mark (cursor v2). Without the
+   *  marks, turns already consumed below a global watermark would be counted
+   *  as pending forever. */
+  unconsumedCount(lastTs: number, marks?: Record<string, number>): Promise<number>
   /** Oldest unconsumed turn's activity time, or null when the lane is empty. */
-  oldestUnconsumedTs(lastTs: number): Promise<number | null>
+  oldestUnconsumedTs(lastTs: number, marks?: Record<string, number>): Promise<number | null>
   close(): Promise<void>
 }
 
@@ -132,27 +135,39 @@ const FETCH_SQL = `
   ORDER BY m.time_created, m.id
   LIMIT ?`
 
+// Cursor v2 marks arrive as a JSON object of `{sessionID: last_ts}`. The join
+// makes a turn consumed when it is at or below either the global watermark or
+// its session's own mark, so the counter matches what the pipe actually fetches
+// (a single global threshold over-counted sessions already consumed above it).
+const MARKS_CTE = `WITH marks AS (
+    SELECT key AS sid, CAST(value AS INTEGER) AS ts FROM json_each(?)
+  )`
+
 const COUNT_SQL = `
+  ${MARKS_CTE}
   SELECT count(*) AS n
   FROM message m
   JOIN part p ON p.message_id = m.id
   JOIN session s ON s.id = m.session_id
+  LEFT JOIN marks mk ON mk.sid = s.id
   WHERE s.parent_id IS NULL
     AND s.directory = ?
-    AND m.time_created > ?
+    AND m.time_created > max(?, COALESCE(mk.ts, 0))
     AND s.title NOT IN (${TITLE_PLACEHOLDER})
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
     AND COALESCE(trim(json_extract(p.data, '$.text')), '') <> ''`
 
 const OLDEST_SQL = `
+  ${MARKS_CTE}
   SELECT min(m.time_created) AS t
   FROM message m
   JOIN part p ON p.message_id = m.id
   JOIN session s ON s.id = m.session_id
+  LEFT JOIN marks mk ON mk.sid = s.id
   WHERE s.parent_id IS NULL
     AND s.directory = ?
-    AND m.time_created > ?
+    AND m.time_created > max(?, COALESCE(mk.ts, 0))
     AND s.title NOT IN (${TITLE_PLACEHOLDER})
     AND json_extract(p.data, '$.type') = 'text'
     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0
@@ -226,6 +241,11 @@ function withTitles(sql: string, titles: readonly string[]): string {
   return sql.replace(TITLE_PLACEHOLDER, titles.map(() => "?").join(", "))
 }
 
+/** Binds for the marks CTE; an empty object counts against the watermark only. */
+function marksJson(marks: Record<string, number> | undefined): string {
+  return JSON.stringify(marks ?? {})
+}
+
 function sqliteSource(
   db: SqliteDatabase,
   projectDir: string,
@@ -257,14 +277,14 @@ function sqliteSource(
       const rows = fetch.all(sessionID, lastTs, limit) as Array<Record<string, unknown>>
       return rows.map(turnFromRow)
     },
-    async unconsumedCount(lastTs) {
-      const row = count.get(projectDir, lastTs, ...titles) as
+    async unconsumedCount(lastTs, marks) {
+      const row = count.get(marksJson(marks), projectDir, lastTs, ...titles) as
         | { n?: unknown }
         | undefined
       return Number(row?.n ?? 0)
     },
-    async oldestUnconsumedTs(lastTs) {
-      const row = oldest.get(projectDir, lastTs, ...titles) as
+    async oldestUnconsumedTs(lastTs, marks) {
+      const row = oldest.get(marksJson(marks), projectDir, lastTs, ...titles) as
         | { t?: unknown }
         | undefined
       const t = Number(row?.t ?? 0)
@@ -364,19 +384,21 @@ function sdkSource(
     degraded,
     discover,
     fetch: fetchTurns,
-    async unconsumedCount(lastTs) {
+    async unconsumedCount(lastTs, marks) {
       const sessions = await discover(lastTs, 1000)
       let total = 0
       for (const session of sessions) {
-        total += (await fetchTurns(session.id, lastTs, Number.MAX_SAFE_INTEGER)).length
+        const base = Math.max(lastTs, marks?.[session.id] ?? 0)
+        total += (await fetchTurns(session.id, base, Number.MAX_SAFE_INTEGER)).length
       }
       return total
     },
-    async oldestUnconsumedTs(lastTs) {
+    async oldestUnconsumedTs(lastTs, marks) {
       const sessions = await discover(lastTs, 1000)
       let oldest: number | null = null
       for (const session of sessions) {
-        const turns = await fetchTurns(session.id, lastTs, Number.MAX_SAFE_INTEGER)
+        const base = Math.max(lastTs, marks?.[session.id] ?? 0)
+        const turns = await fetchTurns(session.id, base, Number.MAX_SAFE_INTEGER)
         for (const turn of turns) {
           if (oldest === null || turn.time < oldest) oldest = turn.time
         }
@@ -394,6 +416,8 @@ function sdkSource(
 export async function countUnconsumed(opts: {
   projectDir: string
   lastTs: number
+  /** Per-session marks (cursor v2); omitted = watermark only. */
+  marks?: Record<string, number>
   dbFile?: string
   client?: DrainSdkClient
   home?: string
@@ -411,7 +435,7 @@ export async function countUnconsumed(opts: {
     onWarn: opts.onWarn,
   })
   try {
-    return await source.unconsumedCount(opts.lastTs)
+    return await source.unconsumedCount(opts.lastTs, opts.marks)
   } finally {
     await source.close().catch(() => {})
   }
@@ -426,6 +450,8 @@ export async function countUnconsumed(opts: {
 export async function oldestPendingAge(opts: {
   projectDir: string
   lastTs: number
+  /** Per-session marks (cursor v2); omitted = watermark only. */
+  marks?: Record<string, number>
   now?: number
   dbFile?: string
   client?: DrainSdkClient
@@ -445,7 +471,7 @@ export async function oldestPendingAge(opts: {
     onWarn: opts.onWarn,
   })
   try {
-    const oldestTs = await source.oldestUnconsumedTs(opts.lastTs)
+    const oldestTs = await source.oldestUnconsumedTs(opts.lastTs, opts.marks)
     return oldestTs === null ? { oldestTs: null, ageMs: null } : { oldestTs, ageMs: Math.max(0, now - oldestTs) }
   } finally {
     await source.close().catch(() => {})

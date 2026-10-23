@@ -8,7 +8,7 @@
 // Loaded via relative import only.
 import type { DrainConfig } from "./config.ts"
 import { countUnconsumed } from "./db.ts"
-import { loadCursor, resolveCursorFile } from "./cursor.ts"
+import { loadCursor, resolveCursorFile, sessionMarks } from "./cursor.ts"
 import type { MemoryProvider } from "../memory/types.ts"
 
 export type DrainSkipReason =
@@ -40,12 +40,13 @@ export async function effectiveCursorLastTs(
   stateDir: string,
   config: DrainConfig,
   now: number = Date.now(),
-): Promise<{ lastTs: number; seeded: boolean }> {
+): Promise<{ lastTs: number; seeded: boolean; marks: Record<string, number> }> {
   const cursor = await loadCursor(resolveCursorFile(stateDir, config.cursor_file))
+  const marks = sessionMarks(cursor)
   if (cursor.watermark_ts <= 0 && config.initial_lookback_hours > 0) {
-    return { lastTs: now - config.initial_lookback_hours * 3_600_000, seeded: true }
+    return { lastTs: now - config.initial_lookback_hours * 3_600_000, seeded: true, marks }
   }
-  return { lastTs: cursor.watermark_ts, seeded: false }
+  return { lastTs: cursor.watermark_ts, seeded: false, marks }
 }
 
 /**
@@ -80,10 +81,15 @@ export async function readDrainStatus(opts: {
   }
 
   try {
-    const { lastTs, seeded } = await effectiveCursorLastTs(opts.stateDir, opts.config, opts.now)
+    const { lastTs, seeded, marks } = await effectiveCursorLastTs(
+      opts.stateDir,
+      opts.config,
+      opts.now,
+    )
     const pending = await countUnconsumed({
       projectDir: opts.directory,
       lastTs,
+      marks,
       dbFile: opts.dbFile,
       excludeMissions: opts.config.exclude_missions,
     })

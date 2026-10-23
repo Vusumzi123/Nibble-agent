@@ -217,6 +217,14 @@ export function sessionMarkTs(cursor: DrainCursor, sessionID: string): number {
   return cursor.sessions[sessionID]?.last_ts ?? cursor.watermark_ts
 }
 
+/** Per-session fetch lower bounds, for the counting queries that must not
+ *  treat already-consolidated turns as pending (§2.3). */
+export function sessionMarks(cursor: DrainCursor): Record<string, number> {
+  const marks: Record<string, number> = {}
+  for (const [sid, mark] of Object.entries(cursor.sessions)) marks[sid] = mark.last_ts
+  return marks
+}
+
 /** Move the watermark forward (monotonic) and clear the blocked counter. */
 export function advanceWatermark(cursor: DrainCursor, ts: number): DrainCursor {
   if (!isFiniteNumber(ts)) return cursor

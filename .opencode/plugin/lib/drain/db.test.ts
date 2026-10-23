@@ -246,6 +246,18 @@ test("unconsumedCount counts eligible new turns", async () => {
   await source.close()
 })
 
+test("pending counts honor per-session marks already consumed above the watermark", async () => {
+  const file = await tmpDb()
+  seed(file)
+  const source = await openDrainSource({ projectDir: PROJECT, dbFile: file })
+
+  assert.equal(await source.unconsumedCount(LAST_TS, { "top-1": 600 }), 1)
+  assert.equal(await source.unconsumedCount(LAST_TS, { "top-1": 700 }), 0)
+  assert.equal(await source.oldestUnconsumedTs(LAST_TS, { "top-1": 600 }), 700)
+  assert.equal(await source.oldestUnconsumedTs(LAST_TS, { "top-1": 700 }), null)
+  await source.close()
+})
+
 test("the fetch query plan uses the session/time index", async () => {
   const file = await tmpDb()
   seed(file)
@@ -302,6 +314,8 @@ test("SDK fallback applies the same filters and ordering", async () => {
   const turns = await source.fetch("s-top", LAST_TS, 10)
   assert.deepEqual(turns.map((t) => t.text), ["hello", "hi"])
   assert.equal(await source.unconsumedCount(LAST_TS), 2)
+  assert.equal(await source.unconsumedCount(LAST_TS, { "s-top": 600 }), 1)
+  assert.equal(await source.oldestUnconsumedTs(LAST_TS, { "s-top": 700 }), null)
   await source.close()
 })
 

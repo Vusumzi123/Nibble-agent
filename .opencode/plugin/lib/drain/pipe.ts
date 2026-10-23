@@ -33,6 +33,7 @@ import {
   resolveCursorFile,
   saveCursor,
   sessionMarkTs,
+  sessionMarks,
   type DrainCursor,
 } from "./cursor.ts"
 import { openDrainSource, type DrainSource } from "./db.ts"
@@ -224,10 +225,11 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   const stuck = async (
     error?: string,
     degraded: DrainPipeResult["degraded"] = undefined,
+    sessions: number = 0,
   ): Promise<DrainPipeResult> =>
     emit({
       outcome: "nothing",
-      sessions: 0,
+      sessions,
       items: 0,
       consolidated: 0,
       skipped: 0,
@@ -286,7 +288,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   let degraded: DrainPipeResult["degraded"] = source.degraded
 
   try {
-    pendingBefore = await source.unconsumedCount(cursor.watermark_ts)
+    pendingBefore = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
     const sessions = await source.discover(cursor.watermark_ts, cfg.batch_sessions)
     const renderings: RenderedSession[] = []
     // Per-session fetch marks + the watermark floor rule (§2.3): a discovered
@@ -295,6 +297,9 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     // candidate bound.
     const floorMarks: number[] = []
     const consumedMarks: number[] = []
+    // Activity time of sessions with no renderable turns: they are consumed, so
+    // the watermark may advance over them even though their mark does not.
+    const consumedUpTo: number[] = []
     const settleCutoff = Date.now() - Math.max(0, cfg.settle_seconds) * 1000
 
     for (const session of sessions) {
@@ -317,6 +322,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       const turns = await source.fetch(session.id, mark, cfg.max_turns_per_session)
       if (turns.length === 0) {
         consumedMarks.push(mark)
+        consumedUpTo.push(Math.max(mark, session.timeUpdated || 0))
         continue
       }
       const rendered = renderSession(session.id, turns, {
@@ -326,6 +332,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       if (!rendered) {
         // Turn rows existed but rendered empty — treat as consumed at the mark.
         consumedMarks.push(mark)
+        consumedUpTo.push(Math.max(mark, session.timeUpdated || 0))
         continue
       }
       renderings.push(rendered)
@@ -335,17 +342,22 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     }
 
     if (renderings.length === 0) {
-      if (floorMarks.length > 0) {
-        const held = Math.min(...floorMarks)
-        if (held > cursor.watermark_ts) {
-          cursor = advanceWatermark(cursor, held)
-          await saveCursor(cursorFile, cursor)
-        }
+      // Every discovered session is already consumed. Advance the watermark
+      // over them so the oldest `batch_sessions` stop occupying the discovery
+      // window — otherwise newer turns are never discovered (head-of-line).
+      // Settle-guarded sessions are NOT consumed yet, so their marks floor the
+      // advance.
+      const bound = consumedUpTo.length > 0 ? Math.max(...consumedUpTo) : null
+      const floors = floorMarks.length > 0 ? Math.min(...floorMarks) : bound
+      const candidate = bound === null ? null : floors === null ? bound : Math.min(bound, floors)
+      if (candidate !== null && candidate > cursor.watermark_ts) {
+        cursor = advanceWatermark(cursor, candidate)
+        await saveCursor(cursorFile, cursor)
       }
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
-      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
       oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
-      return stuck(undefined, degraded)
+      return stuck(undefined, degraded, sessions.length)
     }
 
     const planned: PlannedItem[] = []
@@ -410,8 +422,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         cursor = pruneSessions(cursor, cfg.continuity_sessions)
         await saveCursor(cursorFile, cursor)
       }
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
-      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
       oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
       if (stopped === "token-budget") {
         return emit({
@@ -536,7 +548,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         })
         cursor = failed.cursor
         await saveCursor(cursorFile, cursor)
-        pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
+        pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
         return emit({
           outcome: failed.dropped ? "dropped" : "error",
           sessions: renderings.length,
@@ -551,7 +563,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
       }
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
+      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
       return emit({
         outcome: "error",
         sessions: renderings.length,
@@ -612,8 +624,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     cursor = pruneSessions(cursor, cfg.continuity_sessions)
     await saveCursor(cursorFile, cursor)
 
-    pendingAfter = await source.unconsumedCount(cursor.watermark_ts)
-    const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts)
+    pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+    const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
     oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
 
     if (stopped === "token-budget") {

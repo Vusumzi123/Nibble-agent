@@ -97,6 +97,21 @@ test("drain status: cursor parity and in-sync at the cursor", async () => {
   assert.equal(pending.locked, false)
 })
 
+test("drain status: pending honors per-session marks above the watermark", async () => {
+  const ws = await workspace()
+  addTurn(ws.dbFile, ws.directory, "a", 1_000)
+  addTurn(ws.dbFile, ws.directory, "b", 2_000)
+  await saveCursor(resolveCursorFile(ws.stateDir), {
+    ...defaultCursor(),
+    watermark_ts: 500,
+    sessions: { s_a: { last_ts: 1_000, summary: "" } },
+  })
+
+  const status = await readDrainStatus({ ...ws, config: cfg(), provider: writer })
+  assert.equal(status.pending, 1, "the turn already consumed for s_a is not pending")
+  assert.equal(status.locked, false)
+})
+
 test("drain status: fresh cursor uses the initial lookback", async () => {
   const ws = await workspace()
   const now = 10 * HOUR

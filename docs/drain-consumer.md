@@ -50,7 +50,12 @@ One pass is `runDrainPipe` (lib/drain/pipe.ts), now bounded three ways:
    session's own mark. A resumed or late-discovered session is re-read from
    its mark, so no turn can fall below a global high-water mark and be
    skipped. The watermark never advances past a marked session that still has
-   unconsumed work above its mark.
+   unconsumed work above its mark. A batch whose sessions are all consumed
+   (no eligible turns above their marks) advances the watermark over them:
+   otherwise the oldest `batch_sessions` would occupy the discovery window on
+   every pass and newer turns would never be discovered (head-of-line). The
+   `pending` counter applies the same per-session marks, so turns already
+   consolidated above the watermark are not reported as pending.
 
 ### The settle guard
 

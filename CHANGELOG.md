@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-10-23
+
+### Fixed
+
+- **Drain stall on an already-consumed discovery batch** — when the oldest
+  `batch_sessions` were all consumed (no eligible turns above their marks),
+  the pipe returned `nothing` without moving the watermark, so the same batch
+  was re-discovered every pass and newer turns never entered the window.
+  The empty-batch path now advances over consumed sessions (settle-guarded
+  sessions still floor it), and the ledger reports how many sessions were
+  discovered.
+- **`pending` over-counted already-consolidated turns** — `pending` and the
+  oldest-pending age now honor cursor v2 per-session marks instead of a single
+  global watermark (SQL `json_each` join; the SDK fallback applies the same
+  per-session bound). The dashboard, candidacy gate, and consumer trigger
+  therefore agree with what the pipe will actually fetch.
+
 ## 2026-10-22
 
 ### Added
