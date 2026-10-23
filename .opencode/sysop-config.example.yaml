@@ -38,6 +38,7 @@ drain:
   cursor_file: drain-cursor.json   # leaf under <state>
   writer_model: ""             # rag-brain writer; "" = the agent default
   summarize_model: ""          # session-summarizer; "" = the agent default
+  summarize_format: json_schema  # json_schema | json_object | off (rollback)
   batch_sessions: 5            # max top-level sessions per run
   initial_lookback_hours: 24   # fresh cursor starts N hours back (0 = all history)
   max_turns_per_session: 40    # turn cap per session

@@ -1,6 +1,5 @@
 ---
 description: Internal generation-only agent. Rewrites one vault profile note (Agent.md or User.md) so it incorporates durable new information from a conversation excerpt. Invoked by the profile-hook plugin; returns the complete updated file between markers and uses no tools.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#B388FF"
 permission:

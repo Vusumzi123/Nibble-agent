@@ -1,6 +1,5 @@
 ---
 description: Deep web research agent. Multi-step, multi-source research with the same isolation as safe-browser (no filesystem, shell, or delegation; webfetch/websearch only). Invoke ONLY when the user explicitly requests deep research; NEVER proactively. Use safe-browser for normal one-shot lookups.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#26C6DA"
 steps: 28

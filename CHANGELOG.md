@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Drain summarizer truncating its JSON tail** — the child now requests
+  structured output (`format: { type: "json_schema", schema }`) driven by the
+  new `drain.summarize_format` key (`json_schema` default, `json_object`
+  validity-only, `off` rollback). A bounded `repairJson` backstop drops the
+  incomplete tail and closes the open containers when a provider ignores the
+  format, and the `error`, `format`, `reply_bytes`, `reply_closed` and
+  `repaired` fields now reach `drain.log`. Every agent `model:` pin is removed;
+  model selection comes from config or inheritance.
 - **Drain stall on an already-consumed discovery batch** — when the oldest
   `batch_sessions` were all consumed (no eligible turns above their marks),
   the pipe returned `nothing` without moving the watermark, so the same batch

@@ -130,6 +130,7 @@ fully-reported sessions.
 | `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the v2 watermark, per-session marks + continuity summaries, and the blocked/backoff counter. |
 | `writer_model` | `rag-brain` writer model; `""` = the agent default. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |
+| `summarize_format` | Structured output for the summarizer child: `json_schema` (default), `json_object` (validity only, sent as a permissive `json_schema` because the prompt API has no `json_object` variant), or `off` (rollback). Repair and the format instrumentation stay active either way. |
 | `batch_sessions` | Max top-level sessions per pass. |
 | `initial_lookback_hours` | Fresh-cursor start: only consolidate sessions active in the last N hours (`0` = whole history). |
 | `max_turns_per_session` | Cap on fetched text parts per session. |

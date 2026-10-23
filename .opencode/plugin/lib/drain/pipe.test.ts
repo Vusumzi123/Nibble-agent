@@ -10,6 +10,7 @@ import { createDrainLedger, DRAIN_LEDGER_FILE } from "./ledger.ts"
 import { createBrainProvider } from "../memory/providers/builtin/brain.ts"
 import { resolveProvider } from "../memory/registry.ts"
 import { runDrainPipe, type DrainPipeClient, type DrainPipeDeps } from "./pipe.ts"
+import { SUMMARY_SCHEMA } from "./summarize.ts"
 
 const PROJECT = "/work/project-a"
 
@@ -256,6 +257,8 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.match(writerPrompt, /### Knowledge item #1/)
   const summarizerPrompt = prompts.find((p) => p.body.agent === "session-summarizer")?.body.parts[0].text
   assert.match(summarizerPrompt, /## Session delta/)
+  const summarizerCall = prompts.find((p) => p.body.agent === "session-summarizer")
+  assert.deepEqual(summarizerCall?.body.format, { type: "json_schema", schema: SUMMARY_SCHEMA })
 
   await ledger.flush()
   const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
@@ -265,6 +268,10 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.deepEqual(lines.map((l) => l.source), ["writer", "pipe"])
   assert.equal(lines[0].outcome, "ok")
   assert.equal(lines[1].cursor_after, 1000)
+  assert.equal(lines[1].summarize_format, "json_schema")
+  assert.equal(lines[1].reply_closed, true)
+  assert.equal(typeof lines[1].reply_bytes, "number")
+  assert.equal(lines[1].repaired, undefined)
 })
 
 test("a fresh cursor starts at the configured lookback, not at epoch", async () => {
@@ -417,6 +424,7 @@ test("summarizer fallback still runs the writer and degrades the result", async 
 
   assert.equal(result.outcome, "degraded")
   assert.equal(result.degraded, "summarizer-fallback")
+  assert.match(result.error ?? "", /malformed summarizer reply/)
   assert.equal(result.consolidated, 1)
   assert.ok(prompts.some((p) => p.body.agent === "rag-brain"))
 })

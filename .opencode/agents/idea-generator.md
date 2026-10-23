@@ -1,6 +1,5 @@
 ---
 description: Internal generation-only agent. Writes one original idea (self-improvement, thought, or business) from what the agent knows and returns it between fixed markers. Invoked by the heartbeat `idea-generate` mission, never by the user; uses no tools.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#C792EA"
 permission:

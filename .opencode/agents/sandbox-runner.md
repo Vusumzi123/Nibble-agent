@@ -1,6 +1,5 @@
 ---
 description: Executes arbitrary commands in an isolated sandbox environment (Firejail, Docker, or opencode sub-agent jail). Invoke when the main agent needs to run untrusted or potentially risky commands safely.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#FFAA44"
 permission:

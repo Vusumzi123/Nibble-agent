@@ -9,9 +9,9 @@ async function agent(): Promise<string> {
   return readFile(AGENT, "utf8")
 }
 
-test("the writer is pinned to the writer model and has a step budget", async () => {
+test("the writer has a step budget and no model pin", async () => {
   const text = await agent()
-  assert.match(text, /^model:\s*deepseek\/deepseek-flash$/m)
+  assert.equal(/^model:/m.test(text), false)
   assert.match(text, /^steps:\s*\d+$/m)
 })
 
@@ -44,19 +44,13 @@ test("the tool matrix and cheat sheet live in the on-demand reference", async ()
   assert.match(reference, /markdown-vault_edit/)
 })
 
-test("every project subagent is pinned to a fixed model", async () => {
-  // Deployed pinning (kept in sync across instances): the writer and the
-  // tool-heavy subagents run deepseek-flash; the two tool-free generation
-  // agents (session summarizer, soul/profile writer) run the omni flash model.
-  const OMNI = "openrouter/qwen/qwen3.8-omni-flash"
-  const FLASH = "deepseek/deepseek-flash"
-  const omniAgents = new Set(["session-summarizer.md", "self-writer.md"])
+test("no agent file declares a predefined model", async () => {
+  // No hidden pin may drift from the deployed harness: model selection comes
+  // from config (drain.writer_model / drain.summarize_model) or inheritance.
   const dir = new URL("../../../agents/", import.meta.url)
   for (const name of await readdir(dir)) {
     if (!name.endsWith(".md")) continue
     const text = await readFile(new URL(name, dir), "utf8")
-    if (!/^mode:\s*subagent$/m.test(text)) continue
-    const expected = omniAgents.has(name) ? OMNI : FLASH
-    assert.match(text, new RegExp(`^model:\\s*${expected.replaceAll("/", "\\/")}$`, "m"), name)
+    assert.equal(/^model:/m.test(text), false, `${name} must not declare model:`)
   }
 })

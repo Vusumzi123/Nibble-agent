@@ -1,6 +1,5 @@
 ---
 description: Tool-free dreamer — the quiet-hours imagination session (plan §17.5). Narrates one dream from the injected subconscious fragments and returns the typed JSON outcome. Executes NO tools, ever.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#B39DDB"
 permission:

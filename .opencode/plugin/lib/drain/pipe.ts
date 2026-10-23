@@ -191,6 +191,11 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   const budget = cfg.token_budget > 0 ? cfg.token_budget : Infinity
   let promptBytes: number | undefined
   let totalTokens = 0
+  let summarizeFormat: string | null = null
+  let summarizeReplyBytes: number | null = null
+  let summarizeReplyClosed: boolean | null = null
+  let summarizeRepaired = false
+  let summarizeFormatFallback = false
   let pendingBefore: number | null = null
   let pendingAfter: number | null = null
   let oldestAgeMs: number | null = null
@@ -214,6 +219,11 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         cursor_after: result.cursorAfter,
         degraded: result.degraded ?? null,
         error: result.error ?? null,
+        ...(summarizeFormat ? { summarize_format: summarizeFormat } : {}),
+        ...(summarizeReplyBytes !== null ? { reply_bytes: summarizeReplyBytes } : {}),
+        ...(summarizeReplyClosed !== null ? { reply_closed: summarizeReplyClosed } : {}),
+        ...(summarizeRepaired ? { repaired: true } : {}),
+        ...(summarizeFormatFallback ? { format_fallback: true } : {}),
         wall_ms: Date.now() - started,
         ...(deps.trigger ? { trigger: deps.trigger } : {}),
         ...(deps.pass !== undefined ? { pass: deps.pass } : {}),
@@ -310,6 +320,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   }
 
   let degraded: DrainPipeResult["degraded"] = source.degraded
+  let error: string | undefined
 
   try {
     pendingBefore = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
@@ -403,6 +414,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
             client: deps.client,
             directory: deps.directory,
             model: cfg.summarize_model,
+            format: cfg.summarize_format,
             maxItems: cfg.max_items_per_session,
             waitForIdle: deps.waitForIdle,
             registerChild: deps.registerChild,
@@ -415,6 +427,12 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         break
       }
       if (summary.degraded) degraded ??= summary.degraded
+      if (summary.error) error ??= summary.error
+      if (summary.format) summarizeFormat = summary.format
+      summarizeReplyBytes = summary.replyBytes ?? summarizeReplyBytes
+      summarizeReplyClosed = summary.closed ?? summarizeReplyClosed
+      summarizeRepaired = summarizeRepaired || summary.repaired
+      summarizeFormatFallback = summarizeFormatFallback || summary.formatFallback === true
       totalTokens += summary.tokens ?? 0
 
       const ts = Math.max(...rendered.turns.map((turn) => turn.time))
@@ -466,6 +484,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursorAfter: cursor.watermark_ts,
           tokens: totalTokens || null,
           degraded: "budget-exhausted",
+          ...(error ? { error } : {}),
           stopped,
         })
       }
@@ -479,6 +498,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         cursorAfter: cursor.watermark_ts,
         tokens: totalTokens || null,
         degraded,
+        ...(error ? { error } : {}),
         ...(stopped ? { stopped } : {}),
       })
     }
@@ -693,6 +713,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         session: writerSession,
         tokens: totalTokens || null,
         degraded,
+        ...(error ? { error } : {}),
         stopped,
       })
     }
@@ -708,6 +729,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       session: writerSession,
       tokens: totalTokens || null,
       degraded,
+      ...(error ? { error } : {}),
     })
   } catch (err) {
     return emit({

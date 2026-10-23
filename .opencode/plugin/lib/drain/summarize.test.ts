@@ -7,7 +7,9 @@ import {
   buildSummarizerPrompt,
   deterministicItems,
   parseSummaryReply,
+  repairJson,
   summarizeSession,
+  SUMMARY_SCHEMA,
   type SummarizerClient,
 } from "./summarize.ts"
 
@@ -32,6 +34,8 @@ type FakeOptions = {
   replies?: string[]
   failCreate?: boolean
   failPrompt?: boolean
+  /** Sequenced promptAsync errors: each entry is returned by that call. */
+  promptErrors?: unknown[]
   failMessages?: boolean
   failAbort?: boolean
   tokens?: { input?: number; output?: number; reasoning?: number }
@@ -43,6 +47,7 @@ function fakeClient(opts: FakeOptions = {}): {
 } {
   const calls = { create: [] as any[], prompt: [] as any[], messages: [] as any[], abort: [] as any[] }
   let replyIndex = 0
+  let promptIndex = 0
   const client: SummarizerClient = {
     session: {
       async create(args) {
@@ -53,6 +58,8 @@ function fakeClient(opts: FakeOptions = {}): {
       async promptAsync(args) {
         calls.prompt.push(args)
         if (opts.failPrompt) throw new Error("prompt failed")
+        const error = opts.promptErrors?.[promptIndex++]
+        if (error !== undefined) return { error }
         return { response: { ok: true } }
       },
       async messages(args) {
@@ -213,7 +220,7 @@ test("a malformed reply is retried once with a correction note", async () => {
   assert.equal(result.items.length, 2)
   assert.equal(calls.create.length, 2, "one fresh summarizer session per attempt")
   assert.equal(calls.prompt.length, 2)
-  assert.match(calls.prompt[1].body.parts[0].text, /previous reply was not valid JSON/)
+  assert.match(calls.prompt[1].body.parts[0].text, /previous reply was cut off/)
   assert.deepEqual(warnings, [])
 })
 
@@ -289,4 +296,115 @@ test("registered child id is the spawned summarizer session", async () => {
     },
   )
   assert.deepEqual(registered, ["ses_sum"])
+})
+
+test("repairJson recovers each recorded truncation shape", () => {
+  const truncatedAfterAtoms = '{"items":[{"title":"A","summary":"S","tags":[],"atoms":["2026-09-24"]'
+  const truncatedMidItem =
+    '{"items":[{"title":"A","summary":"S","tags":[],"atoms":["x"]},{"title":"B","summary":"unfin'
+  const missingRoot = '{"items":[{"title":"A","summary":"S","tags":[],"atoms":[]}]'
+  const fenced = "```json\n" + truncatedAfterAtoms + "\n```"
+  const braceInString = '{"items":[{"title":"A } B","summary":"S","tags":[],"atoms":["x"]'
+
+  for (const [shape, title] of [
+    [truncatedAfterAtoms, "A"],
+    [truncatedMidItem, "A"],
+    [missingRoot, "A"],
+    [fenced, "A"],
+    [braceInString, "A } B"],
+  ] as const) {
+    const fixed = repairJson(shape)
+    assert.ok(fixed, shape)
+    const items = parseSummaryReply(fixed)
+    assert.ok(items && items.length > 0, shape)
+    assert.equal(items[0].title, title, shape)
+  }
+
+  assert.equal(repairJson(REPLY), REPLY, "a complete reply is returned unchanged")
+  assert.equal(repairJson("no json here"), null)
+})
+
+test("the structured-output format is sent, switched, or omitted", async () => {
+  const schemaRun = fakeClient({ reply: REPLY })
+  const schemaResult = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client: schemaRun.client, directory: "/work", format: "json_schema", maxItems: 6, waitForIdle: async () => true },
+  )
+  assert.deepEqual(schemaRun.calls.prompt[0].body.format, {
+    type: "json_schema",
+    schema: SUMMARY_SCHEMA,
+  })
+  assert.equal(schemaResult.format, "json_schema")
+  assert.equal(schemaResult.closed, true)
+  assert.equal(schemaResult.repaired, false)
+  assert.equal(schemaResult.replyBytes, Buffer.byteLength(REPLY, "utf8"))
+
+  const objectRun = fakeClient({ reply: REPLY })
+  await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client: objectRun.client, directory: "/work", format: "json_object", maxItems: 6, waitForIdle: async () => true },
+  )
+  assert.deepEqual(objectRun.calls.prompt[0].body.format, {
+    type: "json_schema",
+    schema: { type: "object", additionalProperties: true },
+  })
+
+  const offRun = fakeClient({ reply: REPLY })
+  await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client: offRun.client, directory: "/work", format: "off", maxItems: 6, waitForIdle: async () => true },
+  )
+  assert.equal("format" in offRun.calls.prompt[0].body, false)
+})
+
+test("a provider that rejects format is retried once without it", async () => {
+  const { client, calls } = fakeClient({
+    reply: REPLY,
+    promptErrors: [{ message: "unsupported parameter: response_format" }],
+  })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.formatFallback, true)
+  assert.equal(calls.prompt.length, 2)
+  assert.ok("format" in calls.prompt[0].body)
+  assert.equal("format" in calls.prompt[1].body, false)
+  assert.equal(calls.abort.length, 1)
+})
+
+test("an unrelated prompt error does not retry without format", async () => {
+  const { client, calls } = fakeClient({
+    reply: REPLY,
+    promptErrors: [{ message: "model overloaded" }],
+  })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+  )
+
+  assert.equal(result.degraded, "summarizer-fallback")
+  assert.match(result.error ?? "", /model overloaded/)
+  assert.equal(calls.prompt.length, 1)
+  assert.equal(result.formatFallback, undefined)
+})
+
+test("a truncated reply is repaired and normalized like a complete reply", async () => {
+  const truncated =
+    '{"items":[{"title":"Wireguard Setup","summary":"Configure wg0 with wg-quick.","tags":["Linux/Network"],"atoms":["/etc/wireguard/wg0.conf","--no-cache"]'
+  const { client } = fakeClient({ reply: truncated })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.closed, false)
+  assert.equal(result.repaired, true)
+  assert.equal(result.items.length, 1)
+  assert.deepEqual(result.items[0].tags, ["linux/network"])
+  assert.ok(result.items[0].atoms.includes("/etc/wireguard/wg0.conf"))
+  assert.equal(result.items[0].hash, hashContent(result.items[0].summary, result.items[0].atoms))
 })
