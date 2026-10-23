@@ -527,7 +527,8 @@ anchors at column 0, so the two never collide.
 | --- | ------- |
 | `enabled` | kill switch. `false` → the loop sleeps on the 60 s wake cap (hot; no restart). Also parks the dream timer — one lock, one engine (card G shares `heartbeat.lock` and this switch). |
 | `long_silence_factor` | a tick whose gap since the previous tick is ≥ factor × frequency feeds the `long_silence` mood event; `0` disables the feed. |
-| `mission_timeout_minutes` | child session budget in minutes (`0` = the legacy abandon, never time out). Hot-read at tick start. |
+| `mission_stall_minutes` | primary stop trigger: abort the child after this many minutes with **no activity** (`0` disables the watchdog). Any message/tool/session event resets the window. Hot-read at tick start. |
+| `mission_timeout_minutes` | optional hard wall-clock ceiling in minutes (`0` = off). Only a fallback for a pathological quiet loop; the stall watchdog is the primary trigger. The stall watchdog and this ceiling cannot both be off. |
 | `mission_lock_stale_ms` | a `state/mission.lock` held longer than this is presumed dead and stolen once. Lifted to at least 3 × `mission_lock_refresh_ms` at read time. |
 | `mission_lock_refresh_ms` | cadence at which a live lock holder re-stamps the lock, so a long mission never loses its own lock. |
 | `mission_summary_timeout_ms` | bound for the LLM attempt summary spawned under the lock after a timeout; on expiry the summarizer child is aborted and the deterministic fallback is used. |
@@ -536,7 +537,7 @@ anchors at column 0, so the two never collide.
 | `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
 Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every
-tick. The five mission-lock keys are also hot-read at tick start. The nested
+tick. The mission-lock, stall and resume keys are also hot-read at tick start. The nested
 `autonomy.heartbeat.in_progress_lock` dial is now enforced: `true` takes
 `state/mission.lock` around each child (tick and drain), `false` restores the
 legacy no-lock path. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`

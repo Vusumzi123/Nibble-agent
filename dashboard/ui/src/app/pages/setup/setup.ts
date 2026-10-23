@@ -21,7 +21,8 @@ export class SetupPage {
 
   protected readonly hbEnabled = signal(true);
   protected readonly longSilence = signal(3);
-  protected readonly missionTimeoutMinutes = signal(15);
+  protected readonly missionStallMinutes = signal(10);
+  protected readonly missionTimeoutMinutes = signal(0);
   protected readonly missionLockStaleMs = signal(1800000);
   protected readonly missionLockRefreshMs = signal(60000);
   protected readonly missionSummaryTimeoutMs = signal(90000);
@@ -51,6 +52,7 @@ export class SetupPage {
     this.inProgressLock.set(c.autonomy.heartbeat.in_progress_lock);
     this.hbEnabled.set(c.heartbeat.enabled);
     this.longSilence.set(c.heartbeat.long_silence_factor);
+    this.missionStallMinutes.set(c.heartbeat.mission_stall_minutes);
     this.missionTimeoutMinutes.set(c.heartbeat.mission_timeout_minutes);
     this.missionLockStaleMs.set(c.heartbeat.mission_lock_stale_ms);
     this.missionLockRefreshMs.set(c.heartbeat.mission_lock_refresh_ms);
@@ -96,13 +98,20 @@ export class SetupPage {
     this.notice.set(null);
     this.error.set(null);
     try {
+      const stall = this.missionStallMinutes();
       const timeout = this.missionTimeoutMinutes();
       const stale = this.missionLockStaleMs();
       const refresh = this.missionLockRefreshMs();
       const summary = this.missionSummaryTimeoutMs();
       const resumes = this.missionMaxResumes();
+      if (!Number.isInteger(stall) || stall < 0) {
+        throw new Error('mission stall must be a whole number of minutes >= 0');
+      }
       if (!Number.isInteger(timeout) || timeout < 0) {
-        throw new Error('mission timeout must be a whole number of minutes >= 0');
+        throw new Error('mission hard ceiling must be a whole number of minutes >= 0');
+      }
+      if (stall <= 0 && timeout <= 0) {
+        throw new Error('the stall watchdog and the hard ceiling cannot both be off');
       }
       if (!Number.isInteger(stale) || stale < 0) {
         throw new Error('mission lock stale must be a whole number of ms >= 0');
@@ -122,6 +131,7 @@ export class SetupPage {
       const result = await this.api.writeConfig('heartbeat', {
         enabled: this.hbEnabled(),
         long_silence_factor: this.longSilence(),
+        mission_stall_minutes: stall,
         mission_timeout_minutes: timeout,
         mission_lock_stale_ms: stale,
         mission_lock_refresh_ms: refresh,

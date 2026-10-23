@@ -349,12 +349,20 @@ export function guardLeaf(section: string, leaf: Leaf, ctx: GuardContext): { sta
   return null
 }
 
-// Cross-field guard: the reader lifts mission_lock_stale_ms to at least
-// 3 × mission_lock_refresh_ms, so a write with stale ≤ refresh would either be
-// silently rewritten or, worse, let a live holder's lock be stolen. Refuse it
-// up front (the per-leaf min:0 rules cannot see the pair).
-export function heartbeatLockProblems(
-  current: Pick<HeartbeatConfig, "mission_lock_stale_ms" | "mission_lock_refresh_ms">,
+// Cross-field guard for the mission dials. The reader lifts
+// mission_lock_stale_ms to at least 3 × mission_lock_refresh_ms, so a write with
+// stale ≤ refresh would either be silently rewritten or, worse, let a live
+// holder's lock be stolen. The stall watchdog and the hard ceiling are the only
+// two stop triggers, so switching both off would let a wedged child run forever.
+// Refuse both up front (the per-leaf min:0 rules cannot see the pairs).
+export function heartbeatConfigProblems(
+  current: Pick<
+    HeartbeatConfig,
+    | "mission_lock_stale_ms"
+    | "mission_lock_refresh_ms"
+    | "mission_stall_minutes"
+    | "mission_timeout_minutes"
+  >,
   requested: Record<string, unknown>,
 ): RoundTripProblem[] {
   const num = (path: string, fallback: number): number => {
@@ -363,17 +371,26 @@ export function heartbeatLockProblems(
   }
   const refresh = num("mission_lock_refresh_ms", current.mission_lock_refresh_ms)
   const stale = num("mission_lock_stale_ms", current.mission_lock_stale_ms)
+  const stall = num("mission_stall_minutes", current.mission_stall_minutes)
+  const ceiling = num("mission_timeout_minutes", current.mission_timeout_minutes)
+  const problems: RoundTripProblem[] = []
   if (stale <= refresh) {
-    return [
-      {
-        path: "mission_lock_stale_ms",
-        reason: `must be greater than mission_lock_refresh_ms (${refresh}ms)`,
-        expected: `> ${refresh}`,
-        actual: stale,
-      },
-    ]
+    problems.push({
+      path: "mission_lock_stale_ms",
+      reason: `must be greater than mission_lock_refresh_ms (${refresh}ms)`,
+      expected: `> ${refresh}`,
+      actual: stale,
+    })
   }
-  return []
+  if (stall <= 0 && ceiling <= 0) {
+    problems.push({
+      path: "mission_stall_minutes",
+      reason: "the stall watchdog and the hard ceiling cannot both be off — a wedged child would never stop",
+      expected: "> 0 while mission_timeout_minutes is 0",
+      actual: stall,
+    })
+  }
+  return problems
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +438,7 @@ export async function writeConfig(
   }
 
   if (section === "heartbeat") {
-    const problems = heartbeatLockProblems(await readHeartbeatConfig(directory), requested)
+    const problems = heartbeatConfigProblems(await readHeartbeatConfig(directory), requested)
     if (problems.length > 0) {
       throw new DashboardError(400, "invalid_value", "mission-lock settings failed cross-field validation", problems)
     }

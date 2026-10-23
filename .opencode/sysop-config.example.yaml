@@ -252,9 +252,11 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   log_compress_after: 1
   log_compress_level: 6
   log_rotate_by: size
-  # Mission lock / timeout / resume (plan §4.1) — hot-read at tick start.
-  # mission_timeout_minutes 0 = legacy abandon (never time out); resume 0 = forever.
-  mission_timeout_minutes: 15       # child session budget (minutes)
+  # Mission lock / stall / resume (plan §4.1) — hot-read at tick start.
+  # The stall watchdog and the optional hard ceiling cannot both be off;
+  # resume 0 = forever.
+  mission_stall_minutes: 10         # abort after this many minutes without activity
+  mission_timeout_minutes: 0        # optional wall-clock ceiling (0 = off)
   mission_lock_stale_ms: 1800000    # dead-holder steal threshold; lifted to 3x refresh
   mission_lock_refresh_ms: 60000    # live holder re-stamps this often
   mission_summary_timeout_ms: 90000 # bound for the attempt summary (under the lock)

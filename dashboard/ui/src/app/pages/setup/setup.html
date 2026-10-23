@@ -81,11 +81,20 @@
     <div class="setup-subheader">Mission lock</div>
     <div class="setup-grid">
       <label class="setup-field">
-        <span class="setup-field__label">mission timeout <span class="muted">(minutes)</span></span>
+        <span class="setup-field__label">stall timeout <span class="muted">(minutes)</span></span>
+        <input class="form-control" type="number" min="0"
+               [value]="missionStallMinutes()" (input)="missionStallMinutes.set(+$any($event.target).value)">
+        <span class="setup-field__hint muted">
+          Stall timeout (minutes without activity before abort); any event keeps the child alive. 0 disables it.
+        </span>
+      </label>
+
+      <label class="setup-field">
+        <span class="setup-field__label">hard ceiling <span class="muted">(minutes, optional)</span></span>
         <input class="form-control" type="number" min="0"
                [value]="missionTimeoutMinutes()" (input)="missionTimeoutMinutes.set(+$any($event.target).value)">
         <span class="setup-field__hint muted">
-          0 keeps the legacy abandon (never time out); otherwise the child is aborted at this budget.
+          Optional wall-clock cap on the child; 0 = off. The stall watchdog and this ceiling cannot both be off.
         </span>
       </label>
 

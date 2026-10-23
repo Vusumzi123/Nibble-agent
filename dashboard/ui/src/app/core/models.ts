@@ -31,6 +31,7 @@ export interface HeartbeatConfig {
   log_compress_level: number;
   log_rotate_by: string;
   /** Mission lock / timeout / resume dials (plan §4.1). */
+  mission_stall_minutes: number;
   mission_timeout_minutes: number;
   mission_lock_stale_ms: number;
   mission_lock_refresh_ms: number;

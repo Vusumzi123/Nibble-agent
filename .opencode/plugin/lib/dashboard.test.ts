@@ -310,6 +310,7 @@ test("writeConfig: top-level heartbeat section is writable, validated, hot-read"
 test("writeConfig: mission-lock dials are writable; stale must exceed refresh", async () => {
   const dir = await project()
   const res = await writeConfig(dir, "heartbeat", {
+    mission_stall_minutes: 4,
     mission_timeout_minutes: 20,
     mission_lock_refresh_ms: 30_000,
     mission_lock_stale_ms: 600_000,
@@ -317,6 +318,7 @@ test("writeConfig: mission-lock dials are writable; stale must exceed refresh", 
     mission_max_resumes: 2,
   })
   assert.deepEqual(res.applied, {
+    mission_stall_minutes: 4,
     mission_timeout_minutes: 20,
     mission_lock_refresh_ms: 30_000,
     mission_lock_stale_ms: 600_000,
@@ -324,6 +326,7 @@ test("writeConfig: mission-lock dials are writable; stale must exceed refresh", 
     mission_max_resumes: 2,
   })
   const cfg = await configSnapshot(dir)
+  assert.equal(cfg.heartbeat.mission_stall_minutes, 4)
   assert.equal(cfg.heartbeat.mission_timeout_minutes, 20)
   assert.equal(cfg.heartbeat.mission_lock_refresh_ms, 30_000)
   assert.equal(cfg.heartbeat.mission_lock_stale_ms, 600_000)
@@ -343,9 +346,30 @@ test("writeConfig: mission-lock dials are writable; stale must exceed refresh", 
     () => writeConfig(dir, "heartbeat", { mission_timeout_minutes: -1 }),
     (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
   )
+  await assert.rejects(
+    () => writeConfig(dir, "heartbeat", { mission_stall_minutes: -1 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+
+  // a non-int stall is refused; the file is untouched.
+  const beforeStall = await readConfig(dir)
+  await assert.rejects(
+    () => writeConfig(dir, "heartbeat", { mission_stall_minutes: 1.5 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+  assert.equal(await readConfig(dir), beforeStall)
+
+  // stall and the hard ceiling cannot both be off (a flat stall with no ceiling).
+  const beforeFlat = await readConfig(dir)
+  await assert.rejects(
+    () => writeConfig(dir, "heartbeat", { mission_stall_minutes: 0, mission_timeout_minutes: 0 }),
+    (err: DashboardError) => err.status === 400 && err.code === "invalid_value",
+  )
+  assert.equal(await readConfig(dir), beforeFlat)
 
   // absent keys fall back to the reader's defaults.
   const snap = await configSnapshot(await project())
+  assert.equal(snap.heartbeat.mission_stall_minutes, 10)
   assert.equal(snap.heartbeat.mission_timeout_minutes, 0)
   assert.equal(snap.heartbeat.mission_lock_refresh_ms, 60_000)
   assert.equal(snap.heartbeat.mission_lock_stale_ms, 1_800_000)
