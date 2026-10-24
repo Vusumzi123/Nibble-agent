@@ -1194,7 +1194,7 @@ test("effectiveFrequencyMs: B7 stretches the day cadence ×2/×4; off stays off"
 
 // Live status marker (card 16 §9.2): round-trips through
 // state/heartbeat.current.json; a missing/corrupt file reads as null so the
-// dashboard renders idle instead of throwing.
+// UI renders idle instead of throwing.
 test("heartbeat.current marker: write/read round-trip; missing/corrupt → null", async () => {
   const dir = await mkdtemp(join(tmpdir(), "hb-current-"))
   const file = join(dir, HEARTBEAT_CURRENT_FILE)

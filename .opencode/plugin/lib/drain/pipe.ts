@@ -61,7 +61,7 @@ export type DrainPipeResult = {
   skipped: number
   cursorBefore: number
   cursorAfter: number
-  /** Writer child session (the dashboard's output/thoughts transcript). */
+  /** Writer child session (the UI's output/thoughts transcript). */
   session?: string | null
   /** Billable tokens (summarizer + writer) spent by the run. */
   tokens?: number | null

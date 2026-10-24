@@ -6,16 +6,13 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
-  AUTH_MODES,
   DEFAULT_AUTONOMY,
   DEFAULT_COMMS,
-  DEFAULT_DASHBOARD,
   DEFAULT_MOOD,
   clearRejectWarnCache,
   parseMissionOverlay,
   readAutonomyConfig,
   readCommsConfig,
-  readDashboardConfig,
   readMissionOverlay,
   readMoodConfig,
 } from "./autonomy.ts"
@@ -104,7 +101,7 @@ test("readAutonomyConfig defaults batch and class_overrides; rejects invalid bat
   assert.deepEqual(cfg.class_overrides, ["tool:my_*:vault-write"])
 })
 
-test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks", async () => {
+test("readMoodConfig / readCommsConfig parse their blocks", async () => {
   const dir = await configDir([
     "mood:",
     "  dispatch_influence: false",
@@ -120,15 +117,7 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
     "    enabled: true",
     "    account: someone",
     "    reply_window_hours: 12",
-    "dashboard:",
-    "  bind_address: 127.0.0.2",
-    "  port: 4099",
-    "  serve_port: 4199",
-    "  serve_url: http://127.0.0.1:4095",
-    "  auth:",
-    "    mode: login+2fa",
-    "    require_tls: true",
-  ].join("\n").split("\n"))
+  ])
   const noReject = { onReject: () => assert.fail("unexpected reject") }
   const mood = await readMoodConfig(dir, noReject)
   assert.deepEqual(mood, { dispatch_influence: false, decay_half_life: "12h" })
@@ -138,14 +127,6 @@ test("readMoodConfig / readCommsConfig / readDashboardConfig parse their blocks"
     session_ttl: "48h",
     telegram: { enabled: false, bot_token_file: "~/keys/tok", chat_id_file: "~/keys/chat" },
     email: { enabled: true, account: "someone", reply_window_hours: 12 },
-  })
-  const dash = await readDashboardConfig(dir, noReject)
-  assert.deepEqual(dash, {
-    bind_address: "127.0.0.2",
-    port: 4099,
-    serve_port: 4199,
-    serve_url: "http://127.0.0.1:4095",
-    auth: { mode: "login+2fa", require_tls: true },
   })
 })
 
@@ -192,10 +173,6 @@ test("invalid enum/list/duration values fall back per section", async () => {
     "    reply_window_hours: -1",
     "mood:",
     "  dispatch_influence: sometimes",
-    "dashboard:",
-    "  auth:",
-    "    mode: root",
-    "    require_tls: definitely",
   ])
   const events: string[] = []
   const noRejectPath = (e: { path: string }) => events.push(e.path)
@@ -205,10 +182,7 @@ test("invalid enum/list/duration values fall back per section", async () => {
   assert.equal(comms.email.reply_window_hours, DEFAULT_COMMS.email.reply_window_hours)
   const mood = await readMoodConfig(dir, { onReject: noRejectPath })
   assert.equal(mood.dispatch_influence, DEFAULT_MOOD.dispatch_influence)
-  const dash = await readDashboardConfig(dir, { onReject: noRejectPath })
-  assert.equal(dash.auth.mode, DEFAULT_DASHBOARD.auth.mode)
-  assert.equal(dash.auth.require_tls, DEFAULT_DASHBOARD.auth.require_tls)
-  assert.deepEqual(events.sort(), ["auth.mode", "auth.require_tls", "default_channel", "dispatch_influence", "email.reply_window_hours", "session_ttl"])
+  assert.deepEqual(events.sort(), ["default_channel", "dispatch_influence", "email.reply_window_hours", "session_ttl"])
 })
 
 test("missing config dir yields the defaults with no rejects", async () => {
@@ -217,7 +191,6 @@ test("missing config dir yields the defaults with no rejects", async () => {
   assert.deepEqual(await readAutonomyConfig(dir, noReject), DEFAULT_AUTONOMY)
   assert.deepEqual(await readMoodConfig(dir, noReject), DEFAULT_MOOD)
   assert.deepEqual(await readCommsConfig(dir, noReject), DEFAULT_COMMS)
-  assert.deepEqual(await readDashboardConfig(dir, noReject), DEFAULT_DASHBOARD)
 })
 
 // ---------------------------------------------------------------------------
@@ -283,10 +256,6 @@ test("readAutonomyConfig overlays the real sysop-config.yaml on defaults", async
 
     const comms = await readCommsConfig(PROJECT_ROOT, { onReject: (e) => events.push(e.path) })
     assert.ok(typeof comms.default_channel === "string" && comms.default_channel.length > 0)
-
-    const dash = await readDashboardConfig(PROJECT_ROOT, { onReject: (e) => events.push(e.path) })
-    assert.equal(dash.bind_address, "127.0.0.1")
-    assert.ok([...AUTH_MODES].includes(dash.auth.mode))
   }
   assert.deepEqual(events, [])
 })
@@ -294,9 +263,7 @@ test("readAutonomyConfig overlays the real sysop-config.yaml on defaults", async
 test("defaults match the plan §11 / §17.11 tables", () => {
   assert.equal(DEFAULT_AUTONOMY.level, 1) // safe code default; live config ships 3
   assert.deepEqual(DEFAULT_AUTONOMY.quiet.window, "23:00-08:00")
-  assert.deepEqual([...AUTH_MODES], ["off", "login", "login+2fa"]) // §10
   assert.equal(DEFAULT_MOOD.decay_half_life, "6h")
-  assert.equal(DEFAULT_DASHBOARD.bind_address, "127.0.0.1")
 })
 
 test("hot-read: a config edit is visible on the next call, no restart", async () => {

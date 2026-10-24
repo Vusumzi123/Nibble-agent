@@ -1,5 +1,5 @@
 // Autonomy-harness config plumbing (docs/autonomy-harness-plan.md §11 — kanban
-// card 1). Types, defaults, validation, and hot readers for the four harness
+// card 1). Types, defaults, validation, and hot readers for the harness
 // sections of sysop-config.yaml:
 //
 //   autonomy:  capability dial + heartbeat/chatter/quiet sub-blocks (§4, §16, §17)
@@ -8,7 +8,6 @@
 //              lib/missions.ts)
 //   mood:      feeling-system dials (§15)
 //   comms:     channel selection for notifications/approvals (§7, §16.4)
-//   dashboard: local web UI bind + auth mode (§9)
 //
 // Contract:
 //   - Hot-read: every reader re-reads sysop-config.yaml per call — flipping a
@@ -20,8 +19,7 @@
 //     lib/logfile.ts + lib/logging.ts) — unless the caller passes its own
 //     `onReject` (tests do).
 //   - Nothing consumes these sections yet: autonomy-gate.ts (card 2), lib/
-//     mood.ts (card 5), the dashboard backend (card 8), and the comms bridges
-//     (card 10) are the future readers.
+//     mood.ts (card 5), and the comms bridges (card 10) are the future readers.
 //
 // Loaded via relative import only. The plugin auto-discovery glob
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
@@ -143,21 +141,6 @@ export type CommsConfig = {
   }
 }
 
-export type DashboardConfig = {
-  bind_address: string
-  /** Backend listen port; 0 = auto (kernel-assigned). */
-  port: number
-  /** opencode TUI listen port; 0 = auto. A pinned busy port falls back. */
-  serve_port: number
-  /** Explicit proxy target for `opencode serve`; "" = live pointer/discovery. */
-  serve_url: string
-  auth: {
-    /** `off` | `login` | `login+2fa` (§10). */
-    mode: string
-    require_tls: boolean
-  }
-}
-
 export const DEFAULT_AUTONOMY: AutonomyConfig = {
   level: 1,
   gate_mode: "gate",
@@ -200,18 +183,9 @@ export const DEFAULT_COMMS: CommsConfig = {
   email: { enabled: false, account: "", reply_window_hours: 48 },
 }
 
-export const DEFAULT_DASHBOARD: DashboardConfig = {
-  bind_address: "127.0.0.1",
-  port: 0,
-  serve_port: 0,
-  serve_url: "",
-  auth: { mode: "off", require_tls: false },
-}
-
 // Night menu (plan §5 of the missions plan): per-mission `menus:` frontmatter
 // is the single source; the old `quiet.dream_missions` dial was removed with
 // the mission loader (heartbeat-missions-plan D-M4).
-export const AUTH_MODES = ["off", "login", "login+2fa"] as const
 export const COMMS_CHANNELS = ["telegram", "email"] as const
 export const GATE_MODES = ["shadow", "gate"] as const
 export const GATE_SCOPES = ["main", "all"] as const
@@ -250,11 +224,6 @@ function commsDefaults(): NestedDefaults {
     scalars: { default_channel, session_ttl },
     blocks: { telegram, email },
   }
-}
-
-function dashboardDefaults(): NestedDefaults {
-  const { bind_address, port, serve_port, serve_url, auth } = DEFAULT_DASHBOARD
-  return { scalars: { bind_address, port, serve_port, serve_url }, blocks: { auth } }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,20 +427,6 @@ const COMMS_BLOCK_RULES: Record<string, Record<string, Rule>> = {
   },
 }
 
-const DASHBOARD_SCALAR_RULES: Record<string, Rule> = {
-  bind_address: { t: "string" },
-  port: { t: "int", min: 0, max: 65535 },
-  serve_port: { t: "int", min: 0, max: 65535 },
-  serve_url: { t: "string" },
-}
-
-const DASHBOARD_BLOCK_RULES: Record<string, Record<string, Rule>> = {
-  auth: {
-    mode: { t: "enum", values: AUTH_MODES },
-    require_tls: { t: "bool" },
-  },
-}
-
 const AUTONOMY_OPTS: NestedSectionOptions = {
   scalarKeys: keysOf(AUTONOMY_SCALAR_RULES),
   blockKeys: blocksOf(AUTONOMY_BLOCK_RULES),
@@ -494,19 +449,11 @@ const COMMS_OPTS: NestedSectionOptions = {
   coerce: makeCoerce(COMMS_SCALAR_RULES, COMMS_BLOCK_RULES),
 }
 
-const DASHBOARD_OPTS: NestedSectionOptions = {
-  scalarKeys: keysOf(DASHBOARD_SCALAR_RULES),
-  blockKeys: blocksOf(DASHBOARD_BLOCK_RULES),
-  coerce: makeCoerce(DASHBOARD_SCALAR_RULES, DASHBOARD_BLOCK_RULES),
-}
-
 // Top-level `heartbeat:` block — the in-process scheduler + per-tick ledger
-// (lib/heartbeat.ts DEFAULT_HEARTBEAT_CONFIG). Flat scalars only. Included so
-// the dashboard settings page can flip the scheduler kill switch
-// (`enabled`) and tune its dials through the same schema-validated write path
-// (card 9 → backend card 8); the value types mirror the runtime reader's
-// value-typed coercion (`enabled` bool, `long_silence_factor` int, `log*`
-// scalars) so a written value reads back identically.
+// (lib/heartbeat.ts DEFAULT_HEARTBEAT_CONFIG). Flat scalars only; the value
+// types mirror the runtime reader's value-typed coercion (`enabled` bool,
+// `long_silence_factor` int, `log*` scalars) so a written value reads back
+// identically.
 const HEARTBEAT_SCALAR_RULES: Record<string, Rule> = {
   enabled: { t: "bool" },
   long_silence_factor: { t: "int", min: 0 },
@@ -533,9 +480,8 @@ const HEARTBEAT_OPTS: NestedSectionOptions = {
 
 // Top-level `drain:` block — the demand-driven consumer (lib/drain/config.ts
 // DEFAULT_DRAIN). Flat scalars plus the `exclude_missions` inline list. The
-// dashboard Setup page writes `trigger_pending` / `trigger_max_age_hours`
-// through the same schema-validated path the hot reader uses, so a written
-// value reads back identically (the consumer re-reads config every wake).
+// hot reader re-reads config on every pass, so a written value reads back
+// identically.
 const DRAIN_SCALAR_RULES: Record<string, Rule> = {
   enabled: { t: "bool" },
   consumer: { t: "bool" },
@@ -573,36 +519,6 @@ const DRAIN_OPTS: NestedSectionOptions = {
   coerce: makeCoerce(DRAIN_SCALAR_RULES, {}),
 }
 
-// ---------------------------------------------------------------------------
-// Section specs for the dashboard backend (card 8, plan §9.2)
-//
-// The backend round-trip-validates a candidate sysop-config.yaml text through
-// the exact same parse options the hot readers use — one schema, no copy.
-export const NESTED_WRITABLE_SECTIONS = ["autonomy", "mood", "comms", "dashboard", "heartbeat", "drain"] as const
-export type NestedWritableSection = (typeof NESTED_WRITABLE_SECTIONS)[number]
-
-export function isNestedWritableSection(section: string): section is NestedWritableSection {
-  return (NESTED_WRITABLE_SECTIONS as readonly string[]).includes(section)
-}
-
-export function nestedSectionOpts(section: string): NestedSectionOptions | null {
-  switch (section) {
-    case "autonomy":
-      return AUTONOMY_OPTS
-    case "mood":
-      return MOOD_OPTS
-    case "comms":
-      return COMMS_OPTS
-    case "dashboard":
-      return DASHBOARD_OPTS
-    case "heartbeat":
-      return HEARTBEAT_OPTS
-    case "drain":
-      return DRAIN_OPTS
-    default:
-      return null
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Reject reporting — fallback + warning (once per process per path)
@@ -703,15 +619,6 @@ export async function readCommsConfig(directory: string, opts: ReadAutonomyOpts 
   const parsed = await readNestedSection(directory, "comms", commsDefaults(), COMMS_OPTS)
   await reportRejects(directory, "comms", parsed.rejects, opts.onReject)
   return typed(DEFAULT_COMMS, parsed.scalars, parsed.blocks)
-}
-
-export async function readDashboardConfig(
-  directory: string,
-  opts: ReadAutonomyOpts = {},
-): Promise<DashboardConfig> {
-  const parsed = await readNestedSection(directory, "dashboard", dashboardDefaults(), DASHBOARD_OPTS)
-  await reportRejects(directory, "dashboard", parsed.rejects, opts.onReject)
-  return typed(DEFAULT_DASHBOARD, parsed.scalars, parsed.blocks)
 }
 
 // ---------------------------------------------------------------------------

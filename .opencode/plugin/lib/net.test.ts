@@ -32,24 +32,24 @@ test("free-port: a busy preferred port falls back and says so", async () => {
   }
 })
 
-test("config: reads a dashboard scalar without a YAML dependency", async () => {
+test("config: reads a flat scalar without a YAML dependency", async () => {
   const dir = await mkdtemp(join(tmpdir(), "net-cfg-"))
   await mkdir(join(dir, ".opencode"), { recursive: true })
   await writeFile(
     join(dir, ".opencode", "sysop-config.yaml"),
     [
-      "dashboard:",
-      "  port: 0                      # auto",
-      '  serve_port: "43123"',
-      "  serve_url: ''",
+      "heartbeat:",
+      "  enabled: true                 # kill switch",
+      '  long_silence_factor: "43123"',
+      "  log: ''",
       "autonomy:",
       "  level: 3",
     ].join("\n"),
     "utf8",
   )
-  assert.equal(await configScalar(dir, "dashboard", "port"), "0")
-  assert.equal(await configScalar(dir, "dashboard", "serve_port"), "43123")
-  assert.equal(await configScalar(dir, "dashboard", "serve_url"), "")
+  assert.equal(await configScalar(dir, "heartbeat", "enabled"), "true")
+  assert.equal(await configScalar(dir, "heartbeat", "long_silence_factor"), "43123")
+  assert.equal(await configScalar(dir, "heartbeat", "log"), "")
   assert.equal(await configScalar(dir, "autonomy", "level"), "3")
-  assert.equal(await configScalar(dir, "dashboard", "missing"), "")
+  assert.equal(await configScalar(dir, "heartbeat", "missing"), "")
 })

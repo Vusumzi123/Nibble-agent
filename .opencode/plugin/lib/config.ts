@@ -10,7 +10,7 @@
 // value-inferred scalars) are preserved byte-for-byte.
 //
 // The bottom half adds `parseNestedSection` / `readNestedSection` for the
-// autonomy-harness sections (autonomy:, mood:, comms:, dashboard:) — flat
+// autonomy-harness sections (autonomy:, mood:, comms:) — flat
 // scalars plus one level of sub-blocks, inline/block lists, and reject
 // reporting so invalid values can warn before falling back to defaults.
 // `skipBlocks` silences a known block whose subtree is parsed elsewhere
@@ -203,7 +203,7 @@ export function parseFlatBlock(
 // ---------------------------------------------------------------------------
 // Nested-section parsing (autonomy harness config — plan §11)
 //
-// The harness sections (`autonomy:`, `mood:`, `comms:`, `dashboard:`) mix flat
+// The harness sections (`autonomy:`, `mood:`, `comms:`) mix flat
 // scalars with one level of sub-blocks (`autonomy.quiet.window`), inline lists
 // (`root_classes: []`, mission-overlay `menus: [day]`), and int-or-string
 // unions (`mission_token_budget: 32000 | unlimited`) — shapes `parseFlatBlock`

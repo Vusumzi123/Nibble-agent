@@ -356,7 +356,7 @@ export type LoadMissionsOpts = {
 }
 
 /** A loaded mission plus whether its *own file* enabled it, before the
- *  restrict-only overlay is applied. The dashboard missions widget needs the
+ *  restrict-only overlay is applied. A missions UI needs the
  *  distinction: an overlay may disable a mission but never re-enable one the
  *  file disables (D-M5), so a toggle-on must know the file value. */
 export type MissionState = Mission & { file_enabled: boolean }
@@ -434,7 +434,7 @@ export async function loadMissions(
 }
 
 /** As `loadMissions`, but keeps each mission's file-level `enabled` flag
- *  alongside the effective value — for the dashboard missions widget. */
+ *  alongside the effective value — for a missions UI. */
 export async function loadMissionStates(
   directory: string,
   opts: LoadMissionsOpts = {},

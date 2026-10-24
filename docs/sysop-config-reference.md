@@ -38,7 +38,6 @@ config warn-once behaviour).
 | `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
-| `dashboard:` | `lib/autonomy.ts` (config plumbing only) |
 
 Sections a reader does not know about are ignored by it.
 
@@ -626,18 +625,3 @@ Notification/approval channels (§7).
 | `email.enabled` | M5 not ported yet; card 10 turns this on. |
 | `email.account` | himalaya account name. |
 | `email.reply_window_hours` | how long a reply is awaited. |
-
----
-
-## `dashboard:`
-
-Local web UI (§9), read by cards 8/11.
-
-| Key | Meaning |
-| --- | ------- |
-| `bind_address` | loopback only. |
-| `port` | Backend listen port (default `0` = auto, kernel-assigned). A pinned port is used when free; when busy the launcher falls back to a free port and logs it. No config rewrite. |
-| `serve_port` | opencode TUI listen port passed as `--port` (default `0` = auto). Same pinned-busy fallback as `port`. `scripts/run.sh --serve-port N` overrides. |
-| `serve_url` | Explicit `opencode` proxy target for the transcript stream. Default `""` = automatic: `state/serve-url` (published by the hook/launcher), verified per request, then a process discovered in this project directory. A non-empty value must be loopback and wins over the automatic target (`OPENCODE_SERVE_URL` also overrides); a dead pinned target shows as `502 serve_unreachable`, while no automatic target shows `503 serve_unavailable`. |
-| `auth.mode` | `off` \| `login` \| `login+2fa` (§10). |
-| `auth.require_tls` | TLS requirement for the dashboard. |

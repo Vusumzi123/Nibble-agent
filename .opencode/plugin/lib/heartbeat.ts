@@ -878,15 +878,15 @@ export function computeWakeDelayMs(input: WakeInput): number {
 // ---------------------------------------------------------------------------
 // Live status marker (kanban card 16, plan §12 / §9): `.opencode/state/
 // heartbeat.current.json`. The heartbeat-hook writes it on every phase
-// transition so the dashboard can render idle | in-flight and the in-flight
-// mission without reading in-process state. Single writer = heartbeat-hook;
-// the dashboard is a read-only consumer. Best-effort: a marker write failure
+// transition so a UI can render idle | in-flight and the in-flight mission
+// without reading in-process state. Single writer = heartbeat-hook; any UI is
+// a read-only consumer. Best-effort: a marker write failure
 // must never fail a tick (mirrors the lock's `.catch(() => {})` discipline).
 
 export const HEARTBEAT_CURRENT_FILE = "heartbeat.current.json"
 
-/** Scheduler state (last tick + B7 noop backoff), shared with the dashboard
- *  so its next-tick projection uses exactly the hook's cadence math. */
+/** Scheduler state (last tick + B7 noop backoff), shared with any UI so its
+ *  next-tick projection uses exactly the hook's cadence math. */
 export const HEARTBEAT_STATE_FILE = "heartbeat.json"
 
 export type HeartbeatCurrent = {

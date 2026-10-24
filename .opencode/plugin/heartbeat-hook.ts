@@ -194,7 +194,7 @@ export default (async ({ client, directory, ...rest }) => {
   // stealable after the TTL, so a hung instance cannot stall the project.
   const ownershipPath = ownershipFile(stateDir)
   const workQueueFile = join(stateDir, WORK_QUEUE_FILE)
-  // Live status marker for the dashboard (§9.2, card 16): written on every
+  // Live status marker for the UI (§9.2, card 16): written on every
   // phase transition so `idle | in-flight` + the in-flight mission are
   // observable without reading in-process state. Best-effort, single writer.
   const currentFile = join(stateDir, HEARTBEAT_CURRENT_FILE)
@@ -916,7 +916,7 @@ export default (async ({ client, directory, ...rest }) => {
     let phase: HeartbeatPhase = "pre-gate"
     let ledgerForTick: ((extra: Record<string, unknown>) => Promise<void>) | null = null
     // Child/writer session that produced this tick, persisted in the ledger
-    // so the dashboard can open its transcript from a Recent-ticks row.
+    // so the UI can open its transcript from a Recent-ticks row.
     let sessionId: string | null = null
     try {
       // 1-2. Hot-read the kill switch and the dial. A malformed frequency
@@ -1029,7 +1029,7 @@ export default (async ({ client, directory, ...rest }) => {
             ...extra,
             ...(drainHealthCache ? { drain: drainHealthCache } : {}),
             mood_event: moodEvent,
-            // Exec time for the dashboard's metrics widget (card 16): ms from
+            // Exec time for the UI's metrics widget (card 16): ms from
             // tick start to this ledger write.
             duration_ms: Date.now() - nowMs,
           })
@@ -1710,7 +1710,7 @@ export default (async ({ client, directory, ...rest }) => {
       // The ownership lease is the only release left (Phase 1).
       if (ownership) await ownership.release().catch(() => {})
       // Close the live marker: idle once the tick ends (success, error, or a
-      // lock-held skip) — the dashboard never shows a stale in-flight state.
+      // lock-held skip) — the UI never shows a stale in-flight state.
       await setCurrent({
         state: "idle",
         phase: null,

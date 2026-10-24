@@ -10,7 +10,7 @@
 //   (a SIGKILLed process leaves a fresh record). An ALIVE holder is never
 //   stolen from, however old its heartbeat — it may be hung, not gone.
 //   `pid_start` (Linux `/proc/<pid>/stat` field 22) guards against PID reuse.
-// - `isFileLockStale` remains the display heuristic (dashboard "lock_stale");
+// - `isFileLockStale` remains the display heuristic (UI "lock_stale");
 //   acquisition uses holder liveness, not age.
 // - Acquire is TRY-ONLY: callers never wait on the lock. A held lock is data
 //   for the caller (skip the work).

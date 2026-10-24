@@ -319,11 +319,3 @@ comms:                         # notification/approval channels (§7) — card 1
     account: your-account      # himalaya account name
     reply_window_hours: 48
 
-dashboard:                     # local web UI (§9) — cards 8/11 read this
-  bind_address: 127.0.0.1      # loopback only
-  port: 0                      # backend listen port; 0 = auto (busy pin falls back)
-  serve_port: 0                # opencode TUI listen port; 0 = auto
-  serve_url: ""                # explicit proxy target; "" = live pointer/discovery
-  auth:
-    mode: off                  # off | login | login+2fa (§10)
-    require_tls: false

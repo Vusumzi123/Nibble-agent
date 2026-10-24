@@ -42,11 +42,11 @@ Defaults when a key is missing or invalid (`lib/missions.ts`
 | Key | Values | Default | Notes |
 | --- | --- | --- | --- |
 | `id` | `[A-Za-z_][A-Za-z0-9_-]*` | filename stem | Lowercase by convention: JEV ids are lowercased before matching. A duplicate id makes the later file (sorted by filename) be skipped. |
-| `title` | string | `id` | Shown in the JEV digest and dashboard. |
+| `title` | string | `id` | Shown in the JEV digest and UI. |
 | `frequency` | `high` / `mid` / `low` | `mid` | A dispatch **weight**, never a gate: 1.0 / 0.5 / 0.2, multiplied by mood bias. |
 | `menus` | inline list of `day` / `night` / `both` | `[day]` | `both` expands to `[day, night]`. The live window is chosen from the quiet flag. |
 | `min_level` | integer 0–4 | `2` | Lowest `autonomy.level` that may run it. |
-| `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the dashboard. It does **not** enforce anything; the autonomy matrix and JEV gate execution. |
+| `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the UI. It does **not** enforce anything; the autonomy matrix and JEV gate execution. |
 | `candidacy` | see below | `digest` | Deterministic eligibility gate, evaluated before JEV. |
 | `lane` | `primary` / `side` | `primary` | Dispatch lane (docs/heartbeat-lanes.md). `primary` = JEV-picked, one per tick. `side` = status-fed queue: strict FIFO, one side item per tick, runs alongside the primary in the same tick, never offered to the JEV. Side missions should use a status candidacy (`turns-pending`, `brain-stale[:hours]`). |
 | `agent` | opencode agent name | `""` | `""` = the default heartbeat agent. A name pins the child session to that agent (and its permissions). |
@@ -206,8 +206,7 @@ autonomy:
 ```
 
 Widening attempts are rejected, logged once, and the file value stands. The
-dashboard mission toggle writes `enabled: false` into this overlay; it cannot
-re-enable a file-disabled mission.
+overlay may write `enabled: false`; it cannot re-enable a file-disabled mission.
 
 ## Verify
 

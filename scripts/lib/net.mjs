@@ -56,8 +56,8 @@ export async function resolvePort(preferred = 0, host = "127.0.0.1") {
 }
 
 // --- block-scoped YAML scalar reader ---------------------------------------
-// The sysop config is line-oriented YAML with two-space nesting; this mirrors
-// scripts/dashboard-ctl.sh's config_scalar (no YAML dependency).
+// The sysop config is line-oriented YAML with two-space nesting; this reads a
+// single scalar without a YAML dependency.
 export async function configScalar(directory, block, key, text) {
   const raw =
     text ??

@@ -15,8 +15,8 @@ replay"). Work piles up in the queues; ticks never pile up.
 > **Drain left the queues** (docs/drain-consumer-plan.md): since
 > `drain.consumer: true` (the default), consolidation runs on its own
 > demand-driven loop — the `turns-pending` producer stops collecting, the
-> side lane carries **staleness only**, and drain work appears in the
-> dashboard as `lane: "drain"` runs from `drain.log`. Setting
+> side lane carries **staleness only**, and drain work appears as
+> `lane: "drain"` runs in `drain.log`. Setting
 > `drain.consumer: false` restores the pre-consumer behaviour described below
 > (the rollback path, one release of dual support). See
 > [docs/drain-consumer.md](drain-consumer.md).
