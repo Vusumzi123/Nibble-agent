@@ -14,7 +14,6 @@ test("parseDrainConfig overlays known keys", () => {
       "  max_items_per_batch: 5",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
-      "  summarize_format: json_object",
       "  poison_attempts: 0",
       "  exclude_missions: [drain, staleness]",
       "  consumer: false",
@@ -37,7 +36,6 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.max_items_per_batch, 5)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
-  assert.equal(parsed.summarize_format, "json_object")
   assert.equal(parsed.poison_attempts, 0)
   assert.deepEqual(parsed.exclude_missions, ["drain", "staleness"])
   assert.equal(parsed.consumer, false)
@@ -65,20 +63,6 @@ test("exclude_missions accepts inline lists and empty means none", () => {
     parseDrainConfig("drain:\n  exclude_missions: [drain,").exclude_missions,
     undefined,
     "a malformed list is dropped so the default applies",
-  )
-})
-
-test("summarize_format accepts the three modes and drops garbage", () => {
-  for (const mode of ["json_schema", "json_object", "off"]) {
-    assert.equal(
-      parseDrainConfig(`drain:\n  summarize_format: ${mode}`).summarize_format,
-      mode,
-    )
-  }
-  assert.equal(
-    parseDrainConfig("drain:\n  summarize_format: nope").summarize_format,
-    undefined,
-    "an unknown mode is dropped so the default applies",
   )
 })
 
@@ -149,7 +133,6 @@ test("invalid values fall back and models may be empty", async () => {
       '  cursor_file: ""',
       '  writer_model: ""',
       '  summarize_model: ""',
-      "  summarize_format: garbage",
     ].join("\n"),
     "utf8",
   )
@@ -164,5 +147,4 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.cursor_file, DEFAULT_DRAIN.cursor_file)
   assert.equal(cfg.writer_model, "")
   assert.equal(cfg.summarize_model, "")
-  assert.equal(cfg.summarize_format, DEFAULT_DRAIN.summarize_format)
 })

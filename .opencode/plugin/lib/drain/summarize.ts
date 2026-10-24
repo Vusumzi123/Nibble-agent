@@ -1,10 +1,12 @@
 // Session summarizer for the drain pipe (knowledge-pipeline-redesign §A.6).
 //
-// Spawns the tool-free `session-summarizer` agent, parses its strict-JSON
-// reply, and normalizes the items (unique titles, lowercased tags, capped
-// count, stable content hashes). Any parse/spawn/timeout failure degrades to a
-// deterministic per-turn fallback built from extractKeywords + atoms — the
-// pipe never throws and never loses a turn.
+// Spawns the tool-free `session-summarizer` agent, parses its plain-text
+// `=== ITEM ===` blocks deterministically, and normalizes the items (unique
+// titles, lowercased tags, capped count, stable content hashes). The model
+// never writes JSON, so there is no schema, repair, or truncation handling.
+// Any parse/spawn/timeout failure degrades to a deterministic per-turn
+// fallback built from extractKeywords + atoms — the pipe never throws and
+// never loses a turn.
 //
 // Loaded via relative import only.
 import { textOf } from "../sessions.ts"
@@ -22,36 +24,6 @@ export type SummaryItem = {
 
 export type SummarizeDegraded = "summarizer-fallback"
 
-/** Structured-output mode requested for the child prompt (§3.1). */
-export type SummarizeFormat = "json_schema" | "json_object" | "off"
-
-/**
- * The item contract as a JSON schema: the same shape `parseSummaryReply`
- * accepts. `minItems` is deliberately absent so `{"items":[]}` stays a clean
- * no-op rather than a schema violation.
- */
-export const SUMMARY_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["items"],
-  properties: {
-    items: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["title", "summary", "tags", "atoms"],
-        properties: {
-          title: { type: "string" },
-          summary: { type: "string" },
-          tags: { type: "array", items: { type: "string" } },
-          atoms: { type: "array", items: { type: "string" } },
-        },
-      },
-    },
-  },
-} as const
-
 export type SummarizeResult = {
   items: SummaryItem[]
   degraded?: SummarizeDegraded
@@ -60,16 +32,8 @@ export type SummarizeResult = {
   promptBytes: number
   wallMs: number
   tokens?: number | null
-  /** Structured-output mode that was requested (§3.5). */
-  format: SummarizeFormat
   /** Reply size in bytes before parsing. */
   replyBytes: number
-  /** `true` when the reply parsed without repair. */
-  closed: boolean
-  /** `true` when the repair backstop salvaged the reply. */
-  repaired: boolean
-  /** The provider rejected `format`; the prompt was re-sent without it. */
-  formatFallback?: boolean
 }
 
 export type SummarizerClient = {
@@ -86,8 +50,6 @@ export type SummarizeDeps = {
   directory: string
   /** Model from `drain.summarize_model`; "" = the agent default. */
   model?: string
-  /** Structured-output mode from `drain.summarize_format`; default json_schema. */
-  format?: SummarizeFormat
   maxItems: number
   /** Bounded wait for the child to go idle; false = timeout. */
   waitForIdle: (sessionID: string) => Promise<boolean>
@@ -102,18 +64,29 @@ export type SummarizeInput = {
 }
 
 /** The exact input contract from the design doc. */
-export function buildSummarizerPrompt(priorSummary: string | null | undefined, delta: string): string {
+export function buildSummarizerPrompt(
+  priorSummary: string | null | undefined,
+  delta: string,
+): string {
   const prior = priorSummary?.trim() || "none"
   return `Summarize this session delta into durable knowledge items.
-Return STRICT JSON, nothing else:
-{"items":[{"title":"","summary":"","tags":[""],"atoms":[""]}]}
+Reply with plain-text blocks, nothing else. Use exactly this shape per item:
+
+=== ITEM ===
+TITLE: <one line>
+TAGS: <comma-separated tags>
+SUMMARY: <1-3 sentences>
+ATOMS:
+- <command, path, URL, KEY=value or flag, verbatim>
 
 Rules:
 - one item per distinct durable topic (1..N), "one thought per note";
-- preserve every command, path, URL, KEY=value and flag verbatim in atoms;
+- repeat the block for every item; no JSON and no prose outside the blocks;
+- preserve every command, path, URL, KEY=value and flag verbatim in ATOMS;
 - tags are lowercase-hierarchical;
-- skip chatter, questions with no answer, and transient status.
-- prior summary (if any) is context only; do not repeat it verbatim.
+- skip chatter, questions with no answer, and transient status;
+- prior summary (if any) is context only; do not repeat it verbatim;
+- if nothing durable happened, reply with exactly: NO_ITEMS
 
 ## Prior summary
 ${prior}
@@ -144,105 +117,97 @@ function uniqueTitle(title: string, used: Set<string>): string {
   return candidate
 }
 
-function parseRawItems(text: string): RawItem[] | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return null
-  }
+const TEXT_ITEM_MARKER = /^=+\s*ITEM\s*=+$/i
 
-  const items = (parsed as { items?: unknown } | null)?.items
-  if (!Array.isArray(items)) return null
-  return items.filter((item): item is RawItem => !!item && typeof item === "object")
+/** Strip a single wrapping markdown fence from a plain-text reply. */
+function stripTextEnvelope(reply: string): string {
+  const text = reply.trim()
+  if (!text.startsWith("```")) return text
+  const firstNewline = text.indexOf("\n")
+  if (firstNewline === -1) return text
+  const body = text.slice(firstNewline + 1)
+  const end = body.lastIndexOf("```")
+  return (end === -1 ? body : body.slice(0, end)).trim()
 }
 
 /**
- * Extract and validate the strict-JSON reply. Tolerates a fenced block and
- * surrounding prose; returns null when nothing valid remains.
+ * Parse the summarizer's deterministic line-block reply.
+ *
+ * The model never writes JSON: one `=== ITEM ===` block per topic, with
+ * TITLE/TAGS/SUMMARY lines and ATOMS bullets. Parsing is forgiving (case,
+ * fences, wrapped summaries) but structural: a block without a TITLE is
+ * dropped, and a reply with no blocks returns null so the caller can retry.
  */
 export function parseSummaryReply(reply: string): RawItem[] | null {
-  const text = reply.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim()
-  const start = text.indexOf("{")
-  const end = text.lastIndexOf("}")
-  if (start === -1 || end <= start) return null
-  return parseRawItems(text.slice(start, end + 1))
-}
-
-/** Strip a markdown fence and any prose before the first object brace. */
-function stripReplyEnvelope(reply: string): string {
-  const text = reply.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim()
-  const start = text.indexOf("{")
-  return start === -1 ? "" : text.slice(start)
-}
-
-type RepairCandidate = { index: number; closers: string }
-
-/**
- * Positions where the text closes a container outside a string, paired with
- * the closers still missing at that point. Scanning stops at a mismatched
- * closer — beyond that the structure cannot be trusted.
- */
-function repairCandidates(text: string): RepairCandidate[] {
-  const stack: string[] = []
-  const out: RepairCandidate[] = []
-  let inString = false
-  let escaped = false
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (inString) {
-      if (escaped) escaped = false
-      else if (ch === "\\") escaped = true
-      else if (ch === '"') inString = false
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-      continue
-    }
-    if (ch === "{") {
-      stack.push("}")
-      continue
-    }
-    if (ch === "[") {
-      stack.push("]")
-      continue
-    }
-    if (ch === "}" || ch === "]") {
-      if (stack.pop() !== ch) return out
-      out.push({ index: i + 1, closers: [...stack].reverse().join("") })
-    }
-  }
-
-  // A reply cut inside a string cannot be closed without inventing content;
-  // fall back to the last container boundary instead (§3.3 rule 4).
-  if (!inString && stack.length > 0) {
-    out.push({ index: text.length, closers: [...stack].reverse().join("") })
-  }
-  return out
-}
-
-/**
- * Bounded repair for a reply that is a few closing tokens short (§3.3).
- * Returns the repaired JSON text, or null when nothing valid can be salvaged.
- * Never invents content: it only drops an incomplete tail and closes the
- * containers that are still open.
- */
-export function repairJson(reply: string): string | null {
-  const text = stripReplyEnvelope(reply)
+  const text = stripTextEnvelope(reply)
   if (!text) return null
-  if (parseRawItems(text)) return text
+  if (/^NO_ITEMS\.?$/i.test(text)) return []
 
-  const candidates = repairCandidates(text)
-  for (let i = candidates.length - 1; i >= 0; i--) {
-    const { index, closers } = candidates[i]
-    const head = text.slice(0, index).replace(/[,\s]+$/, "")
-    if (!head) continue
-    const attempt = head + closers
-    if (parseRawItems(attempt)) return attempt
+  type Draft = { title?: string; summary: string[]; tags: string[]; atoms: string[] }
+  const items: RawItem[] = []
+  let current: Draft | null = null
+  let section: "summary" | "atoms" | null = null
+
+  const flush = () => {
+    if (!current) return
+    const draft = current
+    current = null
+    section = null
+    const title = asString(draft.title)
+    if (!title) return
+    items.push({
+      title,
+      summary: draft.summary.join(" ").trim(),
+      tags: draft.tags,
+      atoms: draft.atoms,
+    })
   }
-  return null
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (TEXT_ITEM_MARKER.test(line)) {
+      flush()
+      current = { summary: [], tags: [], atoms: [] }
+      section = null
+      continue
+    }
+    if (!current) continue
+
+    const title = /^TITLE:\s*(.*)$/i.exec(line)
+    if (title) {
+      current.title = title[1].trim()
+      section = null
+      continue
+    }
+    const tags = /^TAGS:\s*(.*)$/i.exec(line)
+    if (tags) {
+      current.tags = tags[1]
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag !== "")
+      section = null
+      continue
+    }
+    const summary = /^SUMMARY:\s*(.*)$/i.exec(line)
+    if (summary) {
+      if (summary[1].trim()) current.summary.push(summary[1].trim())
+      section = "summary"
+      continue
+    }
+    if (/^ATOMS:\s*$/i.test(line)) {
+      section = "atoms"
+      continue
+    }
+    if (section === "atoms") {
+      const bullet = /^[-*]\s*(.+)$/.exec(line)
+      if (bullet) current.atoms.push(bullet[1].trim())
+      continue
+    }
+    if (section === "summary" && line) current.summary.push(line)
+  }
+  flush()
+
+  return items.length > 0 ? items : null
 }
 
 function normalizeItems(
@@ -367,15 +332,6 @@ function lastAssistantText(rows: unknown[]): string {
   return ""
 }
 
-function formatField(format: SummarizeFormat): unknown {
-  if (format === "json_object") {
-    // opencode 1.19 exposes only `text` and `json_schema` on the prompt API,
-    // so validity-only JSON is expressed as a permissive object schema.
-    return { type: "json_schema", schema: { type: "object", additionalProperties: true } }
-  }
-  return { type: "json_schema", schema: SUMMARY_SCHEMA }
-}
-
 function isPromptError(res: { error?: unknown; response?: { ok?: boolean } } | undefined): boolean {
   return !!res?.error || !!(res?.response && !res.response.ok)
 }
@@ -385,17 +341,6 @@ function promptErrorText(err: unknown): string {
   const message = (err as { message?: unknown } | undefined)?.message
   if (typeof message === "string" && message) return message
   return "promptAsync failed"
-}
-
-/** True when a provider rejection is about the structured-output field. */
-function mentionsFormat(err: unknown): boolean {
-  let text = ""
-  try {
-    text = typeof err === "string" ? err : JSON.stringify(err ?? "")
-  } catch {
-    text = String(err ?? "")
-  }
-  return /response_format|json_schema|json_object|\bformat\b/i.test(text)
 }
 
 /**
@@ -409,11 +354,7 @@ export async function summarizeSession(
   const started = Date.now()
   const prompt = buildSummarizerPrompt(input.priorSummary, input.rendered.text)
   const promptBytes = Buffer.byteLength(prompt, "utf8")
-  const format = deps.format ?? "json_schema"
-  let formatFallback = false
   let lastReplyBytes = 0
-  let lastClosed = false
-  let lastRepaired = false
 
   const fallback = (error: string, wallMs: number): SummarizeResult => {
     deps.onWarn?.(`drain summarizer: ${error}`)
@@ -425,11 +366,7 @@ export async function summarizeSession(
       promptBytes,
       wallMs,
       tokens: null,
-      format,
       replyBytes: lastReplyBytes,
-      closed: lastClosed,
-      repaired: lastRepaired,
-      ...(formatFallback ? { formatFallback: true } : {}),
     }
   }
 
@@ -452,10 +389,8 @@ export async function summarizeSession(
       }
     }
 
-    const ask = async (
-      text: string,
-    ): Promise<{ rows: unknown[]; reply: string; formatFallback: boolean }> => {
-      const spawn = async (useFormat: boolean) => {
+    const ask = async (text: string): Promise<{ rows: unknown[]; reply: string }> => {
+      const spawn = async (): Promise<string> => {
         const created = await deps.client.session.create({
           body: { title: SUMMARIZER_SESSION_TITLE },
           query: { directory: deps.directory },
@@ -470,11 +405,11 @@ export async function summarizeSession(
             agent: "session-summarizer",
             ...(deps.model ? { model: deps.model } : {}),
             parts: [{ type: "text", text }],
-            ...(useFormat ? { format: formatField(format) } : {}),
           },
           query: { directory: deps.directory },
         })
-        return { childID, res }
+        if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
+        return childID
       }
 
       const collect = async (id: string): Promise<{ rows: unknown[]; reply: string }> => {
@@ -495,82 +430,39 @@ export async function summarizeSession(
         return { rows, reply: lastAssistantText(rows) }
       }
 
-      let useFormat = format !== "off"
-      let { childID, res } = await spawn(useFormat)
-      let formatFallback = false
-
-      // A provider that rejects `format` gets exactly one retry without it —
-      // never a blind loop (§3.1).
-      if (isPromptError(res) && useFormat && mentionsFormat(res?.error)) {
-        await abortChild(childID)
-        formatFallback = true
-        useFormat = false
-        ;({ childID, res } = await spawn(false))
-      }
-      if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
-
-      let { rows, reply } = await collect(childID)
-
-      // Some providers accept `format` but return no assistant text at all
-      // (observed with qwencloud). That is not a rejection error, so retry
-      // once without the format before degrading to the deterministic items.
-      if (useFormat && reply === "") {
-        await abortChild(childID)
-        formatFallback = true
-        useFormat = false
-        ;({ childID, res } = await spawn(false))
-        if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
-        ;({ rows, reply } = await collect(childID))
-      }
-
-      return { rows, reply, formatFallback }
+      const childID = await spawn()
+      return collect(childID)
     }
 
-    // Strict JSON occasionally slips even on a strong model. Structured output
-    // is the primary fix; repair is the backstop; one retry is the last rung
-    // before the deterministic per-turn fallback (§3.4).
+    // A malformed block reply gets exactly one correction attempt before the
+    // deterministic per-turn fallback (§3.4).
     for (let attempt = 1; ; attempt++) {
       const text =
         attempt === 1
           ? prompt
-          : `${prompt}\n\nYour previous reply was cut off before the closing braces. Keep atoms shorter and close the object with valid JSON only.`
-      const { rows, reply, formatFallback: attemptFallback } = await ask(text)
-      if (attemptFallback) formatFallback = true
+          : `${prompt}\n\nYour previous reply did not follow the block format. Reply again with only \`=== ITEM ===\` blocks, one per durable topic.`
+      const { rows, reply } = await ask(text)
       const tokens = usageTokens(rows)
 
       lastReplyBytes = Buffer.byteLength(reply, "utf8")
-      const direct = parseSummaryReply(reply)
-      let raw = direct
-      lastClosed = direct !== null
-      lastRepaired = false
-      if (!raw) {
-        const fixed = repairJson(reply)
-        if (fixed) {
-          raw = parseSummaryReply(fixed)
-          lastRepaired = raw !== null
-        }
-      }
+      const raw = parseSummaryReply(reply)
 
       if (!raw) {
         if (attempt < 2) continue
         return fallback(
-          `malformed summarizer reply (bytes=${lastReplyBytes}, closed=${lastClosed}, format=${format})`,
+          `malformed summarizer reply (bytes=${lastReplyBytes})`,
           Date.now() - started,
         )
       }
       if (raw.length === 0) {
-        // Valid strict JSON with no durable items: a clean no-op, not a failure.
+        // NO_ITEMS: a clean no-op, not a failure.
         return {
           items: [],
           model: deps.model || null,
           promptBytes,
           wallMs: Date.now() - started,
           tokens,
-          format,
           replyBytes: lastReplyBytes,
-          closed: lastClosed,
-          repaired: lastRepaired,
-          ...(formatFallback ? { formatFallback: true } : {}),
         }
       }
 
@@ -583,11 +475,7 @@ export async function summarizeSession(
         promptBytes,
         wallMs: Date.now() - started,
         tokens,
-        format,
         replyBytes: lastReplyBytes,
-        closed: lastClosed,
-        repaired: lastRepaired,
-        ...(formatFallback ? { formatFallback: true } : {}),
       }
     }
   } catch (err) {

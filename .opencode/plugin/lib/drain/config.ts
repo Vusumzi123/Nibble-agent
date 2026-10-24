@@ -6,15 +6,12 @@
 //
 // Loaded via relative import only.
 import { parseFlatBlock, parseInlineList, readSection, sectionCoercer } from "../config.ts"
-import type { SummarizeFormat } from "./summarize.ts"
 
 export type DrainConfig = {
   enabled: boolean
   cursor_file: string
   writer_model: string
   summarize_model: string
-  /** Structured output for the summarizer child (`json_schema|json_object|off`). */
-  summarize_format: SummarizeFormat
   batch_sessions: number
   initial_lookback_hours: number
   max_turns_per_session: number
@@ -59,7 +56,6 @@ export const DEFAULT_DRAIN: DrainConfig = {
   cursor_file: "drain-cursor.json",
   writer_model: "",
   summarize_model: "",
-  summarize_format: "json_schema",
   batch_sessions: 5,
   initial_lookback_hours: 24,
   max_turns_per_session: 40,
@@ -119,8 +115,6 @@ const DRAIN_COERCE = sectionCoercer({
 })
 
 const MISSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/
-const SUMMARIZE_FORMATS: ReadonlySet<string> = new Set(["json_schema", "json_object", "off"])
-
 function normalizeMissionIds(values: readonly string[]): string[] {
   const out: string[] = []
   for (const raw of values) {
@@ -154,9 +148,6 @@ export function parseDrainConfig(yamlText: string): Partial<DrainConfig> {
     const list = coerceMissionList(parsed.exclude_missions)
     if (list) parsed.exclude_missions = list
     else delete parsed.exclude_missions
-  }
-  if ("summarize_format" in parsed && !SUMMARIZE_FORMATS.has(String(parsed.summarize_format))) {
-    delete parsed.summarize_format
   }
   return parsed as Partial<DrainConfig>
 }
@@ -235,9 +226,6 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   }
   if (typeof cfg.writer_model !== "string") cfg.writer_model = DEFAULT_DRAIN.writer_model
   if (typeof cfg.summarize_model !== "string") cfg.summarize_model = DEFAULT_DRAIN.summarize_model
-  if (!SUMMARIZE_FORMATS.has(String(cfg.summarize_format))) {
-    cfg.summarize_format = DEFAULT_DRAIN.summarize_format
-  }
   if (cfg.cursor_migration !== "recover") cfg.cursor_migration = "carry"
   cfg.exclude_missions =
     coerceMissionList(cfg.exclude_missions) ?? [...DEFAULT_DRAIN.exclude_missions]

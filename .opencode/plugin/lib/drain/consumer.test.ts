@@ -21,16 +21,14 @@ import type { MemoryProvider } from "../memory/types.ts"
 
 const PROJECT = "/work/project-c"
 
-const ONE_ITEM = JSON.stringify({
-  items: [
-    {
-      title: "Wireguard Restart",
-      summary: "Restart wg0.",
-      tags: [],
-      atoms: ["sudo systemctl restart wg0"],
-    },
-  ],
-})
+const ONE_ITEM = [
+  "=== ITEM ===",
+  "TITLE: Wireguard Restart",
+  "TAGS:",
+  "SUMMARY: Restart wg0.",
+  "ATOMS:",
+  "- sudo systemctl restart wg0",
+].join("\n")
 
 function fakeClient(): { client: any } {
   let n = 0

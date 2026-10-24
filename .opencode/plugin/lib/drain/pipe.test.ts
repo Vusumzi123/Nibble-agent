@@ -10,27 +10,30 @@ import { createDrainLedger, DRAIN_LEDGER_FILE } from "./ledger.ts"
 import { createBrainProvider } from "../memory/providers/builtin/brain.ts"
 import { resolveProvider } from "../memory/registry.ts"
 import { runDrainPipe, type DrainPipeClient, type DrainPipeDeps } from "./pipe.ts"
-import { SUMMARY_SCHEMA } from "./summarize.ts"
 
 const PROJECT = "/work/project-a"
 
-const ONE_ITEM = JSON.stringify({
-  items: [
-    {
-      title: "Wireguard Restart",
-      summary: "Restart wg0 after changing the config.",
-      tags: ["linux/network"],
-      atoms: ["sudo systemctl restart wg0"],
-    },
-  ],
-})
+const ONE_ITEM = [
+  "=== ITEM ===",
+  "TITLE: Wireguard Restart",
+  "TAGS: linux/network",
+  "SUMMARY: Restart wg0 after changing the config.",
+  "ATOMS:",
+  "- sudo systemctl restart wg0",
+].join("\n")
 
-const TWO_ITEMS = JSON.stringify({
-  items: [
-    { title: "Wireguard Restart", summary: "Restart wg0.", tags: [], atoms: [] },
-    { title: "Backup Policy", summary: "Nightly borg backups.", tags: [], atoms: [] },
-  ],
-})
+const TWO_ITEMS = [
+  "=== ITEM ===",
+  "TITLE: Wireguard Restart",
+  "TAGS:",
+  "SUMMARY: Restart wg0.",
+  "ATOMS:",
+  "=== ITEM ===",
+  "TITLE: Backup Policy",
+  "TAGS:",
+  "SUMMARY: Nightly borg backups.",
+  "ATOMS:",
+].join("\n")
 
 function report(labels: string[], skipped: string[] = []): string {
   return [
@@ -258,7 +261,7 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   const summarizerPrompt = prompts.find((p) => p.body.agent === "session-summarizer")?.body.parts[0].text
   assert.match(summarizerPrompt, /## Session delta/)
   const summarizerCall = prompts.find((p) => p.body.agent === "session-summarizer")
-  assert.deepEqual(summarizerCall?.body.format, { type: "json_schema", schema: SUMMARY_SCHEMA })
+  assert.equal("format" in (summarizerCall?.body ?? {}), false)
 
   await ledger.flush()
   const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
@@ -268,10 +271,7 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.deepEqual(lines.map((l) => l.source), ["writer", "pipe"])
   assert.equal(lines[0].outcome, "ok")
   assert.equal(lines[1].cursor_after, 1000)
-  assert.equal(lines[1].summarize_format, "json_schema")
-  assert.equal(lines[1].reply_closed, true)
   assert.equal(typeof lines[1].reply_bytes, "number")
-  assert.equal(lines[1].repaired, undefined)
 })
 
 test("a fresh cursor starts at the configured lookback, not at epoch", async () => {
@@ -347,7 +347,7 @@ test("disabled config is a no-op", async () => {
 
 test("a valid empty summary advances the cursor without spawning a writer", async () => {
   const base = { ...(await workspace()), dbFile: await seedDb() }
-  const { client, prompts } = fakeClient({ summaryReply: '{"items":[]}' })
+  const { client, prompts } = fakeClient({ summaryReply: "NO_ITEMS" })
 
   const result = await runDrainPipe(deps(base, client))
 

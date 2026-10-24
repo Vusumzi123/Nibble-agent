@@ -26,19 +26,13 @@
 
 ### Fixed
 
-- **Drain summarizer truncating its JSON tail** — the child now requests
-  structured output (`format: { type: "json_schema", schema }`) driven by the
-  new `drain.summarize_format` key (`json_schema` default, `json_object`
-  validity-only, `off` rollback). A bounded `repairJson` backstop drops the
-  incomplete tail and closes the open containers when a provider ignores the
-  format, and the `error`, `format`, `reply_bytes`, `reply_closed` and
-  `repaired` fields now reach `drain.log`. Every agent `model:` pin is removed;
+- **Drain summarizer writes plain text, not JSON** — the child replies in
+  `=== ITEM ===` blocks (TITLE/TAGS/SUMMARY/ATOMS) and the pipe parses them
+  deterministically, so there is no structured-output field, no schema, and no
+  repair pass. A malformed reply gets one correction attempt before the
+  deterministic per-turn fallback, and a `NO_ITEMS` reply is a clean no-op.
+  `reply_bytes` still reaches `drain.log`. Every agent `model:` pin is removed;
   model selection comes from config or inheritance.
-- **Silent empty structured summarizer replies** — a provider that accepts
-  `format` but returns no assistant text (observed with qwencloud) now gets one
-  retry without the field before degrading. Previously the empty reply burned
-  both 90s child waits and fell back on every pass, so the drain never used the
-  model summary.
 - **A dead lock holder with a fresh heartbeat blocked the lock for the full
   stale window** — acquisition now steals from a dead holder immediately (the
   SIGKILL shape: fresh `heartbeat_ms`, no process) and only refuses an *alive*
