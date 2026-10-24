@@ -22,8 +22,8 @@
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
 // never loaded as a plugin itself.
 import { createHash } from "node:crypto"
-import { mkdir, open, stat, unlink } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { stat } from "node:fs/promises"
+import { join } from "node:path"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
 import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
@@ -816,18 +816,14 @@ export function assembleMissionBrief(
 
 // ---------------------------------------------------------------------------
 // Scheduler primitives (kanban card D, plan §12.1). The self-rescheduling
-// `setTimeout` loop lives in heartbeat-hook.ts; the due math and the file
-// lock are pure/here so the hook stays a thin runtime shell.
+// `setTimeout` loop lives in heartbeat-hook.ts; the due math is pure/here so
+// the hook stays a thin runtime shell. Cross-instance exclusion lives in
+// `ownership.ts` (one short lease — deconcurrency plan, Phase 1).
 
 /** The self-rescheduling wake is always capped here, so a hot config flip
  *  (level → L0, frequency → off, or a shorter frequency) applies within a
  *  minute — no restart, no `daemon-reload`. */
 export const HEARTBEAT_WAKE_CAP_MS = 60_000
-
-/** A tick holding the lock longer than this is presumed dead (crashed child,
- *  wedged session) and the next acquire steals the lock — the overrun
- *  watchdog from the D-M9 survey. */
-export const HEARTBEAT_LOCK_STALE_MS = 30 * 60_000
 
 /** `off` → null (sleep); `12h`/`30m` → ms. Malformed → null (never ticks —
  *  a garbage dial must not fire the heartbeat). */
@@ -877,79 +873,6 @@ export function computeWakeDelayMs(input: WakeInput): number {
   const remaining = input.lastTickMs + input.frequencyMs - input.nowMs
   if (remaining <= 0) return 0
   return Math.min(remaining, HEARTBEAT_WAKE_CAP_MS)
-}
-
-// ---------------------------------------------------------------------------
-// In-progress lock (plan §12.1 step 4): `.opencode/state/heartbeat.lock`, an
-// exclusive-create file holding { pid, acquired_ms }. A TUI-embedded server
-// and a separate `opencode serve` can each load this plugin, so the
-// in-process single-flight flag alone is not enough — the file lock is the
-// cross-instance gate. Overrun semantics: a held lock skips the tick.
-
-export type HeartbeatLock = { pid: number; acquired_ms: number; acquired_at: string }
-
-/** Unreadable/malformed is stale (steal); an old acquired_ms is stale. */
-export function isHeartbeatLockStale(
-  lock: HeartbeatLock | null,
-  nowMs: number,
-  staleMs: number = HEARTBEAT_LOCK_STALE_MS,
-): boolean {
-  if (!lock) return true
-  if (!Number.isFinite(lock.acquired_ms)) return true
-  return nowMs - lock.acquired_ms >= staleMs
-}
-
-async function readHeartbeatLock(file: string): Promise<HeartbeatLock | null> {
-  try {
-    const text = await atomicRead(file)
-    const parsed = JSON.parse(text) as HeartbeatLock
-    if (!parsed || typeof parsed.acquired_ms !== "number") return null
-    return { pid: Number(parsed.pid) || 0, acquired_ms: parsed.acquired_ms, acquired_at: String(parsed.acquired_at ?? "") }
-  } catch {
-    return null
-  }
-}
-
-/**
- * Try to acquire the heartbeat lock. Returns the lock on success, null when a
- * fresh lock is held by someone else (skip tick) or on an unexpected IO error.
- * A stale lock is stolen once; if the steal races another stealer, the loser
- * returns null (their next wake retries).
- */
-export async function acquireHeartbeatLock(
-  file: string,
-  nowMs: number = Date.now(),
-  staleMs: number = HEARTBEAT_LOCK_STALE_MS,
-): Promise<HeartbeatLock | null> {
-  const lock: HeartbeatLock = {
-    pid: process.pid,
-    acquired_ms: nowMs,
-    acquired_at: new Date(nowMs).toISOString(),
-  }
-  // The state dir may not exist yet (first run on a fresh project).
-  await mkdir(dirname(file), { recursive: true }).catch(() => {})
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fh = await open(file, "wx")
-      try {
-        await fh.writeFile(JSON.stringify(lock))
-      } finally {
-        await fh.close()
-      }
-      return lock
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null
-      const held = await readHeartbeatLock(file)
-      if (!isHeartbeatLockStale(held, nowMs, staleMs)) return null // fresh → overrun skip
-      await unlink(file).catch(() => {})
-    }
-  }
-  return null
-}
-
-/** Release the lock; a missing file is already released (never throws). */
-export async function releaseHeartbeatLock(file: string): Promise<void> {
-  await unlink(file).catch(() => {})
 }
 
 // ---------------------------------------------------------------------------

@@ -9,11 +9,9 @@ import {
   DEFAULT_HEARTBEAT_CONFIG,
   FREQUENCY_WEIGHTS,
   HEARTBEAT_FIXED_PROMPT,
-  HEARTBEAT_LOCK_STALE_MS,
   HEARTBEAT_WAKE_CAP_MS,
   MOOD_BIAS_MAX,
   MOOD_BIAS_MIN,
-  acquireHeartbeatLock,
   assembleMissionBrief,
   buildCandidates,
   buildDigestChoiceRequest,
@@ -30,7 +28,6 @@ import {
   effectiveMissionLockStaleMs,
   frequencyToMs,
   isAllQuiet,
-  isHeartbeatLockStale,
   HEARTBEAT_CURRENT_FILE,
   idleHeartbeatCurrent,
   isQuietNow,
@@ -42,7 +39,6 @@ import {
   parseWindow,
   readHeartbeatConfig,
   readHeartbeatCurrent,
-  releaseHeartbeatLock,
   soleDeterministicVerdict,
   staleCodeFiles,
   writeHeartbeatCurrent,
@@ -1068,86 +1064,6 @@ test("computeWakeDelayMs: due math — overdue fires, upcoming waits, cap applie
   )
   // a last tick "in the future" (clock skew) -> never negative
   assert.equal(computeWakeDelayMs({ level: 3, frequencyMs: freq, lastTickMs: now + freq, nowMs: now }), HEARTBEAT_WAKE_CAP_MS)
-})
-
-test("isHeartbeatLockStale: fresh holds, old and malformed steal", () => {
-  const now = 1_000_000_000_000
-  const fresh = { pid: 1, acquired_ms: now - 1_000, acquired_at: "x" }
-  assert.equal(isHeartbeatLockStale(fresh, now), false)
-  // One ms before the threshold still holds; at the threshold it is stale.
-  assert.equal(isHeartbeatLockStale({ ...fresh, acquired_ms: now - HEARTBEAT_LOCK_STALE_MS + 1 }, now), false)
-  assert.equal(isHeartbeatLockStale({ ...fresh, acquired_ms: now - HEARTBEAT_LOCK_STALE_MS }, now), true)
-  assert.equal(isHeartbeatLockStale(null, now), true)
-  assert.equal(isHeartbeatLockStale({ pid: 1, acquired_ms: Number.NaN, acquired_at: "x" }, now), true)
-})
-
-test("acquireHeartbeatLock: exclusive create, fresh holder skips, release frees", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hb-lock-"))
-  const file = join(dir, "heartbeat.lock")
-  const now = 1_000_000_000_000
-
-  const first = await acquireHeartbeatLock(file, now)
-  assert.ok(first)
-  assert.equal(first.pid, process.pid)
-  const onDisk = JSON.parse(await readFile(file, "utf8"))
-  assert.equal(onDisk.acquired_ms, now)
-
-  // Second acquire against the fresh lock -> overrun skip.
-  assert.equal(await acquireHeartbeatLock(file, now + 1_000), null)
-
-  await releaseHeartbeatLock(file)
-  const third = await acquireHeartbeatLock(file, now + 2_000)
-  assert.ok(third)
-  await releaseHeartbeatLock(file)
-  // Releasing a missing lock is a no-op, never throws.
-  await releaseHeartbeatLock(file)
-  await rm(dir, { recursive: true, force: true })
-})
-
-test("acquireHeartbeatLock: a stale lock is stolen", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hb-lock-stale-"))
-  const file = join(dir, "heartbeat.lock")
-  const now = 1_000_000_000_000
-  await writeFile(
-    file,
-    JSON.stringify({ pid: 999, acquired_ms: now - HEARTBEAT_LOCK_STALE_MS - 1, acquired_at: "old" }),
-    "utf8",
-  )
-  const stolen = await acquireHeartbeatLock(file, now)
-  assert.ok(stolen)
-  assert.equal(stolen.pid, process.pid)
-  const onDisk = JSON.parse(await readFile(file, "utf8"))
-  assert.equal(onDisk.acquired_ms, now)
-  await releaseHeartbeatLock(file)
-  await rm(dir, { recursive: true, force: true })
-})
-
-test("acquireHeartbeatLock: a malformed lock is stolen", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hb-lock-junk-"))
-  const file = join(dir, "heartbeat.lock")
-  await writeFile(file, "not json", "utf8")
-  const stolen = await acquireHeartbeatLock(file)
-  assert.ok(stolen)
-  await releaseHeartbeatLock(file)
-  await rm(dir, { recursive: true, force: true })
-})
-
-test("acquireHeartbeatLock: the configured stale threshold is honored", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hb-lock-cfg-stale-"))
-  const file = join(dir, "heartbeat.lock")
-  const now = 1_000_000_000_000
-  await writeFile(
-    file,
-    JSON.stringify({ pid: 999, acquired_ms: now - 60_000, acquired_at: "held" }),
-    "utf8",
-  )
-  // Fresh under the default 30 min threshold: skip.
-  assert.equal(await acquireHeartbeatLock(file, now), null)
-  // The same lock is already stale under a tighter config threshold.
-  const stolen = await acquireHeartbeatLock(file, now, 30_000)
-  assert.ok(stolen)
-  await releaseHeartbeatLock(file)
-  await rm(dir, { recursive: true, force: true })
 })
 
 // ---------------------------------------------------------------------------

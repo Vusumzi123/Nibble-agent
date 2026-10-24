@@ -684,7 +684,7 @@ test("heartbeatSnapshot: idle (no marker) vs in-flight marker + lock", async () 
     }),
     "utf8",
   )
-  await writeFile(join(stateDir, "heartbeat.lock"), JSON.stringify({ pid: 1, acquired_ms: Date.now() }), "utf8")
+  await writeFile(join(stateDir, "ownership.lock"), JSON.stringify({ pid: process.ppid, acquired_ms: Date.now(), heartbeat_ms: Date.now() }), "utf8")
 
   const live = await heartbeatSnapshot(dir)
   assert.equal(live.current?.state, "in-flight")

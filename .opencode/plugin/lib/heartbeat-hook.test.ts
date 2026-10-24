@@ -302,7 +302,7 @@ test("zero-LLM quiet path: all-quiet tick at L2 logs the full ledger line and cr
   // The lock was released after the tick.
   await waitFor(async () => {
     try {
-      await readFile(join(dir, ".opencode", "state", "heartbeat.lock"), "utf8")
+      await readFile(join(dir, ".opencode", "state", "ownership.lock"), "utf8")
       return false
     } catch {
       return true
@@ -354,15 +354,15 @@ test("kill switch: heartbeat.enabled false sleeps, no tick fires", async () => {
 // A fresh lock held by another instance (the parallel-server case, §12.1
 // step 4) skips the tick: no tick log, no state update, the foreign lock is
 // left standing.
-test("lock-held skip: a fresh heartbeat.lock skips the tick and is not stolen", async () => {
+test("lock-held skip: a fresh live ownership lease skips the tick and is not stolen", async () => {
   const dir = await project(["autonomy:", "  level: 2"])
   const stateDir = join(dir, ".opencode", "state")
   await mkdir(stateDir, { recursive: true })
-  const lockFile = join(stateDir, "heartbeat.lock")
+  const lockFile = join(stateDir, "ownership.lock")
   const foreign = {
-    pid: 4242,
+    pid: process.ppid,
     acquired_ms: Date.now() - 1_000,
-    acquired_at: new Date().toISOString(),
+    heartbeat_ms: Date.now(),
   }
   await writeFile(lockFile, JSON.stringify(foreign), "utf8")
 
@@ -376,7 +376,7 @@ test("lock-held skip: a fresh heartbeat.lock skips the tick and is not stolen", 
   assert.ok((state.ticks ?? 0) === 0)
   // The foreign lock stands untouched.
   const held = JSON.parse(await readFile(lockFile, "utf8"))
-  assert.equal(held.pid, 4242)
+  assert.equal(held.pid, process.ppid)
 })
 
 // §5.1 execution lock: a foreign mission.lock means another agent is working.
@@ -491,7 +491,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.equal(client.calls.create, 1)
   await waitFor(async () => {
     try {
-      await readFile(join(dir, ".opencode", "state", "heartbeat.lock"), "utf8")
+      await readFile(join(dir, ".opencode", "state", "ownership.lock"), "utf8")
       return false
     } catch {
       return true

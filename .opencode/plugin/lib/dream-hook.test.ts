@@ -499,16 +499,16 @@ test("woken state: the dream timer stays silent until cooldown, then reconciles 
   void hooksB
 })
 
-// §17.12 acceptance #6 (lock half): the shared heartbeat.lock excludes the
-// dream tick exactly like the heartbeat's — a fresh foreign lock skips it.
-test("shared lock: a fresh heartbeat.lock skips the dream tick", async () => {
+// §17.12 acceptance #6 (lock half): the shared ownership lease excludes the
+// dream tick exactly like the heartbeat's — a fresh live lease skips it.
+test("shared lease: a fresh live ownership lease skips the dream tick", async () => {
   const dir = await project()
   await writeNightMissions(dir)
   await writeSleep(dir)
   const stateDir = join(dir, ".opencode", "state")
   await writeFile(
-    join(stateDir, "heartbeat.lock"),
-    JSON.stringify({ pid: 4242, acquired_ms: Date.now() - 500, acquired_at: new Date().toISOString() }),
+    join(stateDir, "ownership.lock"),
+    JSON.stringify({ pid: process.ppid, acquired_ms: Date.now() - 500, heartbeat_ms: Date.now() }),
     "utf8",
   )
   const client = dreamClient("unused")

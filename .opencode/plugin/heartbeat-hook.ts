@@ -17,12 +17,12 @@ import { openDecisionGate } from "./lib/decision-gate.ts"
 import { acquireFileLock, type FileLockHandle } from "./lib/file-lock.ts"
 import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
+import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
 import {
   DEFAULT_HEARTBEAT_CONFIG,
   HEARTBEAT_CURRENT_FILE,
   HEARTBEAT_STATE_FILE,
   HEARTBEAT_WAKE_CAP_MS,
-  acquireHeartbeatLock,
   assembleMissionBrief,
   buildDigestChoiceRequest,
   computeDigest,
@@ -35,7 +35,6 @@ import {
   missionStallMs,
   missionTimeoutMs,
   readHeartbeatConfig,
-  releaseHeartbeatLock,
   heartbeatErrorFields,
   missionContextHeader,
   writeHeartbeatCurrent,
@@ -129,10 +128,11 @@ const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
 //      HEARTBEAT_WAKE_CAP_MS so a dial flip re-enables within ≤ 60 s).
 //   3. Due check via the shared pure math (`computeWakeDelayMs`) —
 //      `now − last_tick ≥ frequency`; missed ticks coalesce, never replay.
-//   4. Acquire the in-process single-flight flag + the cross-instance file
-//      lock `.opencode/state/heartbeat.lock` (stale-timestamp steal). A fresh
-//      lock skips the tick — one mission at a time even when a TUI-embedded
-//      server and a separate `opencode serve` both load this plugin.
+//   4. Acquire the in-process single-flight flag + the cross-instance
+//      ownership lease `.opencode/state/ownership.lock` (short TTL, renewed
+//      while held; a stale lease is stealable). A live lease skips the tick —
+//      one mission at a time even when a TUI-embedded server and a separate
+//      `opencode serve` both load this plugin.
 //   5. Pre-gate (card B, deterministic): all-quiet ∧ level ≤ L2 → ledger
 //      NO_REPLY, release, exit. Zero LLM calls — no session is created and no
 //      JEV provider runs on this path.
@@ -156,7 +156,8 @@ const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
 // process — or the test runner — alive on its account.
 //
 // Tick lines land in `<log>/heartbeat.log`; scheduler state in
-// `.opencode/state/heartbeat.json`, the lock in `.opencode/state/heartbeat.lock`.
+// `.opencode/state/heartbeat.json`, the cross-instance lease in
+// `.opencode/state/ownership.lock`.
 
 /** A mission child session that never idles is abandoned after this budget
  *  unless `heartbeat.mission_timeout_minutes` overrides it (hot-read per tick;
@@ -188,7 +189,10 @@ export default (async ({ client, directory, ...rest }) => {
     return {}
   }
 
-  const lockFile = join(stateDir, "heartbeat.lock")
+  // One short-lease ownership guard (deconcurrency plan, Phase 1): the only
+  // cross-instance exclusion. A live holder that stops refreshing is
+  // stealable after the TTL, so a hung instance cannot stall the project.
+  const ownershipPath = ownershipFile(stateDir)
   // Execution lock (§5.1): serializes whole agent runs across tick and drain.
   // Always acquired AFTER heartbeat.lock (ordering rule) and never waited on.
   const missionLockFile = join(stateDir, "mission.lock")
@@ -907,7 +911,7 @@ export default (async ({ client, directory, ...rest }) => {
   const runTick = async (): Promise<TickStatus> => {
     if (ticking) return "lock-held" // in-process single-flight
     ticking = true
-    let lockHeld = false
+    let ownership: OwnershipHandle | null = null
     let missionLock: FileLockHandle | null = null
     // Troubleshooting trail: which stage the tick is in, and the ledger
     // closure once it exists — so ANY failure below leaves one
@@ -950,11 +954,11 @@ export default (async ({ client, directory, ...rest }) => {
       })
       if (wake > 0) return "sleeping"
 
-      // 4. Cross-instance lock; a fresh lock means another instance is inside
-      // a tick (overrun semantics) — skip, retry next wake.
-      const lock = await acquireHeartbeatLock(lockFile, nowMs, hbCfg.mission_lock_stale_ms)
-      if (!lock) return "lock-held"
-      lockHeld = true
+      // 4. Cross-instance lease; a live holder means another instance is
+      // inside a tick (overrun semantics) — skip, retry next wake.
+      const lease = await acquireOwnership(ownershipPath, { nowMs })
+      if (!lease) return "lock-held"
+      ownership = lease
       const prevState = state
       const nextState = await stateStore.update((s) => ({
         ...s,
@@ -1689,7 +1693,7 @@ export default (async ({ client, directory, ...rest }) => {
       // Release in reverse acquisition order: mission.lock first, then
       // heartbeat.lock. The attempt has been captured by now (ledger/backlog).
       if (missionLock) await missionLock.release().catch(() => {})
-      if (lockHeld) await releaseHeartbeatLock(lockFile).catch(() => {})
+      if (ownership) await ownership.release().catch(() => {})
       // Close the live marker: idle once the tick ends (success, error, or a
       // lock-held skip) — the dashboard never shows a stale in-flight state.
       await setCurrent({

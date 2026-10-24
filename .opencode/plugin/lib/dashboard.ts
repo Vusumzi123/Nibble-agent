@@ -48,6 +48,7 @@ import {
 } from "./heartbeat.ts"
 import { readAll, readBacklogConfig, resolveBacklogFile, type BacklogEntry } from "./backlog.ts"
 import { readResolvedPaths } from "./paths.ts"
+import { OWNERSHIP_FILE, OWNERSHIP_TTL_MS } from "./ownership.ts"
 import { LOG_DEFAULTS, getLogger } from "./logging.ts"
 import { readDrainConfig } from "./drain/config.ts"
 import { DRAIN_CURRENT_FILE } from "./drain/consumer.ts"
@@ -594,8 +595,8 @@ export async function metricsSnapshot(directory: string): Promise<MetricsSnapsho
 
   let heartbeat = { lock: false, lock_stale: false }
   try {
-    const info = await stat(join(stateDir, "heartbeat.lock"))
-    heartbeat = { lock: true, lock_stale: Date.now() - info.mtimeMs > 30 * 60_000 }
+    const info = await stat(join(stateDir, OWNERSHIP_FILE))
+    heartbeat = { lock: true, lock_stale: Date.now() - info.mtimeMs > OWNERSHIP_TTL_MS }
   } catch {
     // no lock
   }
@@ -644,7 +645,7 @@ export type HeartbeatSnapshot = {
   ts: string
   /** heartbeat.current.json — null when the tick has never run or is idle. */
   current: HeartbeatCurrent | null
-  /** heartbeat.lock present (a mission may be in flight). */
+  /** The ownership lease is present (a mission may be in flight). */
   lock: boolean
   /** Lock held longer than the 30-min stale window (presumed dead tick). */
   lock_stale: boolean
@@ -703,9 +704,9 @@ export async function heartbeatSnapshot(directory: string): Promise<HeartbeatSna
   let lock = false
   let lock_stale = false
   try {
-    const info = await stat(join(stateDir, "heartbeat.lock"))
+    const info = await stat(join(stateDir, OWNERSHIP_FILE))
     lock = true
-    lock_stale = Date.now() - info.mtimeMs > 30 * 60_000
+    lock_stale = Date.now() - info.mtimeMs > OWNERSHIP_TTL_MS
   } catch {
     // no lock
   }

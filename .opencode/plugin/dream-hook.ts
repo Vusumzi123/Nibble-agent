@@ -27,7 +27,6 @@ import {
 } from "./lib/dream.ts"
 import {
   HEARTBEAT_FIXED_PROMPT,
-  acquireHeartbeatLock,
   assembleMissionBrief,
   buildDigestChoiceRequest,
   computeDigest,
@@ -35,7 +34,6 @@ import {
   isQuietNow,
   missionContextHeader,
   readHeartbeatConfig,
-  releaseHeartbeatLock,
   type DigestVerdict,
 } from "./lib/heartbeat.ts"
 import { sessionAccounting } from "./lib/transcript.ts"
@@ -47,6 +45,7 @@ import { findDrainToolResult, type DrainToolResult } from "./lib/drain/tool.ts"
 import { loadMissions } from "./lib/missions.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
+import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
 import {
   DREAM_WAKE_CAP_MS,
   computeDreamWakeDelayMs,
@@ -60,9 +59,9 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 
 // In-process dream timer (kanban card G, plan §17.2/§17.3 — the D-M9/§13
 // in-process pattern, systemd retired 2026-10-13): a self-rescheduling
-// `setTimeout` loop inside the opencode server plugin. It shares
-// `.opencode/state/heartbeat.lock` with the heartbeat (D5) so the two
-// schedulers never run autonomous work at the same time, and it journals its
+// `setTimeout` loop inside the opencode server plugin. It shares the
+// `.opencode/state/ownership.lock` short lease with the heartbeat (D5) so the
+// two schedulers never run autonomous work at the same time, and it journals its
 // ticks to the shared `<log>/heartbeat.log` ledger with `source: "dream"`
 // (§17.8: dream token costs live in the heartbeat ledger, B6 style).
 //
@@ -76,7 +75,7 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 //      "dream tick outside the window, or not dreaming: NO_REPLY").
 //   2. Due check through the pure wake math — dream_cadence × backoff
 //      (§17.8: 30m → 60m → 120m after 2 no-ops, `quiet.backoff` gated).
-//   3. Acquire the SHARED heartbeat lock; a fresh foreign lock skips the tick.
+//   3. Acquire the SHARED ownership lease; a live foreign lease skips the tick.
 //   4. DETERMINISTIC PRE-GATE (zero LLM): the digest's night candidates are
 //      already gated — drain only with pending turns (`turns-pending`), dream
 //      only on status ∧ nightly cap ∧ roll (`dream-gate`, the roll journaled
@@ -110,7 +109,9 @@ export default (async ({ client, directory, ...rest }) => {
   })
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "dream-hook" })
 
-  const lockFile = join(stateDir, "heartbeat.lock") // SHARED with heartbeat (§17.2)
+  // Shared short lease with the heartbeat (§17.2): one project owner, either
+  // loop at a time. Never two schedulers writing autonomous work.
+  const ownershipPath = ownershipFile(stateDir)
   const sleepStore = createSleepStore(stateDir, {
     onError: (err) => void diag.error("[dream-hook] sleep state write failed:", err),
   })
@@ -237,7 +238,7 @@ export default (async ({ client, directory, ...rest }) => {
   const runTick = async (): Promise<TickStatus> => {
     if (ticking) return "lock-held"
     ticking = true
-    let lockHeld = false
+    let ownership: OwnershipHandle | null = null
     try {
       const hbCfg = await readHeartbeatConfig(dir)
       if (!hbCfg.enabled) return "sleeping" // shared kill switch (one lock, one engine)
@@ -277,10 +278,10 @@ export default (async ({ client, directory, ...rest }) => {
       })
       if (wake > 0) return "sleeping"
 
-      // 3. Shared lock with the heartbeat (D5): overrun → skip, never queue.
-      const lock = await acquireHeartbeatLock(lockFile, nowMs, hbCfg.mission_lock_stale_ms)
-      if (!lock) return "lock-held"
-      lockHeld = true
+      // 3. Shared lease with the heartbeat (D5): overrun → skip, never queue.
+      const lease = await acquireOwnership(ownershipPath, { nowMs })
+      if (!lease) return "lock-held"
+      ownership = lease
       const nextState = await sleepStore.update((s) => ({
         ...s,
         last_tick: nowMs,
@@ -635,7 +636,7 @@ export default (async ({ client, directory, ...rest }) => {
       return "fired"
     } finally {
       ticking = false
-      if (lockHeld) await releaseHeartbeatLock(lockFile).catch(() => {})
+      if (ownership) await ownership.release().catch(() => {})
     }
   }
 
