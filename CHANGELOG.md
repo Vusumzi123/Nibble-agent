@@ -34,6 +34,11 @@
   format, and the `error`, `format`, `reply_bytes`, `reply_closed` and
   `repaired` fields now reach `drain.log`. Every agent `model:` pin is removed;
   model selection comes from config or inheritance.
+- **Silent empty structured summarizer replies** — a provider that accepts
+  `format` but returns no assistant text (observed with qwencloud) now gets one
+  retry without the field before degrading. Previously the empty reply burned
+  both 90s child waits and fell back on every pass, so the drain never used the
+  model summary.
 - **A dead lock holder with a fresh heartbeat blocked the lock for the full
   stale window** — acquisition now steals from a dead holder immediately (the
   SIGKILL shape: fresh `heartbeat_ms`, no process) and only refuses an *alive*

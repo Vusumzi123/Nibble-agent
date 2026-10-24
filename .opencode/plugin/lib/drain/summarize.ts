@@ -477,6 +477,24 @@ export async function summarizeSession(
         return { childID, res }
       }
 
+      const collect = async (id: string): Promise<{ rows: unknown[]; reply: string }> => {
+        const idled = await deps.waitForIdle(id)
+        if (!idled) {
+          // A timed-out child must not outlive its own wait (§5.2). Stop it
+          // before throwing so the fallback path never leaves a live session.
+          const abortError = await abortChild(id)
+          throw new Error(
+            abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
+          )
+        }
+        const messages = await deps.client.session.messages({
+          path: { id },
+          query: { directory: deps.directory },
+        })
+        const rows = Array.isArray(messages?.data) ? messages.data : []
+        return { rows, reply: lastAssistantText(rows) }
+      }
+
       let useFormat = format !== "off"
       let { childID, res } = await spawn(useFormat)
       let formatFallback = false
@@ -491,22 +509,21 @@ export async function summarizeSession(
       }
       if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
 
-      const idled = await deps.waitForIdle(childID)
-      if (!idled) {
-        // A timed-out child must not outlive its own wait (§5.2). Stop it
-        // before throwing so the fallback path never leaves a live session.
-        const abortError = await abortChild(childID)
-        throw new Error(
-          abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
-        )
+      let { rows, reply } = await collect(childID)
+
+      // Some providers accept `format` but return no assistant text at all
+      // (observed with qwencloud). That is not a rejection error, so retry
+      // once without the format before degrading to the deterministic items.
+      if (useFormat && reply === "") {
+        await abortChild(childID)
+        formatFallback = true
+        useFormat = false
+        ;({ childID, res } = await spawn(false))
+        if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
+        ;({ rows, reply } = await collect(childID))
       }
 
-      const messages = await deps.client.session.messages({
-        path: { id: childID },
-        query: { directory: deps.directory },
-      })
-      const rows = Array.isArray(messages?.data) ? messages.data : []
-      return { rows, reply: lastAssistantText(rows), formatFallback }
+      return { rows, reply, formatFallback }
     }
 
     // Strict JSON occasionally slips even on a strong model. Structured output

@@ -375,6 +375,23 @@ test("a provider that rejects format is retried once without it", async () => {
   assert.equal(calls.abort.length, 1)
 })
 
+test("a silent empty structured reply is retried once without format", async () => {
+  const { client, calls } = fakeClient({ replies: ["", REPLY] })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.formatFallback, true)
+  assert.equal(calls.prompt.length, 2)
+  assert.ok("format" in calls.prompt[0].body)
+  assert.equal("format" in calls.prompt[1].body, false)
+  assert.equal(calls.abort.length, 1)
+  assert.ok((result.replyBytes ?? 0) > 0)
+  assert.ok(result.items.length > 0)
+})
+
 test("an unrelated prompt error does not retry without format", async () => {
   const { client, calls } = fakeClient({
     reply: REPLY,
