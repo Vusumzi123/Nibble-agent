@@ -22,6 +22,11 @@
 #                         [opencode args...]
 set -euo pipefail
 
+# Preserve the caller's stdin. An async child in a non-interactive shell has
+# its stdin redirected to /dev/null before explicit redirections, which would
+# leave the TUI unable to read the terminal; fd 3 keeps the real one.
+exec 3<&0
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 EMBED_MODEL="${OLLAMA_MODEL:-qwen3-embedding:0.6b}"
@@ -278,7 +283,7 @@ if [ "$HEADLESS" = 1 ]; then
   done
 fi
 
-opencode --port "$SERVE_PORT" --hostname 127.0.0.1 "${OPTS[@]}" 9>&- &
+opencode --port "$SERVE_PORT" --hostname 127.0.0.1 "${OPTS[@]}" <&3 9>&- &
 OPENCODE_PID=$!
 write_manifest
 for _ in $(seq 1 100); do
