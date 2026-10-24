@@ -5,7 +5,11 @@
 // it, settles it, and schedules the next wake. Everything that used to be a
 // second scheduler or a side lane is a work kind here:
 //
-//   mission > drain-pass > dream > staleness > profile-update > soul-update
+//   mission > drain-pass > quiet-hours > staleness > profile-update > soul-update
+//
+// The dream *mission* is an ordinary `mission` item, night-gated by its
+// `menus: [night]` frontmatter; `quiet-hours` is the sleep/dream orchestration
+// step, not the mission itself.
 //
 // `not_before_ms` is how a kind that is not due yet stays in the queue without
 // spinning: the picker skips it and the loop's wake math (computeWakeDelayMs)
@@ -29,7 +33,7 @@ export const MAX_QUEUE_DEPTH = 50
 export type WorkKind =
   | "mission"
   | "drain-pass"
-  | "dream"
+  | "quiet-hours"
   | "staleness"
   | "profile-update"
   | "soul-update"
@@ -38,14 +42,14 @@ export type WorkKind =
 export const WORK_PRIORITY: Readonly<Record<WorkKind, number>> = {
   mission: 0,
   "drain-pass": 1,
-  dream: 2,
+  "quiet-hours": 2,
   staleness: 3,
   "profile-update": 4,
   "soul-update": 5,
 }
 
 export type WorkItem = {
-  /** Stable dedupe key: `mission:<id>`, `drain-pass`, `dream`, `<source>:<key>`. */
+  /** Stable dedupe key: `mission:<id>`, `drain-pass`, `quiet-hours`, `<source>:<key>`. */
   id: string
   kind: WorkKind
   /** Which producer enqueued it (`tick`, `brain-stale`, `scheduler`, …). */
@@ -119,10 +123,12 @@ function sanitize(raw: unknown[]): WorkItem[] {
 }
 
 function normalizeKind(kind: unknown, lane: unknown): WorkKind | null {
+  // Legacy value from the first Phase 1 cut: the step was called "dream".
+  if (kind === "dream") return "quiet-hours"
   if (
     kind === "mission" ||
     kind === "drain-pass" ||
-    kind === "dream" ||
+    kind === "quiet-hours" ||
     kind === "staleness" ||
     kind === "profile-update" ||
     kind === "soul-update"

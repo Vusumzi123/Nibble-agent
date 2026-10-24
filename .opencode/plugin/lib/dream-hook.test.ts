@@ -18,7 +18,7 @@ const { runSteps } = await import("./step-registry.ts")
 const createAndDrive = async (opts: any) => {
   const hooks = await createHook(opts)
   // Fire-and-forget, like the old timer: the tests wait for observable effects.
-  void runSteps(["dream"])
+  void runSteps(["quiet-hours"])
   return hooks
 }
 

@@ -30,12 +30,12 @@ const item = (over: Partial<WorkItem>): WorkItem => ({
   ...over,
 })
 
-test("pickNext: priority order is mission > drain-pass > dream > staleness > profile > soul", () => {
+test("pickNext: priority order is mission > drain-pass > quiet-hours > staleness > profile > soul", () => {
   const now = 1_000
   const all: WorkItem[] = [
     item({ id: "soul", kind: "soul-update", enqueued_ms: 1 }),
     item({ id: "staleness", kind: "staleness", enqueued_ms: 2 }),
-    item({ id: "dream", kind: "dream", enqueued_ms: 3 }),
+    item({ id: "quiet-hours", kind: "quiet-hours", enqueued_ms: 3 }),
     item({ id: "drain", kind: "drain-pass", enqueued_ms: 4 }),
     item({ id: "mission", kind: "mission", enqueued_ms: 5 }),
     item({ id: "profile", kind: "profile-update", enqueued_ms: 6 }),
@@ -53,7 +53,7 @@ test("pickNext: priority order is mission > drain-pass > dream > staleness > pro
     picked.push(next!.id)
     queue = dequeueById(queue, next!.id)!.rest
   }
-  assert.deepEqual(picked, ["mission", "drain", "dream", "staleness", "profile", "soul"])
+  assert.deepEqual(picked, ["mission", "drain", "quiet-hours", "staleness", "profile", "soul"])
 })
 
 test("pickNext: FIFO within a kind and not_before gates visibility", () => {

@@ -1,16 +1,16 @@
 // Step registry (deconcurrency plan, Phase 1).
 //
 // The heartbeat hook owns the only timer. Hooks that used to run their own
-// loops (dream, profile, soul) register a *step* here instead: the runner is a
+// loops (quiet-hours, profile, soul) register a *step* here instead: the runner is a
 // function that does one bounded unit of work and returns "sleeping" when it
 // is not due (it self-gates on its own window/cooldown).
 //
 // Loaded via relative import only.
-export type StepKind = "dream" | "staleness" | "profile-update" | "soul-update"
+export type StepKind = "quiet-hours" | "staleness" | "profile-update" | "soul-update"
 
 /** Priority order for background steps, after mission and drain-pass. */
 export const STEP_ORDER: readonly StepKind[] = [
-  "dream",
+  "quiet-hours",
   "staleness",
   "profile-update",
   "soul-update",

@@ -641,10 +641,12 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   // Phase 1 (deconcurrency plan): no timer of its own. The heartbeat loop is
-  // the only scheduler; it calls this step after its mission/drain work. The
-  // step self-gates on the quiet window, cooldown, and cadence, and takes the
-  // ownership lease itself, so it can never overlap the heartbeat.
-  registerStep("dream", runTick)
+  // the only scheduler; it calls this `quiet-hours` step after its
+  // mission/drain work. This is the sleep/dream ORCHESTRATION pass, not the
+  // dream mission (that is a normal `mission` item, night-gated by its menu).
+  // The step self-gates on the quiet window, cooldown, and cadence, and takes
+  // the ownership lease itself, so it can never overlap the heartbeat.
+  registerStep("quiet-hours", runTick)
 
   return {
     event: async ({ event }) => {
