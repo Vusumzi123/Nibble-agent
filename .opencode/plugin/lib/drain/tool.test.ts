@@ -6,7 +6,6 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 
 import { DEFAULT_DRAIN } from "./config.ts"
-import { acquireDrainLock, drainLockFile } from "./lock.ts"
 import {
   findDrainToolResult,
   parseDrainToolOutput,
@@ -109,58 +108,4 @@ test("runDrainForMission skips when the provider has no writer", async () => {
   assert.equal(result.status, "skipped")
   assert.equal(result.reason, "paused")
   assert.equal(result.summary, "drain:paused")
-})
-
-test("runDrainForMission returns skipped/lock-held when drain.lock is held (§2.4)", async () => {
-  const ws = await project()
-  // Isolated fixture DB with one pending turn, so readDrainStatus sees work
-  // and reaches the pipe (which then hits the held lock).
-  const dbFile = join(ws.stateDir, "fixture.db")
-  const db = new DatabaseSync(dbFile)
-  db.exec(`
-    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
-    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
-    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
-  `)
-  const t = Date.now() - 600_000
-  db.prepare("INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)").run(
-    "top-1",
-    null,
-    ws.directory,
-    t,
-  )
-  db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(
-    "m1",
-    "top-1",
-    t,
-    JSON.stringify({ role: "user" }),
-  )
-  db.prepare("INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)").run(
-    "m1-p",
-    "m1",
-    JSON.stringify({ type: "text", text: "run sudo systemctl restart wg0" }),
-  )
-  db.close()
-
-  const lock = await acquireDrainLock(drainLockFile(ws.stateDir), {
-    refreshMs: DEFAULT_DRAIN.lock_refresh_ms,
-    staleMs: DEFAULT_DRAIN.lock_stale_ms,
-  })
-  assert.ok(lock)
-  try {
-    const result = await runDrainForMission({
-      ...ws,
-      config: { ...DEFAULT_DRAIN, initial_lookback_hours: 0 },
-      client: {} as any,
-      provider: writer,
-      waitForIdle: async () => true,
-      dbFile,
-    })
-    assert.equal(result.status, "skipped")
-    assert.equal(result.reason, "lock-held")
-    assert.equal(result.summary, "drain:lock-held")
-    assert.equal(result.tokens, 0, "a lock-held run never spends tokens")
-  } finally {
-    await lock!.release()
-  }
 })

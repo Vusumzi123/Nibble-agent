@@ -1,12 +1,12 @@
 // Drain pipe orchestration (knowledge-pipeline-redesign §A.12,
 // drain-consumer-plan §2.2–§2.7).
 //
-// One run: load cursor -> acquire drain.lock -> discover/fetch -> render ->
-// summarize -> hand the items to the active memory provider's writer -> map
-// its WriteReport to per-session cursor marks. The lock lives INSIDE the pipe
-// so tool, dream, and consumer serialize on one gate regardless of caller
-// (§2.4); acquisition is try-only — a held lock returns `lockHeld` without a
-// ledger line (the caller reports it).
+// One run: load cursor -> discover/fetch -> render -> summarize -> hand the
+// items to the active memory provider's writer -> map its WriteReport to
+// per-session cursor marks. There is no lock: the single heartbeat loop runs
+// one work unit at a time, so every caller (tick step, `drain_run` tool) is
+// already serialized against the rest of the harness (deconcurrency plan,
+// Phase 1).
 //
 // Cursor v2 (§2.3): discovery is watermark-based; fetch uses each session's
 // own mark. The watermark never advances past a marked session that still has
@@ -38,8 +38,6 @@ import {
 } from "./cursor.ts"
 import { openDrainSource, type DrainSource } from "./db.ts"
 import type { DrainLedger } from "./ledger.ts"
-import { acquireDrainLock, drainLockFile, lockOptsFromConfig } from "./lock.ts"
-import { acquireFileLock, type FileLockHandle } from "../file-lock.ts"
 import { renderSession, type RenderedSession } from "./render.ts"
 import { summarizeSession, type SummaryItem, type SummarizerClient } from "./summarize.ts"
 import type {
@@ -52,8 +50,8 @@ import type {
 
 export type DrainOutcome = "completed" | "nothing" | "degraded" | "error" | "dropped"
 
-/** Why the pass stopped early (§2.2/§5.1). */
-export type DrainStopReason = "token-budget" | "mission-lock-held"
+/** Why the pass stopped early (§2.2). */
+export type DrainStopReason = "token-budget"
 
 export type DrainPipeResult = {
   outcome: DrainOutcome
@@ -69,8 +67,6 @@ export type DrainPipeResult = {
   tokens?: number | null
   degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback" | "budget-exhausted"
   error?: string
-  /** Set when the pipe could not take drain.lock (§2.4) — no ledger line. */
-  lockHeld?: true
   /** Early stop: the per-pass budget ran out between units (§2.2). */
   stopped?: DrainStopReason | null
   pendingBefore?: number | null
@@ -113,12 +109,6 @@ export type DrainPipeDeps = {
   registerChild?: (sessionID: string) => void
   /** Test/E2E override; defaults to the opencode data dir. */
   dbFile?: string
-  /**
-   * Per-child mission execution lock (§5.1). Acquired around each summarizer
-   * and writer child while drain.lock is already held (ordering:
-   * drain.lock -> mission.lock). null/undefined disables the lock.
-   */
-  missionLock?: { file: string; refreshMs: number; staleMs: number } | null
   ledger?: DrainLedger
   /** Invocation source recorded on the pipe ledger line (§5.1). */
   trigger?: DrainTrigger
@@ -159,7 +149,7 @@ export function chunkPlanned(planned: PlannedItem[], size: number): PlannedChunk
 /**
  * Run one drain cycle. Always resolves with a result; expected failures are
  * outcomes, not throws. The cursor is saved only on advance or failure
- * accounting. A held drain.lock short-circuits with `lockHeld` (§2.4).
+ * accounting. There is no lock: the single heartbeat loop is the executor.
  */
 export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult> {
   const started = Date.now()
@@ -255,39 +245,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     return stuck("memory provider has no writer")
   }
 
-  // §2.4: the writer gate is INSIDE the pipe — try-only, never wait.
-  const lock = await acquireDrainLock(drainLockFile(deps.stateDir), lockOptsFromConfig(cfg))
-  if (!lock) {
-    return {
-      outcome: "nothing",
-      sessions: 0,
-      items: 0,
-      consolidated: 0,
-      skipped: 0,
-      cursorBefore,
-      cursorAfter: cursor.watermark_ts,
-      tokens: null,
-      lockHeld: true,
-    }
-  }
-
-  // §5.1: one mission.lock per child unit (summarizer, writer chunk), inside
-  // the drain.lock already held above. Try-only — a held lock stops the pass.
-  const withChildLock = async <T>(fn: () => Promise<T>): Promise<T | "mission-lock-held"> => {
-    const opts = deps.missionLock
-    if (!opts) return fn()
-    const handle: FileLockHandle | null = await acquireFileLock(opts.file, {
-      refreshMs: opts.refreshMs,
-      staleMs: opts.staleMs,
-    })
-    if (!handle) return "mission-lock-held"
-    try {
-      return await fn()
-    } finally {
-      await handle.release().catch(() => {})
-    }
-  }
-
+  // The single heartbeat loop is the executor: no drain.lock, no mission.lock.
   let source: DrainSource
   try {
     source = await openDrainSource({
@@ -298,7 +256,6 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       onWarn: deps.onWarn,
     })
   } catch (err) {
-    await lock.release()
     return emit({
       outcome: "error",
       sessions: 0,
@@ -395,28 +352,22 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         stopped = "token-budget"
         break
       }
-      const summary = await withChildLock(() =>
-        summarizeSession(
-          {
-            sessionID: rendered.sessionID,
-            rendered,
-            priorSummary: cursor.sessions[rendered.sessionID]?.summary || null,
-          },
-          {
-            client: deps.client,
-            directory: deps.directory,
-            model: cfg.summarize_model,
-            maxItems: cfg.max_items_per_session,
-            waitForIdle: deps.waitForIdle,
-            registerChild: deps.registerChild,
-            onWarn: deps.onWarn,
-          },
-        ),
+      const summary = await summarizeSession(
+        {
+          sessionID: rendered.sessionID,
+          rendered,
+          priorSummary: cursor.sessions[rendered.sessionID]?.summary || null,
+        },
+        {
+          client: deps.client,
+          directory: deps.directory,
+          model: cfg.summarize_model,
+          maxItems: cfg.max_items_per_session,
+          waitForIdle: deps.waitForIdle,
+          registerChild: deps.registerChild,
+          onWarn: deps.onWarn,
+        },
       )
-      if (summary === "mission-lock-held") {
-        stopped = "mission-lock-held"
-        break
-      }
       if (summary.degraded) degraded ??= summary.degraded
       if (summary.error) error ??= summary.error
       summarizeReplyBytes = summary.replyBytes ?? summarizeReplyBytes
@@ -529,16 +480,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         break
       }
       const writerStarted = Date.now()
-      const chunkReport = await withChildLock(() =>
-        deps.provider!.consolidate!(
-          chunk.items.map((entry) => entry.item),
-          ctx,
-        ),
+      const chunkReport = await deps.provider!.consolidate!(
+        chunk.items.map((entry) => entry.item),
+        ctx,
       )
-      if (chunkReport === "mission-lock-held") {
-        stopped = "mission-lock-held"
-        break
-      }
       promptBytes += chunkReport.promptBytes ?? 0
       totalTokens += chunkReport.tokens ?? 0
       writerSession = chunkReport.session ?? writerSession
@@ -688,23 +633,6 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       })
     }
 
-    if (stopped === "mission-lock-held") {
-      return emit({
-        outcome: "nothing",
-        sessions: renderings.length,
-        items: planned.length,
-        consolidated: consumed.length,
-        skipped: skipped.length,
-        cursorBefore,
-        cursorAfter: cursor.watermark_ts,
-        session: writerSession,
-        tokens: totalTokens || null,
-        degraded,
-        ...(error ? { error } : {}),
-        stopped,
-      })
-    }
-
     return emit({
       outcome: degraded ? "degraded" : "completed",
       sessions: renderings.length,
@@ -737,6 +665,5 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     } catch {
       /* ignore */
     }
-    await lock.release().catch(() => {})
   }
 }

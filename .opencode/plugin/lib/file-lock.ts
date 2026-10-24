@@ -15,8 +15,8 @@
 // - Acquire is TRY-ONLY: callers never wait on the lock. A held lock is data
 //   for the caller (skip the work).
 //
-// The drain lock stays behind its wrapper in `drain/lock.ts`; mission.lock
-// uses this directly.
+// Phase 1 removed the two lock callers (drain.lock, mission.lock). Only the
+// ownership lease and its liveness helpers (`holderDead`, `procStart`) remain.
 //
 // Loaded via relative import only.
 import { readFileSync } from "node:fs"

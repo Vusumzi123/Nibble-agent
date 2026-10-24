@@ -880,7 +880,7 @@ test("queuesSnapshot: lane items carry titles, age, TTL and requeue info", async
   await mkdir(join(dir, ".opencode", "state"), { recursive: true })
   const now = Date.parse("2026-10-20T12:00:00Z")
   await writeFile(
-    join(dir, ".opencode", "state", "lanes.json"),
+    join(dir, ".opencode", "state", "work-queue.json"),
     JSON.stringify({
       primary: [
         {
@@ -917,7 +917,7 @@ test("queuesSnapshot: lane items carry titles, age, TTL and requeue info", async
   assert.equal(snap.side[0].ttl_ms, null)
 })
 
-test("queuesSnapshot: a missing lanes.json degrades to available:false", async () => {
+test("queuesSnapshot: a missing work-queue.json degrades to available:false", async () => {
   const dir = await project()
   resetQueuesCache()
   const snap = await queuesSnapshot(dir, Date.now())

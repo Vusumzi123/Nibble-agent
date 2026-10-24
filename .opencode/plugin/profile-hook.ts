@@ -8,6 +8,7 @@ import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { automationChildSessions } from "./lib/automation.ts"
+import { registerStep } from "./lib/step-registry.ts"
 import { classifyTranscript } from "./lib/transcript.ts"
 import { openDecisionGate, type DecisionGate } from "./lib/decision-gate.ts"
 import {
@@ -523,11 +524,26 @@ export default (async ({ client, directory }) => {
     })
   }
 
-  let queue: Promise<void> = Promise.resolve()
-  const scheduleProfilePass = (sid: string): void => {
-    queue = queue.then(() => runProfilePass(sid)).catch((err) => {
+  // Phase 1 (deconcurrency plan): the idle handler only *enqueues*. The pass
+  // runs in the heartbeat loop, never as a side effect of an event handler.
+  const pendingPasses: string[] = []
+  let draining = false
+  const runProfileStep = async (): Promise<void> => {
+    if (draining) return
+    const sid = pendingPasses.shift()
+    if (!sid) return
+    draining = true
+    try {
+      await runProfilePass(sid)
+    } catch (err) {
       void diag.error("[profile-hook] profile pass failed:", err)
-    })
+    } finally {
+      draining = false
+    }
+  }
+  registerStep("profile-update", runProfileStep)
+  const scheduleProfilePass = (sid: string): void => {
+    if (!pendingPasses.includes(sid)) pendingPasses.push(sid)
   }
 
   return {

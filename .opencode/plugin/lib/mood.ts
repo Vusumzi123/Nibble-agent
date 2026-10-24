@@ -265,18 +265,34 @@ export type MoodFeed = {
   realizeDecay(): Promise<void>
 }
 
+// Single owner per file (deconcurrency plan, Phase 1): every hook that feeds
+// mood (heartbeat, dream, sleep, mood) gets a handle over ONE shared core, so
+// `mood.json` has exactly one in-memory state and one write queue per process.
+// Without this, four read-modify-write cycles could clobber each other.
+type MoodCore = { state: MoodState; queue: Promise<void> }
+const cores = new Map<string, MoodCore>()
+
 export async function createMoodFeed(opts: MoodFeedOptions): Promise<MoodFeed> {
   const halfLife = halfLifeMs(opts.halfLife)
-  let state = await readMoodState(opts.file)
-  let queue: Promise<void> = Promise.resolve()
   const fail = (err: unknown): void => opts.onError?.(err)
 
+  let core = cores.get(opts.file)
+  if (!core) {
+    core = { state: await readMoodState(opts.file), queue: Promise.resolve() }
+    cores.set(opts.file, core)
+  } else {
+    // A test (or another writer outside this module) may have rewritten the
+    // file since the core was created: re-read once on handle creation.
+    core.state = await readMoodState(opts.file)
+  }
+  const shared = core
+
   const apply = (event: MoodEvent): Promise<void> => {
-    queue = queue.then(async () => {
+    shared.queue = shared.queue.then(async () => {
       try {
-        const before = state
-        const next = applyEvent(decay(state, Date.now(), halfLife), event)
-        state = next
+        const before = shared.state
+        const next = applyEvent(decay(before, Date.now(), halfLife), event)
+        shared.state = next
         await writeMoodState(opts.file, next)
         await opts.logger?.append({
           ts: nowIso(),
@@ -291,25 +307,25 @@ export async function createMoodFeed(opts: MoodFeedOptions): Promise<MoodFeed> {
         fail(err)
       }
     })
-    return queue
+    return shared.queue
   }
 
   const realizeDecay = (): Promise<void> => {
-    queue = queue.then(async () => {
+    shared.queue = shared.queue.then(async () => {
       try {
-        const next = decay(state, Date.now(), halfLife)
-        state = next
+        const next = decay(shared.state, Date.now(), halfLife)
+        shared.state = next
         await writeMoodState(opts.file, next)
       } catch (err) {
         fail(err)
       }
     })
-    return queue
+    return shared.queue
   }
 
   return {
-    get: () => state,
-    view: () => decay(state, Date.now(), halfLife),
+    get: () => shared.state,
+    view: () => decay(shared.state, Date.now(), halfLife),
     apply,
     realizeDecay,
   }

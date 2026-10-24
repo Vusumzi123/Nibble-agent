@@ -617,12 +617,12 @@ export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/lib/missions.ts",
   ".opencode/plugin/lib/mission-result.ts",
   ".opencode/plugin/lib/vault-stale.ts",
-  ".opencode/plugin/lib/lanes/queue.ts",
-  ".opencode/plugin/lib/lanes/producers.ts",
+  ".opencode/plugin/lib/work-queue.ts",
+  ".opencode/plugin/lib/work-producers.ts",
+  ".opencode/plugin/lib/step-registry.ts",
   ".opencode/plugin/lib/drain/status.ts",
   ".opencode/plugin/lib/drain/tool.ts",
-  ".opencode/plugin/lib/drain/consumer.ts",
-  ".opencode/plugin/lib/drain/lock.ts",
+  ".opencode/plugin/lib/drain/step.ts",
   ".opencode/plugin/lib/drain/pipe.ts",
 ]
 

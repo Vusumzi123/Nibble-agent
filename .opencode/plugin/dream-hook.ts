@@ -46,8 +46,8 @@ import { loadMissions } from "./lib/missions.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
+import { registerStep } from "./lib/step-registry.ts"
 import {
-  DREAM_WAKE_CAP_MS,
   computeDreamWakeDelayMs,
   createSleepStore,
   durationToMs,
@@ -640,53 +640,11 @@ export default (async ({ client, directory, ...rest }) => {
     }
   }
 
-  // The self-rescheduling loop: the delay is recomputed from disk after every
-  // wake so quiet/dials apply hot; capped at DREAM_WAKE_CAP_MS everywhere —
-  // the cap is what catches a window start, a cooldown end, or a dial flip
-  // within a minute (mirrors the heartbeat's 60 s ceiling). A lock-held skip
-  // backs off a full cap so two instances cannot spin on the lock.
-  const wakeInput = async () => {
-    const autonomy = await readAutonomyConfig(dir)
-    const state = await sleepStore.read()
-    return {
-      level: autonomy.level,
-      quiet: isQuietNow(autonomy.quiet.window),
-      status: state.status,
-      cadenceMs: durationToMs(autonomy.quiet.dream_cadence, 30 * 60_000),
-      lastTickMs: state.last_tick,
-      nowMs: Date.now(),
-      noopStreak: state.noop_streak,
-      backoff: autonomy.quiet.backoff,
-    }
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const scheduleWake = (ms: number): void => {
-    timer = setTimeout(() => {
-      void loop()
-    }, Math.max(0, ms))
-    timer.unref?.()
-  }
-
-  const loop = async (): Promise<void> => {
-    let status: TickStatus = "sleeping"
-    try {
-      status = await runTick()
-    } catch (err) {
-      void diag.error("[dream-hook] loop error:", err)
-    }
-    if (status === "lock-held") {
-      scheduleWake(DREAM_WAKE_CAP_MS)
-      return
-    }
-    scheduleWake(computeDreamWakeDelayMs(await wakeInput()))
-  }
-
-  // First wake deferred so plugin init returns first (startup-catch-up
-  // pattern); the immediate reconcile inside means window edges land right away.
-  setTimeout(() => {
-    void loop()
-  }, 0).unref?.()
+  // Phase 1 (deconcurrency plan): no timer of its own. The heartbeat loop is
+  // the only scheduler; it calls this step after its mission/drain work. The
+  // step self-gates on the quiet window, cooldown, and cadence, and takes the
+  // ownership lease itself, so it can never overlap the heartbeat.
+  registerStep("dream", runTick)
 
   return {
     event: async ({ event }) => {

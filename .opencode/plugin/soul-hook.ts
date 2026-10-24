@@ -8,6 +8,7 @@ import { createSessionTools, textOf } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { automationChildSessions } from "./lib/automation.ts"
+import { registerStep } from "./lib/step-registry.ts"
 import { classifyTranscript } from "./lib/transcript.ts"
 import { openDecisionGate, type DecisionGate } from "./lib/decision-gate.ts"
 import {
@@ -356,11 +357,25 @@ export default (async ({ client, directory }) => {
     }
   }
 
-  let queue: Promise<void> = Promise.resolve()
-  const scheduleSoulPass = (sid: string): void => {
-    queue = queue.then(() => runSoulPass(sid)).catch((err) => {
+  // Phase 1 (deconcurrency plan): enqueue only; the heartbeat loop executes.
+  const pendingPasses: string[] = []
+  let draining = false
+  const runSoulStep = async (): Promise<void> => {
+    if (draining) return
+    const sid = pendingPasses.shift()
+    if (!sid) return
+    draining = true
+    try {
+      await runSoulPass(sid)
+    } catch (err) {
       void diag.error("[soul-hook] soul pass failed:", err)
-    })
+    } finally {
+      draining = false
+    }
+  }
+  registerStep("soul-update", runSoulStep)
+  const scheduleSoulPass = (sid: string): void => {
+    if (!pendingPasses.includes(sid)) pendingPasses.push(sid)
   }
 
   return {

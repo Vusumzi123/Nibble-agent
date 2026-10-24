@@ -11,6 +11,16 @@ void TEST_HOME
 const { default: createHook } = await import("../dream-hook.ts")
 const { parseDreamBucket } = await import("./dream.ts")
 const { HEARTBEAT_FIXED_PROMPT } = await import("./heartbeat.ts")
+const { runSteps } = await import("./step-registry.ts")
+
+// Phase 1: the dream hook has no timer. The test drives the registered step
+// once, exactly as the heartbeat loop does after its mission/drain work.
+const createAndDrive = async (opts: any) => {
+  const hooks = await createHook(opts)
+  // Fire-and-forget, like the old timer: the tests wait for observable effects.
+  void runSteps(["dream"])
+  return hooks
+}
 
 async function project(extraLines: string[] = []): Promise<string> {
   const dir = await tempDir("dreamhook-proj-")
@@ -225,7 +235,7 @@ test("roll failed + no pending turns: zero LLM — no JEV call, no dream, no ses
   await writeSleep(dir)
   const client = dreamClient("should never be used")
   const { state, spawner } = countingSpawner()
-  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1 } as any)
+  const hooks = await createAndDrive({ client, directory: dir, spawner, random: () => 1 } as any)
 
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
@@ -270,7 +280,7 @@ test("roll failed + pending turns: drain still runs as the sole candidate, no JE
   const dbFile = await writePendingTurn(dir)
   const client = dreamClient("drained the turns")
   const { state, spawner } = countingSpawner()
-  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
+  const hooks = await createAndDrive({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
 
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
@@ -362,7 +372,7 @@ test("night drain pipe failure overrides a completed mission result", async () =
     },
   }
   const { spawner } = countingSpawner()
-  const hooks = await createHook({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
+  const hooks = await createAndDrive({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
 
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
@@ -405,7 +415,7 @@ test("dream run: dreamer child pinned, bucket entry lands, mood delta is the tab
   const outcome = '{"title":"Glass elevator","narrative":"I rode an elevator made of rain.","tone":"pleasant","seeds":["recent turn"]}'
   const client = dreamClient(outcome)
   const { state } = countingSpawner()
-  const hooks = await createHook({ client, directory: dir, random: () => 0 } as any) // roll passes
+  const hooks = await createAndDrive({ client, directory: dir, random: () => 0 } as any) // roll passes
 
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
@@ -467,7 +477,7 @@ test("woken state: the dream timer stays silent until cooldown, then reconciles 
   await writeNightMissions(dirA)
   await writeSleep(dirA, { status: "woken", since: new Date().toISOString(), woken_at: new Date().toISOString() })
   const clientA = dreamClient("unused")
-  await createHook({ client: clientA, directory: dirA, random: () => 0 } as any)
+  await createAndDrive({ client: clientA, directory: dirA, random: () => 0 } as any)
   await new Promise((r) => setTimeout(r, 400))
   assert.deepEqual((await readDreamLog(dirA)).filter((l) => l.event === "dream-tick"), [], "woken → no dream tick, zero cost")
   assert.equal(clientA.calls.create, 0)
@@ -483,7 +493,7 @@ test("woken state: the dream timer stays silent until cooldown, then reconciles 
     woken_at: new Date(Date.now() - 2 * 3_600_000).toISOString(),
   })
   const clientB = dreamClient("unused")
-  const hooksB = await createHook({ client: clientB, directory: dirB, random: () => 1 } as any)
+  const hooksB = await createAndDrive({ client: clientB, directory: dirB, random: () => 1 } as any)
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
     while (Date.now() < until) {
@@ -512,7 +522,7 @@ test("shared lease: a fresh live ownership lease skips the dream tick", async ()
     "utf8",
   )
   const client = dreamClient("unused")
-  await createHook({ client, directory: dir, random: () => 0 } as any)
+  await createAndDrive({ client, directory: dir, random: () => 0 } as any)
   await new Promise((r) => setTimeout(r, 400))
   assert.deepEqual((await readDreamLog(dir)).filter((l) => l.event === "dream-tick"), [], "lock held → tick skipped")
   assert.equal(client.calls.create, 0)
@@ -553,7 +563,7 @@ test("malformed dream outcome: skipped, wobbled, bucket untouched", async () => 
   await writeNightMissions(dir)
   await writeSleep(dir)
   const client = dreamClient("I could not decide on a JSON shape, sorry!")
-  const hooks = await createHook({ client, directory: dir, random: () => 0 } as any)
+  const hooks = await createAndDrive({ client, directory: dir, random: () => 0 } as any)
   const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
     const until = Date.now() + ms
     while (Date.now() < until) {
@@ -587,7 +597,7 @@ test("a timed-out child is aborted and the timeout is booked after the stop", as
   const dbFile = await writePendingTurn(dir)
   const client = dreamClient("drained the turns")
   const { spawner } = countingSpawner()
-  const hooks = await createHook({
+  const hooks = await createAndDrive({
     client,
     directory: dir,
     spawner,
@@ -627,7 +637,7 @@ test("a failed dream abort is recorded as an error, never a clean stop", async (
   const dbFile = await writePendingTurn(dir)
   const client = dreamClient("drained the turns", undefined, { abortFails: true })
   const { spawner } = countingSpawner()
-  await createHook({
+  await createAndDrive({
     client,
     directory: dir,
     spawner,

@@ -14,7 +14,6 @@ import {
   setStatus,
 } from "./lib/backlog.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
-import { acquireFileLock, type FileLockHandle } from "./lib/file-lock.ts"
 import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
@@ -71,27 +70,27 @@ import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
-  LANES_FILE,
   MAX_REQUEUES,
-  type QueueItem,
-  dequeuePrimary,
-  dequeueSide,
-  enqueueItems,
-  loadQueues,
-  pruneQueues,
+  WORK_QUEUE_FILE,
+  type WorkItem,
+  dequeueById,
+  enqueueWork,
+  loadWorkQueue,
+  pickNext,
+  pruneWork,
   queueDepth,
-  queuesEmpty,
-  saveQueues,
+  queueEmpty,
+  saveWorkQueue,
   stallResumeItem,
-} from "./lib/lanes/queue.ts"
+} from "./lib/work-queue.ts"
 import {
   type ProducerCtx,
-  collectItems,
+  collectWork,
   itemRunnable,
   itemStillDue,
   missionIdOf,
   missionItemId,
-} from "./lib/lanes/producers.ts"
+} from "./lib/work-producers.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import {
   deterministicResumeSummary,
@@ -101,7 +100,8 @@ import {
   type ResumePayload,
 } from "./lib/mission-resume.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
-import { startDrainConsumer, type DrainConsumerHandle } from "./lib/drain/consumer.ts"
+import { drainDue, runDrainStep } from "./lib/drain/step.ts"
+import { runSteps } from "./lib/step-registry.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
@@ -193,9 +193,7 @@ export default (async ({ client, directory, ...rest }) => {
   // cross-instance exclusion. A live holder that stops refreshing is
   // stealable after the TTL, so a hung instance cannot stall the project.
   const ownershipPath = ownershipFile(stateDir)
-  // Execution lock (§5.1): serializes whole agent runs across tick and drain.
-  // Always acquired AFTER heartbeat.lock (ordering rule) and never waited on.
-  const missionLockFile = join(stateDir, "mission.lock")
+  const workQueueFile = join(stateDir, WORK_QUEUE_FILE)
   // Live status marker for the dashboard (§9.2, card 16): written on every
   // phase transition so `idle | in-flight` + the in-flight mission are
   // observable without reading in-process state. Best-effort, single writer.
@@ -551,37 +549,37 @@ export default (async ({ client, directory, ...rest }) => {
     }
   }
 
-  // Drain consumer (docs/drain-consumer.md): a demand-driven loop sharing no
-  // lock with the tick — each pass serializes through drain.lock inside the
-  // pipe. Hot-reads drain.consumer each wake, so the rollback flag
-  // (`consumer: false`) applies without a restart. Its timer is unref'd; it
-  // lives and dies with this process like the tick loop.
+  // Drain is a STEP of this loop (deconcurrency plan, Phase 1): no consumer
+  // timer, no drain.lock. The tick runs at most one drain pass, and only when
+  // no mission work is waiting — mission > drain-pass in the priority order.
   const drainLedger = createDrainLedger({ logDir, home: homedir() })
-  const drainConsumer: DrainConsumerHandle = startDrainConsumer({
-    directory: dir,
-    stateDir,
-    vaultDir,
-    client: client as unknown as DrainPipeClient,
-    waitForIdle: waitForChildIdle,
-    registerChild: (sid) => automationChildSessions.add(sid),
-    ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
-    ledger: drainLedger,
-    resolveProvider: async () => {
-      const memoryCfg = await readMemoryConfig(dir)
-      return resolveProvider(memoryCfg.provider, {
-        directory: dir,
-        stateDir,
-        vaultDir,
-        drain: await readDrainConfig(dir),
-        dbFile: drainDbFile,
-        onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
-      })
-    },
-    onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
-  })
+  const runDrainWork = async () =>
+    runDrainStep({
+      directory: dir,
+      stateDir,
+      vaultDir,
+      client: client as unknown as DrainPipeClient,
+      waitForIdle: waitForChildIdle,
+      registerChild: (sid) => automationChildSessions.add(sid),
+      ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
+      ledger: drainLedger,
+      resolveProvider: async () => {
+        const memoryCfg = await readMemoryConfig(dir)
+        return resolveProvider(memoryCfg.provider, {
+          directory: dir,
+          stateDir,
+          vaultDir,
+          drain: await readDrainConfig(dir),
+          dbFile: drainDbFile,
+          onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+        })
+      },
+      onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
+    })
 
-  // Drain health for the tick ledger line (§5.3): read-only view of the
-  // consumer's marker + config, never a DB call on the tick's critical path.
+  // Drain health for the tick ledger line (§5.3): the consumer's live marker is
+  // gone, so this is a tolerant read of a legacy file — never a DB call on the
+  // tick's critical path.
   const drainHealth = async (): Promise<{
     pending: number | null
     oldest_age_ms: number | null
@@ -589,8 +587,8 @@ export default (async ({ client, directory, ...rest }) => {
   } | null> => {
     try {
       const cfg = await readDrainConfig(dir)
-      if (!cfg.enabled || !cfg.consumer) return null
-      const raw = await readFile(drainConsumer.currentFile, "utf8")
+      if (!cfg.enabled) return null
+      const raw = await readFile(join(stateDir, "drain.current.json"), "utf8")
       const marker = JSON.parse(raw) as {
         pending?: number | null
         oldest_pending_age_ms?: number | null
@@ -912,7 +910,6 @@ export default (async ({ client, directory, ...rest }) => {
     if (ticking) return "lock-held" // in-process single-flight
     ticking = true
     let ownership: OwnershipHandle | null = null
-    let missionLock: FileLockHandle | null = null
     // Troubleshooting trail: which stage the tick is in, and the ledger
     // closure once it exists — so ANY failure below leaves one
     // `outcome: "error"` ledger line with a phase-tagged error, never silent.
@@ -1071,16 +1068,15 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 6b. Lane queues (docs/heartbeat-lanes.md): producers collect work
-      // deterministically — zero LLM calls. The tick producer projects the
-      // digest's primary candidates; the status producers feed the side lane
-      // (staleness on an old reference note). When the drain consumer owns
-      // drain (plan §4), the turns-pending producer stops collecting — the
-      // side lane is staleness-only.
+      // 6a. The single work queue: producers collect deterministic work — zero
+      // LLM calls. The tick producer projects the digest's candidate missions;
+      // brain-stale adds a staleness item. Drain is a queued `drain-pass` kind:
+      // the picker below applies the plan's priority (mission > drain-pass).
       phase = "queues"
       await setCurrent({ phase })
+      const drainCfgForTick = await readDrainConfig(dir).catch(() => null)
       const allMissions = await loadMissions(dir).catch(() => [])
-      const drainCfgForProducers = await readDrainConfig(dir).catch(() => null)
+      const drainCfgForProducers = drainCfgForTick
       const drainConsumerOwnsDrain = Boolean(drainCfgForProducers?.enabled && drainCfgForProducers?.consumer)
       const producerCtx: ProducerCtx = {
         nowMs,
@@ -1092,34 +1088,52 @@ export default (async ({ client, directory, ...rest }) => {
         lastMission: state.last_mission,
         drainConsumer: drainConsumerOwnsDrain,
       }
-      let queues = enqueueItems(await loadQueues(join(stateDir, LANES_FILE)), collectItems(producerCtx))
-      queues = pruneQueues(queues, nowMs, (item) => itemStillDue(producerCtx, item)).queues
+      let work = enqueueWork(await loadWorkQueue(workQueueFile), collectWork(producerCtx))
+      work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
 
-      // §5.1: one mission.lock for the whole dispatch section, taken before the
-      // first child (side or primary) and before any queue write. A held lock
-      // means another agent is working: skip dispatch, leave lanes.json
-      // byte-identical, and journal why. The heartbeat.lock is already held, so
-      // the ordering is heartbeat.lock -> mission.lock.
-      if (autonomy.heartbeat.in_progress_lock) {
-        missionLock = await acquireFileLock(missionLockFile, {
-          refreshMs: hbCfg.mission_lock_refresh_ms,
-          staleMs: hbCfg.mission_lock_stale_ms,
+      // Drain is work, not a loop: enqueue the kind when the backlog triggers,
+      // then let the picker order it behind every runnable mission.
+      if (drainCfgForTick?.enabled && drainCfgForTick.consumer) {
+        const due = await drainDue({
+          directory: dir,
+          stateDir,
+          ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
         })
-        if (!missionLock) {
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: "silent",
-            token_cost: 0,
-            gate: "lock",
-            reason: "mission-lock-held",
-            queues: queueDepth(queues),
-          })
-          return "fired"
+        if (due.due) {
+          work = enqueueWork(work, [
+            { id: "drain-pass", kind: "drain-pass", producer: "scheduler", enqueued_ms: nowMs, requeue_count: 0 },
+          ])
         }
       }
 
-      await saveQueues(join(stateDir, LANES_FILE), queues)
+      // runOne's picker: the highest-priority due unit. `mission` outranks
+      // `drain-pass`, so a runnable mission always wins; drain runs when the
+      // queue holds only the drain kind.
+      const nextWork = pickNext(work, nowMs, (item) => itemRunnable(producerCtx, item))
+      if (nextWork?.kind === "drain-pass") {
+        const picked = dequeueById(work, nextWork.id)
+        if (picked) work = picked.rest
+        await saveWorkQueue(workQueueFile, work)
+        phase = "drain"
+        await setCurrent({ phase })
+        const step = await runDrainWork()
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
+          token_cost: step.ran ? step.result.tokens ?? 0 : 0,
+          gate: "drain",
+          reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
+        })
+        if (step.ran) await recordExecution()
+        else await recordNoop(digest.digest_hash)
+        return "fired"
+      }
+
+      // No mission.lock (Phase 1): the single loop is the executor, so the
+      // dispatch section cannot overlap anything else in this process.
+
+      await saveWorkQueue(workQueueFile, work)
 
       const contextFor = (d: HeartbeatDigest): string =>
         missionContextHeader(
@@ -1135,7 +1149,7 @@ export default (async ({ client, directory, ...rest }) => {
         )
       // P4c (§5.5): a dequeued item that carries a resume payload injects the
       // continuation block AFTER the mission context header, for both lanes.
-      const resumeBlockFor = (item: QueueItem | null | undefined): string => {
+      const resumeBlockFor = (item: WorkItem | null | undefined): string => {
         const payload = item?.payload as Partial<ResumePayload> | undefined
         if (!payload || payload.resume !== true || !payload.summary) return ""
         try {
@@ -1146,8 +1160,8 @@ export default (async ({ client, directory, ...rest }) => {
         }
       }
 
-      // Both queues empty: nothing to do this tick — silent, zero LLM calls.
-      if (queuesEmpty(queues)) {
+      // Nothing queued: nothing to do this tick — silent, zero LLM calls.
+      if (queueEmpty(work)) {
         await ledger({
           verdict: "no_reply",
           mission: null,
@@ -1155,7 +1169,7 @@ export default (async ({ client, directory, ...rest }) => {
           token_cost: 0,
           gate: "queues",
           reason: "empty",
-          queues: queueDepth(queues),
+          queues: queueDepth(work),
         })
         await recordNoop(digest.digest_hash)
         return "fired"
@@ -1165,11 +1179,14 @@ export default (async ({ client, directory, ...rest }) => {
       // items (a menu-window-blocked item stays queued). The side child runs
       // to completion BEFORE the primary lane starts, so the lanes never
       // race on vault writes.
-      type LaneRun = { mission: Mission; run: ChildRun; item: QueueItem }
+      type LaneRun = { mission: Mission; run: ChildRun; item: WorkItem }
       let sideRun: LaneRun | null = null
-      const sidePick = dequeueSide(queues, (item) => itemRunnable(producerCtx, item))
+      const sideItem = pickNext(work, nowMs, (item) =>
+        item.kind === "staleness" && itemRunnable(producerCtx, item),
+      )
+      const sidePick = sideItem ? dequeueById(work, sideItem.id) : null
       if (sidePick) {
-        queues = sidePick.rest
+        work = sidePick.rest
         const sideMission = allMissions.find((m) => m.id === missionIdOf(sidePick.item))
         const sideBrief = sideMission
           ? assembleMissionBrief(
@@ -1211,15 +1228,15 @@ export default (async ({ client, directory, ...rest }) => {
       const selected = async (
         d: HeartbeatDigest,
         v: DigestVerdict,
-      ): Promise<{ mission: Mission; run: ChildRun; item: QueueItem | null } | null> => {
+      ): Promise<{ mission: Mission; run: ChildRun; item: WorkItem | null } | null> => {
         const id = v.kind === "mission" ? v.id : null
         if (!id) return null
         const mission = allMissions.find((m) => m.id === id)
         if (!mission) return null
         // The dequeued item is needed BEFORE the brief is assembled: a resume
         // item injects the === RESUMED MISSION === block (plan §5.5).
-        const pick = dequeuePrimary(queues, missionItemId(mission.id))
-        if (pick) queues = pick.rest
+        const pick = dequeueById(work, missionItemId(mission.id))
+        if (pick) work = pick.rest
         const brief = assembleMissionBrief(
           v,
           mission,
@@ -1304,7 +1321,7 @@ export default (async ({ client, directory, ...rest }) => {
         }
       }
       const settleItem = async (laneRun: {
-        item: QueueItem | null
+        item: WorkItem | null
         mission: Mission
         run: ChildRun
       }): Promise<boolean> => {
@@ -1326,7 +1343,7 @@ export default (async ({ client, directory, ...rest }) => {
           return false
         }
         run.resumeItem = requeued.id
-        queues = enqueueItems(queues, [requeued])
+        work = enqueueWork(work, [requeued])
         return true
       }
       const resultStatusOf = (r: ChildRun): MissionResult["status"] | "missing" =>
@@ -1406,7 +1423,7 @@ export default (async ({ client, directory, ...rest }) => {
         // No primary mission this tick (JEV silence). The side lane may
         // still have done the tick's work — never book that as "silent".
         const sideRequeued = sideRun ? await settleItem(sideRun) : false
-        await saveQueues(join(stateDir, LANES_FILE), queues)
+        await saveWorkQueue(workQueueFile, work)
         if (sideRun) {
           const sideResultStatus = resultStatusOf(sideRun.run)
           const sideDrainFailed =
@@ -1425,7 +1442,7 @@ export default (async ({ client, directory, ...rest }) => {
             over_budget: overBudgetOf(sideRun.run.tokenCost),
             gate: "digest",
             reason,
-            queues: queueDepth(queues),
+            queues: queueDepth(work),
             runs: [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)],
             ...sideFields(sideRun, sideRequeued),
             ...toolFields(sideRun.run.tool),
@@ -1442,20 +1459,20 @@ export default (async ({ client, directory, ...rest }) => {
             token_cost: 0,
             gate: "digest",
             reason,
-            queues: queueDepth(queues),
+            queues: queueDepth(work),
             ...(digestError ? { error: digestError } : {}),
           })
           // Waiting side work must not be delayed by the identical-digest
           // backoff; a primary item the JEV keeps declining backs off
           // normally (its expiry re-offers it fresh).
-          if (queues.side.length > 0) await recordExecution()
+          if (work.some((i) => i.kind === "staleness")) await recordExecution()
           else await recordNoop(digest.digest_hash)
         }
         return "fired"
       }
 
       let chosen = first
-      let secondRun: { mission: Mission; run: ChildRun; item: QueueItem | null } | null = null
+      let secondRun: { mission: Mission; run: ChildRun; item: WorkItem | null } | null = null
       let totalTokens = first.run.tokenCost + (sideRun?.run.tokenCost ?? 0)
       let reroll: { from: string; reason: string } | null = null
       const declined: string[] = []
@@ -1508,7 +1525,7 @@ export default (async ({ client, directory, ...rest }) => {
       const sideRequeued = sideRun ? await settleItem(sideRun) : false
       const firstRequeued = await settleItem(first)
       const secondRequeued = secondRun ? await settleItem(secondRun) : false
-      await saveQueues(join(stateDir, LANES_FILE), queues)
+      await saveWorkQueue(workQueueFile, work)
 
       const run = chosen.run
       const finalMission = chosen.mission
@@ -1556,7 +1573,7 @@ export default (async ({ client, directory, ...rest }) => {
           over_budget: overBudget,
           gate: "digest",
           reason: noReplyReason,
-          queues: queueDepth(queues),
+          queues: queueDepth(work),
           runs: dispatchedRuns,
           ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
           ...(sessionId ? { session: sessionId } : {}),
@@ -1575,7 +1592,7 @@ export default (async ({ client, directory, ...rest }) => {
         }
         // Executed side work — or side work still waiting — resets the B7
         // backoff; a primary item the JEV keeps declining backs off normally.
-        if (sideRun || queues.side.length > 0) await recordExecution()
+        if (sideRun || work.some((i) => i.kind === "staleness")) await recordExecution()
         else await recordNoop(digest.digest_hash)
         return "fired"
       }
@@ -1654,7 +1671,7 @@ export default (async ({ client, directory, ...rest }) => {
         over_budget: overBudget,
         gate: "digest",
         reason: finalReason,
-        queues: queueDepth(queues),
+        queues: queueDepth(work),
         runs: dispatchedRuns,
         ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
         ...(sessionId ? { session: sessionId } : {}),
@@ -1690,9 +1707,7 @@ export default (async ({ client, directory, ...rest }) => {
       return "fired"
     } finally {
       ticking = false
-      // Release in reverse acquisition order: mission.lock first, then
-      // heartbeat.lock. The attempt has been captured by now (ledger/backlog).
-      if (missionLock) await missionLock.release().catch(() => {})
+      // The ownership lease is the only release left (Phase 1).
       if (ownership) await ownership.release().catch(() => {})
       // Close the live marker: idle once the tick ends (success, error, or a
       // lock-held skip) — the dashboard never shows a stale in-flight state.
@@ -1744,6 +1759,15 @@ export default (async ({ client, directory, ...rest }) => {
     if (status === "lock-held") {
       scheduleWake(wakeCapMs)
       return
+    }
+    // Background steps (dream, staleness, profile-update, soul-update) run in
+    // this same loop, after the heartbeat released its lease. Each self-gates.
+    try {
+      await runSteps(undefined, (kind, err) =>
+        void diag.error(`[heartbeat-hook] step ${kind} failed:`, err),
+      )
+    } catch (err) {
+      void diag.error("[heartbeat-hook] step run failed:", err)
     }
     scheduleWake(Math.min(computeWakeDelayMs(await wakeInput()), wakeCapMs))
   }

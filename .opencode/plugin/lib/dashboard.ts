@@ -51,7 +51,9 @@ import { readResolvedPaths } from "./paths.ts"
 import { OWNERSHIP_FILE, OWNERSHIP_TTL_MS } from "./ownership.ts"
 import { LOG_DEFAULTS, getLogger } from "./logging.ts"
 import { readDrainConfig } from "./drain/config.ts"
-import { DRAIN_CURRENT_FILE } from "./drain/consumer.ts"
+/** Legacy live marker. The consumer loop that wrote it is gone (Phase 1); the
+ *  read stays tolerant so an old state file or a missing one is simply null. */
+const DRAIN_CURRENT_FILE = "drain.current.json"
 import { loadCursor, resolveCursorFile } from "./drain/cursor.ts"
 import { countUnconsumed } from "./drain/db.ts"
 import { DRAIN_LEDGER_FILE } from "./drain/ledger.ts"
@@ -1286,7 +1288,7 @@ export async function setMissionEnabled(
 // ---------------------------------------------------------------------------
 // Lane queues, recent runs, token series (queue-monitoring plan)
 //
-// Read-only views over `state/lanes.json` + `logs/heartbeat.log`. Every reader
+// Read-only views over `state/work-queue.json` + `logs/heartbeat.log`. Every reader
 // degrades to an empty payload (`available: false`) instead of failing the
 // request: an old backend/project simply has no queues or `runs[]` yet.
 
@@ -1409,12 +1411,17 @@ export async function queuesSnapshot(directory: string, now: number = Date.now()
   let value: QueuesSnapshot
   const drainPtr = await drainPointer(directory)
   try {
-    const parsed = JSON.parse(await readFile(join(stateDir, "lanes.json"), "utf8")) as Record<string, unknown>
+    const parsed = JSON.parse(await readFile(join(stateDir, "work-queue.json"), "utf8")) as unknown
+    const isRecord = (item: unknown): item is Record<string, unknown> =>
+      item !== null && typeof item === "object"
+    const legacy = !Array.isArray(parsed) && isRecord(parsed) ? (parsed as Record<string, unknown>) : null
+    const items = Array.isArray(parsed) ? parsed.filter(isRecord) : []
     const laneItems = (lane: LaneName): QueueItemView[] => {
-      const raw = parsed[lane]
+      // A legacy lanes file is still readable; a work-queue array is split by kind.
+      const raw = legacy ? legacy[lane] : items.filter((i) => i.kind === lane)
       if (!Array.isArray(raw)) return []
       return raw
-        .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
+        .filter(isRecord)
         .map((item) => toQueueItemView(item, lane, now, titles))
     }
     value = {

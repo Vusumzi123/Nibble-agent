@@ -23,6 +23,10 @@ async function waitFor(fn: () => boolean | Promise<boolean>, timeoutMs = 4000): 
   throw new Error("waitFor: condition not met within timeout")
 }
 
+// Phase 1: one ordered work queue, keyed by kind.
+const missionsIn = (q: any[]) => q.filter((i) => i?.kind === "mission")
+const sideIn = (q: any[]) => q.filter((i) => i?.kind === "staleness")
+
 async function project(lines: string[]): Promise<string> {
   const dir = await tempDir("hbhook-proj-")
   await mkdir(join(dir, ".opencode"), { recursive: true })
@@ -382,43 +386,6 @@ test("lock-held skip: a fresh live ownership lease skips the tick and is not sto
 // §5.1 execution lock: a foreign mission.lock means another agent is working.
 // The tick skips dispatch, journals gate:lock, creates no session, and leaves
 // lanes.json byte-identical (no enqueue/prune write reaches disk).
-test("mission-lock-held skip: dispatch is skipped and the lane queues are untouched", async () => {
-  const dir = await project(["autonomy:", "  level: 3"])
-  await writeMission(dir)
-  const stateDir = join(dir, ".opencode", "state")
-  await mkdir(stateDir, { recursive: true })
-  const queueText = JSON.stringify({ primary: [], side: [] })
-  await writeFile(join(stateDir, "lanes.json"), queueText, "utf8")
-  await writeFile(
-    join(stateDir, "heartbeat.json"),
-    JSON.stringify({ last_tick: Date.now() - 13 * HOUR, ticks: 0 }),
-    "utf8",
-  )
-  const foreign = {
-    pid: process.ppid,
-    acquired_ms: Date.now(),
-    heartbeat_ms: Date.now(),
-  }
-  await writeFile(join(stateDir, "mission.lock"), JSON.stringify(foreign), "utf8")
-
-  const client = mockClient()
-  await createHook({ client, directory: dir } as any)
-  await waitFor(async () => (await readTickLog(dir)).length > 0)
-
-  const [t] = await readTickLog(dir)
-  assert.equal(t.gate, "lock")
-  assert.equal(t.reason, "mission-lock-held")
-  assert.equal(t.outcome, "silent")
-  assert.equal(client.calls.create, 0, "no child is dispatched while the lock is held")
-  assert.equal(
-    await readFile(join(stateDir, "lanes.json"), "utf8"),
-    queueText,
-    "the queues are byte-identical",
-  )
-  const held = JSON.parse(await readFile(join(stateDir, "mission.lock"), "utf8"))
-  assert.equal(held.pid, process.ppid, "the foreign lock is not stolen")
-})
-
 // The full mission-execution path (§12.1 step 6 + §7 recording): JEV verdict
 // → one child session with the fixed brief → session.idle → ledger line with
 // token_cost → backlog record + one-way view refresh → lock released.
@@ -445,12 +412,6 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.ok(text.includes("Verdict: mission:drain — Drain conversation backlog into the vault"))
   assert.ok(text.includes("Do the drain thing."))
   assert.ok(text.includes("~50 tokens"), "the child is told the configured budget")
-
-  // §5.1: mission.lock is held across the child dispatch.
-  const held = JSON.parse(
-    await readFile(join(dir, ".opencode", "state", "mission.lock"), "utf8"),
-  )
-  assert.equal(held.pid, process.pid)
 
   // 2. The child idles → the tick completes.
   await hooks.event({
@@ -1072,9 +1033,9 @@ test("decisions-disabled no_reply with queued work is labelled", async () => {
   assert.equal(t.reason, "decisions-disabled")
   assert.equal(t.gate, "digest")
   // The queued primary item survives the JEV's silence (expiry owns its end).
-  const lanes = JSON.parse(await readFile(join(stateDir, "lanes.json"), "utf8"))
-  assert.equal(lanes.primary.length, 1)
-  assert.equal(lanes.primary[0].id, "mission:drain")
+  const lanes = JSON.parse(await readFile(join(stateDir, "work-queue.json"), "utf8"))
+  assert.equal(missionsIn(lanes).length, 1)
+  assert.equal(missionsIn(lanes)[0].id, "mission:drain")
   assert.equal(client.calls.create, 0)
 })
 
@@ -1415,8 +1376,8 @@ test("side lane and primary both run in one tick", async () => {
   assert.equal(jevCalls(), 1, "one JEV call for the primary pick")
 
   // Both items left the queues (completed → drop).
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
-  assert.deepEqual(lanes, { primary: [], side: [] })
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
+  assert.deepEqual(lanes, [])
 })
 
 test("the side lane dequeues one item per tick; the rest wait", async () => {
@@ -1526,15 +1487,15 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
   assert.equal(tick.runs[0].aborted, true)
   assert.equal(tick.runs[0].abort_error, undefined)
 
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
-  assert.equal(lanes.side.length, 1, "the item is back in the queue")
-  assert.equal(lanes.side[0].id, "mission:drain")
-  assert.equal(lanes.side[0].requeue_count, 1)
-  assert.equal(lanes.side[0].requeue_reason, "timeout")
-  assert.ok(lanes.side[0].payload.original_enqueued_ms < lanes.side[0].enqueued_ms, "tail = fresh timestamp")
-  assert.equal(lanes.side[0].payload.resume, true)
-  assert.equal(lanes.side[0].payload.prior_session, client.calls.ids[0])
-  assert.equal(lanes.side[0].payload.summary.done, "drained 1 turn")
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
+  assert.equal(sideIn(lanes).length, 1, "the item is back in the queue")
+  assert.equal(sideIn(lanes)[0].id, "mission:drain")
+  assert.equal(sideIn(lanes)[0].requeue_count, 1)
+  assert.equal(sideIn(lanes)[0].requeue_reason, "timeout")
+  assert.ok(sideIn(lanes)[0].payload.original_enqueued_ms < sideIn(lanes)[0].enqueued_ms, "tail = fresh timestamp")
+  assert.equal(sideIn(lanes)[0].payload.resume, true)
+  assert.equal(sideIn(lanes)[0].payload.prior_session, client.calls.ids[0])
+  assert.equal(sideIn(lanes)[0].payload.summary.done, "drained 1 turn")
   assert.equal(tick.runs[0].timeout_stopped, true)
   assert.equal(tick.runs[0].prior_session, client.calls.ids[0])
   assert.equal(tick.runs[0].resume_item, "mission:drain")
@@ -1578,8 +1539,8 @@ test("a failed abort is recorded as an error, never a clean stop", async () => {
   assert.equal(tick.runs[0].aborted, false)
   assert.equal(tick.runs[0].abort_error, "abort refused")
 
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
-  assert.equal(lanes.side.length, 0, "a failed abort drops the item instead of requeueing it")
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
+  assert.equal(sideIn(lanes).length, 0, "a failed abort drops the item instead of requeueing it")
 })
 
 // Plan 5.2 / P3c: the stall watchdog measures silence, not wall-clock.
@@ -1867,7 +1828,7 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
   // A resume item already at the ceiling: the next stall must drop it without
   // spawning a summarizer nobody will consume.
   await writeFile(
-    join(dir, ".opencode", "state", "lanes.json"),
+    join(dir, ".opencode", "state", "work-queue.json"),
     JSON.stringify({
       primary: [],
       side: [
@@ -1917,6 +1878,6 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
     "the capped drop never spawns the summarizer",
   )
 
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "lanes.json"), "utf8"))
-  assert.equal(lanes.side.length, 0, "the item drops at the ceiling")
+  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
+  assert.equal(sideIn(lanes).length, 0, "the item drops at the ceiling")
 })
