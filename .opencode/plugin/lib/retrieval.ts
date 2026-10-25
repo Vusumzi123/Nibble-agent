@@ -11,14 +11,14 @@
 //
 //   value === true  && pTrue >= threshold   -> SKIP   (retrieval unnecessary)
 //   value === false                         -> RETRIEVE
-//   error | abstain | non-boolean           -> SKIP   (FAIL-CLOSED)
+//   provider error                          -> RETRIEVE (FAIL-OPEN)
+//   abstain | non-boolean                   -> SKIP   (low confidence)
 //
-// Fail-closed is the deliberate inversion of the profile/soul update gates,
-// which fail-open so a durable note is never lost to a provider outage. Here the
-// resource being protected is tokens, not notes, so an outage degrades to
-// "answer from scratch". The deterministic `hasRetrievalIntent` override runs
-// first and always retrieves, so an explicit "search my notes" can never be
-// mis-skipped by the model.
+// A provider outage fails open: the cost of an unnecessary search is tokens,
+// while a silent SKIP can drop knowledge the user explicitly relies on. Only
+// a genuine low-confidence/abstain verdict skips. The deterministic
+// `hasRetrievalIntent` override runs first and always retrieves, so an explicit
+// "search my notes" can never be mis-skipped by the model.
 //
 // The prose prior (the `retrieval.assertion` in `decision-prompts.yaml`) is
 // weighted toward "do not retrieve"; it is externalized so the economy/
@@ -205,7 +205,7 @@ export function capBytes(text: string, maxBytes: number): string {
 
 // Build the `noul` request: "is this message self-contained?" `allow_abstain`
 // is true so a low-confidence backend surfaces as `abstained`, which the gate
-// maps to SKIP (fail-closed).
+// maps to SKIP (no confident verdict). A provider *error* retrieves.
 export function buildRetrievalRequest(
   text: string,
   assertion: string,
@@ -231,9 +231,10 @@ export type RetrievalGate = {
     | "shape"
 }
 
-// Fail-closed evaluation of the provider result. Exported for tests.
+// Evaluation of the provider result. Exported for tests. A provider error
+// retrieves (fail-open); abstain/shape stay skips (no confident verdict).
 export function evaluateRetrieval(result: DecisionResult, noulThreshold: number): RetrievalGate {
-  if (result.error) return { skip: true, reason: "error" }
+  if (result.error) return { skip: false, reason: "error" }
   if (result.abstained) return { skip: true, reason: "abstain" }
   if (typeof result.value !== "boolean") return { skip: true, reason: "shape" }
   if (result.value !== true) return { skip: false, reason: "retrieve" }

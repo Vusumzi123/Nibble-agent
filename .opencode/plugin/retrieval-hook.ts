@@ -32,9 +32,10 @@ import {
 //   gate: true   — a confident skip suppresses the Brain-First search this turn.
 //   gate: false  — shadow: verdicts are logged but every turn retrieves.
 //
-// FAIL-CLOSED: error / abstain / non-boolean -> SKIP (lib/retrieval.ts
-// `evaluateRetrieval`). The deterministic `hasRetrievalIntent` override always
-// retrieves first, so "search my notes" can never be mis-skipped.
+// FAIL-OPEN on provider error: a broken gate retrieves rather than silently
+// skipping (lib/retrieval.ts `evaluateRetrieval`). Abstain/non-boolean still
+// skip, since there is no confident verdict to act on. The deterministic
+// `hasRetrievalIntent` override always retrieves first.
 //
 // The decision is awaited inside `chat.message` so `system.transform` (which
 // runs before the model request) can inject the block; it is cleared at
@@ -100,18 +101,19 @@ export default (async ({ client, directory }) => {
     const intent = config.force_intent && hasRetrievalIntent(text)
     if (intent) return { gate: { skip: false, reason: "intent" }, result: null }
     try {
-      // FAIL-CLOSED: no rules fallback here — an error-carrying or missing
-      // result becomes a SKIP (lib/retrieval.ts `evaluateRetrieval`).
+      // No rules fallback here: an error-carrying or missing result becomes a
+      // RETRIEVE (fail-open, lib/retrieval.ts `evaluateRetrieval`).
       const outcome = await decisionGate!.decide(
         buildRetrievalRequest(text, prompts.assertion, config.max_bytes),
         { fallback: "closed" },
       )
       const result = outcome.result
-      if (!result) return { gate: { skip: true, reason: "error" }, result: null }
+      if (!result) return { gate: { skip: false, reason: "error" }, result: null }
       return { gate: evaluateRetrieval(result, config.noul_threshold), result }
     } catch (err) {
       void diag.error("[retrieval-hook] decision failed:", err)
-      return { gate: { skip: true, reason: "error" }, result: null }
+      // Fail-open: a broken gate must not silently suppress retrieval.
+      return { gate: { skip: false, reason: "error" }, result: null }
     }
   }
 

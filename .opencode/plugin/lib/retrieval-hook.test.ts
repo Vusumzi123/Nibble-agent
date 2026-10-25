@@ -14,8 +14,8 @@ function logFile(dir: string): string {
 }
 
 // The decision provider is `rules`, which abstains on the retrieval noul (it only
-// answers the triage question). That makes the fail-closed path deterministic:
-// an abstain/error must become a SKIP, no external process involved.
+// answers the triage question). That makes the failure path deterministic: a
+// missing provider result must retrieve (fail-open), no external process needed.
 function mockClient(opts: { parentID?: string } = {}) {
   return {
     session: {
@@ -67,15 +67,16 @@ async function directiveFor(hooks: any, sid: string): Promise<string> {
   return out.join("\n")
 }
 
-test("fail-closed: an abstaining provider yields a SKIP directive", async () => {
+test("fail-open: a failing provider retrieves instead of silently skipping", async () => {
   const dir = await project(["enabled: true", "gate: true"])
   const hooks = await createHook({ client: mockClient(), directory: dir } as any)
   await fire(hooks, "ses_1", "install htop")
   const block = await directiveFor(hooks, "ses_1")
-  assert.match(block, /\[brain-first: SKIP\]/)
+  assert.match(block, /\[brain-first: RETRIEVE\]/)
   const entry = (await readLog(dir)).at(-1)
   assert.equal(entry.event, "retrieval")
-  assert.equal(entry.skip, true)
+  assert.equal(entry.skip, false)
+  assert.equal(entry.retrieve, true)
   assert.equal(entry.reason, "error")
   await rm(dir, { recursive: true, force: true })
 })

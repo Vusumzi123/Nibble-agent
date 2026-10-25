@@ -24,10 +24,17 @@ export type SummaryItem = {
 
 export type SummarizeDegraded = "summarizer-fallback"
 
+/** Structured failure class so a fallback is measurable, not just a string. */
+export type SummarizeFailure = "parse-failure" | "late-reply" | "timeout" | "spawn"
+
 export type SummarizeResult = {
   items: SummaryItem[]
   degraded?: SummarizeDegraded
   error?: string
+  /** Set when the deterministic fallback ran; identifies why. */
+  errorCode?: SummarizeFailure
+  /** A reply arrived after the idle deadline but was used anyway. */
+  lateReply?: boolean
   model?: string | null
   promptBytes: number
   wallMs: number
@@ -322,14 +329,17 @@ function usageTokens(rows: unknown[]): number | null {
   return known ? total : null
 }
 
-function lastAssistantText(rows: unknown[]): string {
+/** Assistant reply texts, newest first. The last valid block wins; a trailing
+ *  acknowledgement must not discard an earlier, well-formed summary. */
+function assistantReplies(rows: unknown[]): string[] {
+  const replies: string[] = []
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i] as { info?: { role?: unknown }; parts?: unknown[] }
     if (row?.info?.role !== "assistant") continue
     const text = textOf(row.parts ?? []).trim()
-    if (text) return text
+    if (text) replies.push(text)
   }
-  return ""
+  return replies
 }
 
 function isPromptError(res: { error?: unknown; response?: { ok?: boolean } } | undefined): boolean {
@@ -356,12 +366,19 @@ export async function summarizeSession(
   const promptBytes = Buffer.byteLength(prompt, "utf8")
   let lastReplyBytes = 0
 
-  const fallback = (error: string, wallMs: number): SummarizeResult => {
+  const fallback = (
+    error: string,
+    wallMs: number,
+    errorCode: SummarizeFailure,
+    lateReply = false,
+  ): SummarizeResult => {
     deps.onWarn?.(`drain summarizer: ${error}`)
     return {
       items: deterministicItems(input.rendered, deps.maxItems),
       degraded: "summarizer-fallback",
       error,
+      errorCode,
+      ...(lateReply ? { lateReply: true } : {}),
       model: deps.model || null,
       promptBytes,
       wallMs,
@@ -389,7 +406,9 @@ export async function summarizeSession(
       }
     }
 
-    const ask = async (text: string): Promise<{ rows: unknown[]; reply: string }> => {
+    const ask = async (
+      text: string,
+    ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
       const spawn = async (): Promise<string> => {
         const created = await deps.client.session.create({
           body: { title: SUMMARIZER_SESSION_TITLE },
@@ -412,22 +431,33 @@ export async function summarizeSession(
         return childID
       }
 
-      const collect = async (id: string): Promise<{ rows: unknown[]; reply: string }> => {
-        const idled = await deps.waitForIdle(id)
-        if (!idled) {
-          // A timed-out child must not outlive its own wait (§5.2). Stop it
-          // before throwing so the fallback path never leaves a live session.
-          const abortError = await abortChild(id)
-          throw new Error(
-            abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
-          )
-        }
+      const read = async (
+        id: string,
+      ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
         const messages = await deps.client.session.messages({
           path: { id },
           query: { directory: deps.directory },
         })
         const rows = Array.isArray(messages?.data) ? messages.data : []
-        return { rows, reply: lastAssistantText(rows) }
+        return { rows, replies: assistantReplies(rows), late: false }
+      }
+
+      const collect = async (
+        id: string,
+      ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
+        if (await deps.waitForIdle(id)) return read(id)
+
+        // LATE REPLY: the child may have answered just after the deadline.
+        // Read before aborting so a valid reply is never discarded.
+        const late = await read(id).catch(() => null)
+        const usable = late?.replies.some((reply) => parseSummaryReply(reply) !== null)
+        // A timed-out child must not outlive its own wait (§5.2).
+        const abortError = await abortChild(id)
+        if (late && usable) return { ...late, late: true }
+        throw new SummarizeError(
+          abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
+          "timeout",
+        )
       }
 
       const childID = await spawn()
@@ -441,23 +471,40 @@ export async function summarizeSession(
         attempt === 1
           ? prompt
           : `${prompt}\n\nYour previous reply did not follow the block format. Reply again with only \`=== ITEM ===\` blocks, one per durable topic.`
-      const { rows, reply } = await ask(text)
+      const { rows, replies, late } = await ask(text)
       const tokens = usageTokens(rows)
 
+      // Newest first: accept the last block that parses; a trailing "done"
+      // acknowledgement falls through to the earlier, well-formed reply.
+      const reply =
+        replies.find((candidate) => parseSummaryReply(candidate) !== null) ??
+        replies[0] ??
+        ""
       lastReplyBytes = Buffer.byteLength(reply, "utf8")
       const raw = parseSummaryReply(reply)
 
       if (!raw) {
         if (attempt < 2) continue
+        const suffix = ` (bytes=${lastReplyBytes})`
+        if (late) {
+          return fallback(
+            `late-reply did not parse${suffix}`,
+            Date.now() - started,
+            "late-reply",
+            true,
+          )
+        }
         return fallback(
-          `malformed summarizer reply (bytes=${lastReplyBytes})`,
+          `malformed summarizer reply${suffix}`,
           Date.now() - started,
+          "parse-failure",
         )
       }
       if (raw.length === 0) {
         // NO_ITEMS: a clean no-op, not a failure.
         return {
           items: [],
+          ...(late ? { lateReply: true } : {}),
           model: deps.model || null,
           promptBytes,
           wallMs: Date.now() - started,
@@ -467,10 +514,13 @@ export async function summarizeSession(
       }
 
       const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)
-      if (items.length === 0) return fallback("no valid items", Date.now() - started)
+      if (items.length === 0) {
+        return fallback("no valid items", Date.now() - started, "parse-failure", late)
+      }
 
       return {
         items,
+        ...(late ? { lateReply: true } : {}),
         model: deps.model || null,
         promptBytes,
         wallMs: Date.now() - started,
@@ -479,6 +529,20 @@ export async function summarizeSession(
       }
     }
   } catch (err) {
-    return fallback(err instanceof Error ? err.message : String(err), Date.now() - started)
+    const message = err instanceof Error ? err.message : String(err)
+    const code: SummarizeFailure =
+      err instanceof SummarizeError ? err.code : message.includes("timed out") ? "timeout" : "spawn"
+    return fallback(message, Date.now() - started, code)
+  }
+}
+
+
+/** Internal marker so the outer catch can classify timeouts without parsing text. */
+class SummarizeError extends Error {
+  readonly code: SummarizeFailure
+  constructor(message: string, code: SummarizeFailure) {
+    super(message)
+    this.name = "SummarizeError"
+    this.code = code
   }
 }

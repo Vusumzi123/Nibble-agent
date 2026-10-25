@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -57,13 +57,18 @@ function assistant(text: string): unknown[] {
 
 function fakeClient(opts: {
   summaryReply?: string
+  /** Per-prompt summarizer reply (the drained session's delta is in the prompt). */
+  summaryReplyFor?: (prompt: string) => string
   writerReply?: string
+  /** A final acknowledgement after the writer's report (newest message). */
+  writerTrailing?: string
   sdkSessions?: unknown[]
   sdkTurns?: Record<string, unknown[]>
   waitForIdle?: (sessionID: string) => Promise<boolean>
 } = {}): { client: DrainPipeClient; prompts: any[] } {
   let summarizers = 0
   const prompts: any[] = []
+  const sent = new Map<string, string>()
   const client: DrainPipeClient = {
     session: {
       async list() {
@@ -79,13 +84,22 @@ function fakeClient(opts: {
       },
       async promptAsync(args) {
         prompts.push(args)
+        sent.set(args.path.id as string, args.body.parts?.[0]?.text ?? "")
         return { response: { ok: true } }
       },
       async messages(args) {
         const id = args.path.id as string
         if (opts.sdkTurns && opts.sdkTurns[id]) return { data: opts.sdkTurns[id] }
-        if (id === "ses_writer") return { data: assistant(opts.writerReply ?? report(["#1"])) }
-        if (id.startsWith("ses_sum_")) return { data: assistant(opts.summaryReply ?? ONE_ITEM) }
+        if (id === "ses_writer") {
+          const rows = assistant(opts.writerReply ?? report(["#1"]))
+          if (opts.writerTrailing) rows.push(...(assistant(opts.writerTrailing) as any[]))
+          return { data: rows }
+        }
+        if (id.startsWith("ses_sum_")) {
+          const reply =
+            opts.summaryReplyFor?.(sent.get(id) ?? "") ?? opts.summaryReply ?? ONE_ITEM
+          return { data: assistant(reply) }
+        }
         return { data: [] }
       },
     },
@@ -402,9 +416,9 @@ test("poison advances past a batch that never reports completely", async () => {
   assert.equal(cursor.blocked.attempts, 0)
 })
 
-test("a writer timeout is reported and does not advance", async () => {
+test("a writer timeout with no reply is reported and does not advance", async () => {
   const base = { ...(await workspace()), dbFile: await seedDb() }
-  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const { client } = fakeClient({ writerReply: "" })
   const result = await runDrainPipe(
     deps(base, client, { waitForIdle: async (id) => id !== "ses_writer" }),
   )
@@ -590,7 +604,10 @@ test("a transient provider error backs off without poisoning the boundary", asyn
   assert.match(result.error ?? "", /backend down/)
   assert.equal(result.cursorAfter, 0)
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.blocked?.attempts ?? 0, 0)
+  assert.equal(cursor.blocked.attempts, 1, "the transient failure persists a backoff")
+  assert.ok(cursor.blocked.blocked_until > Date.now() - 1_000, "backoff gets a deadline")
+  assert.equal(cursor.watermark_ts, 0, "nothing is advanced")
+  assert.deepEqual(cursor.failures, {}, "transient failures never poison a session")
 })
 
 test("an atomic provider report advances the whole batch", async () => {
@@ -613,4 +630,164 @@ test("an atomic provider report advances the whole batch", async () => {
   const result = await runDrainPipe({ ...deps(base, client), provider })
   assert.equal(result.outcome, "completed")
   assert.equal(result.cursorAfter, 1000)
+})
+
+
+test("atomic is scoped to its chunk: later chunks still run", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ summaryReply: TWO_ITEMS })
+  let calls = 0
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
+    async consolidate(items: any[]) {
+      calls++
+      if (calls === 1) return { ok: true, consumed: [], skipped: [], atomic: true }
+      return { ok: true, consumed: items.map((_, i) => i + 1), skipped: [] }
+    },
+  }
+
+  const result = await runDrainPipe({
+    ...deps(base, client, { config: { max_items_per_batch: 1 } }),
+    provider,
+  })
+  assert.equal(calls, 2, "the chunk after the atomic report is still written")
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.cursorAfter, 1000)
+})
+
+test("a trailing acknowledgement does not hide the writer's report", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ writerTrailing: "Done." })
+
+  const result = await runDrainPipe(deps(base, client))
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.consolidated, 1)
+  assert.equal(result.cursorAfter, 1000)
+})
+
+test("per-session poison leaves the other session's work pending", async () => {
+  const base = await workspace()
+  const alpha = "alpha topic: restart the tunnel"
+  const beta = "beta topic: rotate backups"
+  const turn = (id: string, text: string, time: number): unknown => ({
+    info: { id, sessionID: id.split(":")[0], role: "user", time: { created: time } },
+    parts: [{ type: "text", text }],
+  })
+  const { client } = fakeClient({
+    sdkSessions: [
+      { id: "ses_a", directory: PROJECT, title: "Alpha", time: { created: 0, updated: 1000 } },
+      { id: "ses_b", directory: PROJECT, title: "Beta", time: { created: 0, updated: 2000 } },
+    ],
+    sdkTurns: {
+      ses_a: [turn("ses_a:1", alpha, 1000)],
+      ses_b: [turn("ses_b:1", beta, 2000)],
+    },
+    summaryReplyFor: (prompt) =>
+      prompt.includes(alpha)
+        ? ONE_ITEM
+        : [
+            "=== ITEM ===",
+            "TITLE: Backup Policy",
+            "TAGS: ops/backup",
+            "SUMMARY: Nightly borg backups.",
+            "ATOMS:",
+            "- borg create",
+          ].join("\n"),
+  })
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+    }),
+    async consolidate(items: any[]) {
+      if (items.some((item) => item.title === "Backup Policy")) {
+        return { ok: false, consumed: [], skipped: [], errorKind: "permanent", detail: "poisoned" }
+      }
+      return { ok: true, consumed: items.map((_, i) => i + 1), skipped: [] }
+    },
+  }
+
+  const result = await runDrainPipe({
+    ...deps({ ...base, dbFile: join(base.stateDir, "missing.db") }, client, {
+      config: { poison_attempts: 1, max_items_per_batch: 1 },
+    }),
+    provider,
+  })
+  assert.equal(result.outcome, "dropped")
+
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.equal(cursor.sessions.ses_a?.last_ts, 1000, "the good session advanced")
+  assert.equal(cursor.sessions.ses_b?.last_ts, 2000, "only the bad session was dropped")
+  assert.deepEqual(cursor.failures, {}, "the poisoned session's counter is cleared")
+})
+
+test("a retried pass dedupes written items and creates no duplicate notes", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ summaryReply: TWO_ITEMS })
+  const writes = new Map<string, number>()
+  let backupAttempts = 0
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+      dbFile: base.dbFile,
+    }),
+    async consolidate(items: any[]) {
+      for (const item of items) {
+        if (item.title === "Backup Policy" && backupAttempts++ === 0) {
+          return { ok: false, consumed: [], skipped: [], errorKind: "permanent", detail: "rejected" }
+        }
+        await writeFile(join(base.vaultDir, `${item.title.replace(/\s+/g, "-")}.md`), item.summary, "utf8")
+        writes.set(item.title, (writes.get(item.title) ?? 0) + 1)
+      }
+      return { ok: true, consumed: items.map((_, i) => i + 1), skipped: [] }
+    },
+  }
+
+  const one = { config: { max_items_per_batch: 1 } }
+  const first = await runDrainPipe({ ...deps(base, client, one), provider })
+  assert.equal(first.outcome, "error", "the failed chunk does not advance the session")
+  const second = await runDrainPipe({ ...deps(base, client, one), provider })
+  assert.equal(second.outcome, "completed")
+
+  assert.deepEqual(
+    [...writes.entries()].sort(),
+    [
+      ["Backup Policy", 1],
+      ["Wireguard Restart", 1],
+    ],
+    "each note is written exactly once across the retried passes",
+  )
+  assert.deepEqual((await readdir(base.vaultDir)).sort(), [
+    "Backup-Policy.md",
+    "Wireguard-Restart.md",
+  ])
+})
+
+
+test("a rerun after a completed pass is a no-op", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client, prompts } = fakeClient()
+  const first = await runDrainPipe(deps(base, client))
+  assert.equal(first.outcome, "completed")
+  const spawned = prompts.length
+
+  const second = await runDrainPipe(deps(base, client))
+  assert.equal(second.outcome, "nothing")
+  assert.equal(second.sessions, 0)
+  assert.equal(second.items, 0)
+  assert.equal(prompts.length, spawned, "no summarizer or writer spawn on a rerun")
 })

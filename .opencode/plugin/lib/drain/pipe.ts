@@ -27,9 +27,12 @@ import {
   advanceSession,
   advanceWatermark,
   defaultCursor,
+  isWritten,
   loadCursor,
+  markWritten,
   pruneSessions,
   recordFailure,
+  recordSessionFailure,
   resolveCursorFile,
   saveCursor,
   sessionMarkTs,
@@ -117,18 +120,18 @@ export type DrainPipeDeps = {
   onWarn?: (message: string, err?: unknown) => void
 }
 
-type PlannedItem = { item: SummaryItem; sessionID: string; ts: number }
+type PlannedItem = {
+  item: SummaryItem
+  sessionID: string
+  ts: number
+  /** Already consolidated in an earlier pass (idempotency set). */
+  written?: boolean
+  /** Duplicate of an earlier item in this same pass. */
+  deduped?: boolean
+}
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
-}
-
-function maxTurnTime(renderings: RenderedSession[]): number {
-  let max = 0
-  for (const rendered of renderings) {
-    for (const turn of rendered.turns) max = Math.max(max, turn.time)
-  }
-  return max
 }
 
 type PlannedChunk = { offset: number; items: PlannedItem[] }
@@ -384,6 +387,24 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       }
     }
 
+    // Idempotency: an item whose hash was consolidated by an earlier pass is
+    // already reported; a duplicate hash within this pass is consolidated once.
+    // Both still count as reported for session advancement.
+    const seenHashes = new Set<string>()
+    let replayCount = 0
+    for (const entry of planned) {
+      if (isWritten(cursor, entry.item.hash)) {
+        entry.written = true
+        replayCount++
+      } else if (seenHashes.has(entry.item.hash)) {
+        entry.deduped = true
+        replayCount++
+      } else {
+        seenHashes.add(entry.item.hash)
+      }
+    }
+    const fresh = planned.filter((entry) => !entry.written && !entry.deduped)
+
     // Sessions never summarized because the budget stopped the loop stay at
     // their marks (unconsumed above them) — floor the watermark for them.
     const summarizedIds = new Set(sessionMaxTs.keys())
@@ -448,7 +469,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       ),
     ].join("\n\n")
 
-    const items: WriteItem[] = planned.map((entry) => entry.item)
+    const items: WriteItem[] = fresh.map((entry) => entry.item)
     const ctx: WriteContext = {
       directory: deps.directory,
       vaultDir: deps.vaultDir,
@@ -465,11 +486,12 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     // can service. On a complete run the cursor advances once after every
     // chunk reports or skips all of its items; on a budget stop only the
     // fully-reported sessions advance (§2.2).
-    const chunks = chunkPlanned(planned, cfg.max_items_per_batch)
+    const chunks = chunkPlanned(fresh, cfg.max_items_per_batch)
     const consumed: number[] = []
     const skipped: number[] = []
     let failure: WriteReport | null = null
-    let atomicAll = false
+    /** Items of the chunk that failed (poison accounting is per session). */
+    let failedItems: PlannedItem[] = []
     let writerSession: string | null = null
     promptBytes = 0
 
@@ -510,40 +532,132 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
 
       if (!chunkReport.ok) {
         failure = chunkReport
+        failedItems = chunk.items
         break
       }
       if (chunkReport.atomic === true) {
-        atomicAll = true
-        break
+        // The provider handled this whole chunk. Scope the claim to the chunk:
+        // keep processing the remaining chunks, and never advance sessions
+        // whose chunk was not run (budget stop or later failure).
+        for (let i = 0; i < chunk.items.length; i++) consumed.push(i + 1 + chunk.offset)
+        cursor = markWritten(
+          cursor,
+          chunk.items.map((entry) => entry.item.hash),
+          Math.max(...chunk.items.map((entry) => entry.ts)),
+        )
+        continue
       }
       consumed.push(...chunkReport.consumed.map((label) => label + chunk.offset))
       skipped.push(...chunkReport.skipped.map((label) => label + chunk.offset))
       if (chunkReport.consumed.length + chunkReport.skipped.length !== chunk.items.length) {
         failure = { ...chunkReport, detail: "incomplete report" }
+        failedItems = chunk.items
         break
       }
+      // Record only consumed items: a retried pass may re-read this session
+      // after a crash, and those notes must not be created twice.
+      cursor = markWritten(
+        cursor,
+        chunkReport.consumed
+          .map((label) => chunk.items[label - 1])
+          .filter((entry): entry is PlannedItem => !!entry)
+          .map((entry) => entry.item.hash),
+        Math.max(0, ...chunk.items.map((entry) => entry.ts)),
+      )
     }
 
-    const boundary = maxTurnTime(renderings)
-    const reportedAll = consumed.length + skipped.length === items.length
-    const complete = atomicAll || (failure === null && reportedAll)
+    const reportedAll = consumed.length + skipped.length === fresh.length
+    const complete = failure === null && reportedAll
 
     if (failure || (!complete && stopped === null)) {
-      // Transient provider failures back off without poisoning the boundary.
+      // Transient provider failures back off without poisoning anything.
       const errorKind = failure?.errorKind
       if (errorKind !== "transient") {
-        const failed = recordFailure(cursor, boundary, cfg.poison_attempts, {
-          backoffMs: cfg.poll_seconds * 4 * 1000,
-        })
-        cursor = failed.cursor
+        const boundaryItems = failedItems.length > 0 ? failedItems : fresh
+        const affected = new Map<string, number>()
+        for (const item of boundaryItems) {
+          affected.set(item.sessionID, Math.max(affected.get(item.sessionID) ?? 0, item.ts))
+        }
+        const boundary = Math.max(0, ...affected.values())
+        const backoffMs = cfg.poll_seconds * 4 * 1000
+
+        // Batch backoff only: poison is per session below, so this can never
+        // push the watermark past another session's unreported items.
+        cursor = recordFailure(cursor, boundary, 0, { backoffMs }).cursor
+        const batchBlocked = cursor.blocked
+
+        // Sessions whose chunks were fully reported before the failure still
+        // advance; only the affected sessions are retried or poisoned.
+        const reportedLabels = new Set([...consumed, ...skipped])
+        const labelOf = new Map<PlannedItem, number>()
+        fresh.forEach((entry, i) => labelOf.set(entry, i + 1))
+        const bySession = new Map<string, { ts: number; parts: string[]; fully: boolean }>()
+        for (const entry of planned) {
+          const current =
+            bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [], fully: true }
+          current.ts = Math.max(current.ts, entry.ts)
+          const reported = entry.written === true || entry.deduped === true
+          if (!reported && !reportedLabels.has(labelOf.get(entry) ?? -1)) current.fully = false
+          if (entry.item.summary.trim()) current.parts.push(entry.item.summary.trim())
+          bySession.set(entry.sessionID, current)
+        }
+
+        let droppedAny = false
+        let keptAny = false
+        for (const [sid, entry] of bySession) {
+          if (entry.fully) {
+            cursor = advanceSession(cursor, sid, entry.ts, entry.parts.join("\n\n").slice(0, 2000) || undefined)
+            consumedMarks.push(entry.ts)
+            continue
+          }
+          const ts = affected.get(sid)
+          if (ts === undefined) {
+            floorMarks.push(sessionMarkTs(cursor, sid))
+            continue
+          }
+          const recorded = recordSessionFailure(cursor, sid, ts, cfg.poison_attempts, { backoffMs })
+          cursor = recorded.cursor
+          if (recorded.dropped) {
+            droppedAny = true
+            cursor = advanceSession(cursor, sid, ts)
+            consumedMarks.push(ts)
+            // Keep the watermark from crossing newer turns in this session;
+            // its own mark already skips the poisoned batch.
+            floorMarks.push(ts)
+          } else {
+            keptAny = true
+            floorMarks.push(sessionMarkTs(cursor, sid))
+          }
+        }
+        for (const [sid, ts] of sessionMaxTs) {
+          if (!bySession.has(sid)) {
+            cursor = advanceSession(cursor, sid, ts)
+            consumedMarks.push(ts)
+          }
+        }
+        for (const rendered of renderings) {
+          if (!bySession.has(rendered.sessionID)) {
+            floorMarks.push(sessionMarkTs(cursor, rendered.sessionID))
+          }
+        }
+        if (consumedMarks.length > 0) {
+          const bound = Math.max(...consumedMarks)
+          const candidate = Math.min(bound, ...(floorMarks.length > 0 ? floorMarks : [bound]))
+          cursor = advanceWatermark(cursor, candidate)
+        }
+        // A partly-dropped batch still owes the kept sessions their backoff.
+        if (keptAny && batchBlocked.attempts > 0) {
+          cursor = { ...cursor, blocked: batchBlocked }
+        }
+        cursor = pruneSessions(cursor, cfg.continuity_sessions)
         await saveCursor(cursorFile, cursor)
         pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
         return emit({
-          outcome: failed.dropped ? "dropped" : "error",
+          outcome: droppedAny && !keptAny ? "dropped" : "error",
           sessions: renderings.length,
           items: planned.length,
           consolidated: consumed.length,
-          skipped: skipped.length,
+          skipped: skipped.length + replayCount,
           cursorBefore,
           cursorAfter: cursor.watermark_ts,
           session: writerSession,
@@ -552,13 +666,21 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
         })
       }
+      // Persist the backoff: a transient outage must not hot-loop at the
+      // step's poll cadence. Attempts are batch-level and never poison.
+      const transientItems = failedItems.length > 0 ? failedItems : fresh
+      const transientBoundary = Math.max(0, ...transientItems.map((entry) => entry.ts))
+      cursor = recordFailure(cursor, transientBoundary, 0, {
+        backoffMs: cfg.poll_seconds * 4 * 1000,
+      }).cursor
+      await saveCursor(cursorFile, cursor)
       pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
       return emit({
         outcome: "error",
         sessions: renderings.length,
         items: planned.length,
         consolidated: consumed.length,
-        skipped: skipped.length,
+        skipped: skipped.length + replayCount,
         cursorBefore,
         cursorAfter: cursor.watermark_ts,
         session: writerSession,
@@ -573,14 +695,16 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     // watermark so they are re-read from their own mark next pass.
     // Report labels are 1-based (types.ts: "matching the prompt labels").
     const reportedLabels = new Set([...consumed, ...skipped])
+    // Labels are 1-based and scoped to the fresh (not-yet-written) list.
+    const labelOf = new Map<PlannedItem, number>()
+    fresh.forEach((entry, i) => labelOf.set(entry, i + 1))
     const bySession = new Map<string, { ts: number; parts: string[]; fully: boolean }>()
-    for (let i = 0; i < planned.length; i++) {
-      const entry = planned[i]
+    for (const entry of planned) {
       const current =
         bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [], fully: true }
       current.ts = Math.max(current.ts, entry.ts)
-      // `atomic: true` reports the whole batch consumed without labels.
-      if (!atomicAll && !reportedLabels.has(i + 1)) current.fully = false
+      const reported = entry.written === true || entry.deduped === true
+      if (!reported && !reportedLabels.has(labelOf.get(entry) ?? -1)) current.fully = false
       if (entry.item.summary.trim()) current.parts.push(entry.item.summary.trim())
       bySession.set(entry.sessionID, current)
     }
@@ -623,7 +747,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         sessions: renderings.length,
         items: planned.length,
         consolidated: consumed.length,
-        skipped: skipped.length,
+        skipped: skipped.length + replayCount,
         cursorBefore,
         cursorAfter: cursor.watermark_ts,
         session: writerSession,
@@ -638,7 +762,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       sessions: renderings.length,
       items: planned.length,
       consolidated: consumed.length,
-      skipped: skipped.length,
+      skipped: skipped.length + replayCount,
       cursorBefore,
       cursorAfter: cursor.watermark_ts,
       session: writerSession,

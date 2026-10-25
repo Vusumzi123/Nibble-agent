@@ -11,8 +11,11 @@ import {
   defaultCursor,
   loadCursor,
   normalizeCursor,
+  isWritten,
+  markWritten,
   pruneSessions,
   recordFailure,
+  recordSessionFailure,
   resolveCursorFile,
   saveCursor,
   sessionMarkTs,
@@ -229,4 +232,72 @@ test("saved JSON is human-readable and newline-terminated", async () => {
   const text = await readFile(file, "utf8")
   assert.ok(text.endsWith("\n"))
   assert.match(text, /\n {2}"watermark_ts"/)
+})
+
+
+test("a v2 cursor upgrades in place without losing marks", () => {
+  const cursor = normalizeCursor({
+    version: 2,
+    watermark_ts: 900,
+    sessions: { ses_a: { last_ts: 800, summary: "kept" } },
+  })
+  assert.equal(cursor.version, 3)
+  assert.equal(cursor.watermark_ts, 900)
+  assert.equal(cursor.sessions.ses_a.last_ts, 800)
+  assert.deepEqual(cursor.failures, {})
+  assert.deepEqual(cursor.written, {})
+})
+
+test("per-session poison advances only the failed session's batch", () => {
+  let cursor = advanceWatermark(defaultCursor(), 100)
+  cursor = advanceSession(cursor, "ses_a", 500)
+  cursor = advanceSession(cursor, "ses_b", 500)
+
+  const first = recordSessionFailure(cursor, "ses_a", 1000, 3, { nowMs: 1_000, backoffMs: 500 })
+  assert.equal(first.dropped, false)
+  assert.equal(first.cursor.failures.ses_a?.attempts, 1)
+  assert.equal(first.cursor.failures.ses_a?.blocked_until, 1_500)
+  assert.equal(first.cursor.failures.ses_b, undefined)
+
+  const second = recordSessionFailure(first.cursor, "ses_a", 1000, 3)
+  const third = recordSessionFailure(second.cursor, "ses_a", 1000, 3)
+  assert.equal(third.dropped, true)
+  assert.equal(third.cursor.failures.ses_a, undefined)
+  assert.equal(third.cursor.watermark_ts, 100, "poison alone never moves the watermark")
+  assert.equal(third.cursor.sessions.ses_b.last_ts, 500, "the other session is untouched")
+})
+
+test("a new boundary resets that session's attempt counter", () => {
+  const first = recordSessionFailure(defaultCursor(), "ses_a", 100, 3)
+  const next = recordSessionFailure(first.cursor, "ses_a", 200, 3)
+  assert.equal(next.cursor.failures.ses_a?.ts, 200)
+  assert.equal(next.cursor.failures.ses_a?.attempts, 1)
+})
+
+test("advancing a session or the watermark clears stale failures", () => {
+  const failed = recordSessionFailure(defaultCursor(), "ses_a", 100, 5).cursor
+  const advanced = advanceSession(failed, "ses_a", 150)
+  assert.equal(advanced.failures.ses_a, undefined)
+  assert.equal(advanceWatermark(failed, 100).failures.ses_a, undefined)
+  assert.equal(advanceWatermark(failed, 50).failures.ses_a?.attempts, 1)
+})
+
+test("written hashes dedupe re-runs and are capped", () => {
+  let cursor = markWritten(defaultCursor(), ["a"], 100, 2)
+  cursor = markWritten(cursor, ["b"], 150, 2)
+  assert.equal(isWritten(cursor, "a"), true)
+  assert.equal(isWritten(cursor, "missing"), false)
+  cursor = markWritten(cursor, ["c"], 200, 2)
+  assert.deepEqual(Object.keys(cursor.written).sort(), ["b", "c"])
+  assert.equal(isWritten(cursor, "a"), false)
+})
+
+test("pruning sessions keeps only their failure records", () => {
+  let cursor = defaultCursor()
+  cursor = advanceSession(cursor, "old", 100)
+  cursor = advanceSession(cursor, "new", 300)
+  cursor = recordSessionFailure(cursor, "old", 400, 5).cursor
+  cursor = recordSessionFailure(cursor, "new", 400, 5).cursor
+  const kept = pruneSessions(cursor, 1)
+  assert.deepEqual(Object.keys(kept.failures), ["new"])
 })

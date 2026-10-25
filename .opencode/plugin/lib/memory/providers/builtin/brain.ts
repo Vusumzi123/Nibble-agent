@@ -121,7 +121,15 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         }
       }
 
-      const report = parseConsolidationReport(spawned.reply, items.length)
+      // Newest first: a trailing acknowledgement must not hide the report in
+      // the preceding assistant message.
+      const reports = spawned.replies.map((reply) =>
+        parseConsolidationReport(reply, items.length),
+      )
+      const report =
+        reports.find((candidate) => candidate.valid) ??
+        reports[0] ??
+        parseConsolidationReport("", items.length)
       if (!report.valid) {
         const missing = report.missing.length > 0 ? ` missing=${report.missing.join(",")}` : ""
         const excerpt = spawned.reply.replace(/\s+/g, " ").trim().slice(0, 500)

@@ -34,7 +34,12 @@ export type SpawnOptions = {
 export type SpawnResult = {
   ok: boolean
   sessionID: string
+  /** Newest assistant reply (kept for telemetry/excerpts). */
   reply: string
+  /** Assistant replies newest-first; the last valid report wins. */
+  replies: string[]
+  /** A reply arrived after the idle deadline but was used anyway. */
+  lateReply: boolean
   tokens: number | null
   cost: number | null
   error?: string
@@ -77,14 +82,15 @@ async function abortChild(
   }
 }
 
-function lastAssistantText(rows: unknown[]): string {
+function assistantReplies(rows: unknown[]): string[] {
+  const replies: string[] = []
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i] as { info?: { role?: unknown }; parts?: unknown[] }
     if (row?.info?.role !== "assistant") continue
     const text = textOf(row.parts ?? []).trim()
-    if (text) return text
+    if (text) replies.push(text)
   }
-  return ""
+  return replies
 }
 
 function usage(rows: unknown[]): { tokens: number | null; cost: number | null } {
@@ -123,7 +129,18 @@ export async function spawnConsolidationChild(
       query: { directory: opts.directory },
     })
     sessionID = String(created?.data?.id ?? "")
-    if (!sessionID) return { ok: false, sessionID, reply: "", tokens: null, cost: null, error: "session.create returned no id" }
+    if (!sessionID) {
+      return {
+        ok: false,
+        sessionID,
+        reply: "",
+        replies: [],
+        lateReply: false,
+        tokens: null,
+        cost: null,
+        error: "session.create returned no id",
+      }
+    }
     opts.registerChild?.(sessionID)
 
     const res = await client.session.promptAsync({
@@ -136,18 +153,51 @@ export async function spawnConsolidationChild(
       query: { directory: opts.directory },
     })
     if (res?.error || (res?.response && !res.response.ok)) {
-      return { ok: false, sessionID, reply: "", tokens: null, cost: null, error: "promptAsync failed" }
+      return {
+        ok: false,
+        sessionID,
+        reply: "",
+        replies: [],
+        lateReply: false,
+        tokens: null,
+        cost: null,
+        error: "promptAsync failed",
+      }
+    }
+
+    const read = async (): Promise<unknown[]> => {
+      const messages = await client.session.messages({
+        path: { id: sessionID },
+        query: { directory: opts.directory },
+      })
+      return Array.isArray(messages?.data) ? messages.data : []
     }
 
     if (!(await opts.waitForIdle(sessionID))) {
-      // Never leave the writer alive past its own timeout (§5.2): abort, then
-      // confirm with a FRESH bounded idle wait before reporting the timeout.
+      // LATE REPLY: read before aborting so a report that landed just after the
+      // deadline is still used. The child never outlives the wait either way.
+      const lateRows = await read().catch(() => [] as unknown[])
       const abortError = await abortChild(client, opts.directory, sessionID)
+      const lateReplies = assistantReplies(lateRows)
+      if (lateReplies.length > 0) {
+        const { tokens, cost } = usage(lateRows)
+        return {
+          ok: true,
+          sessionID,
+          reply: lateReplies[0] ?? "",
+          replies: lateReplies,
+          lateReply: true,
+          tokens,
+          cost,
+        }
+      }
       if (abortError) {
         return {
           ok: false,
           sessionID,
           reply: "",
+          replies: [],
+          lateReply: false,
           tokens: null,
           cost: null,
           error: `timeout; abort failed: ${abortError}`,
@@ -160,28 +210,45 @@ export async function spawnConsolidationChild(
           ok: false,
           sessionID,
           reply: "",
+          replies: [],
+          lateReply: false,
           tokens: null,
           cost: null,
           error: `timeout; abort not confirmed within ${confirmMs}ms`,
         }
       }
-      return { ok: false, sessionID, reply: "", tokens: null, cost: null, error: "timeout" }
+      return {
+        ok: false,
+        sessionID,
+        reply: "",
+        replies: [],
+        lateReply: false,
+        tokens: null,
+        cost: null,
+        error: "timeout",
+      }
     }
 
-    const messages = await client.session.messages({
-      path: { id: sessionID },
-      query: { directory: opts.directory },
-    })
-    const rows = Array.isArray(messages?.data) ? messages.data : []
-    const reply = lastAssistantText(rows)
+    const rows = await read()
+    const replies = assistantReplies(rows)
     const { tokens, cost } = usage(rows)
 
-    return { ok: true, sessionID, reply, tokens, cost }
+    return {
+      ok: true,
+      sessionID,
+      reply: replies[0] ?? "",
+      replies,
+      lateReply: false,
+      tokens,
+      cost,
+    }
   } catch (err) {
     return {
       ok: false,
       sessionID,
       reply: "",
+      replies: [],
+      lateReply: false,
       tokens: null,
       cost: null,
       error: err instanceof Error ? err.message : String(err),

@@ -30,6 +30,8 @@ type FakeOptions = {
   reply?: string
   /** Sequenced replies: one per summarizer attempt (last one repeats). */
   replies?: string[]
+  /** A final acknowledgement after the block reply (newest message). */
+  trailingReply?: string
   failCreate?: boolean
   failPrompt?: boolean
   /** Sequenced promptAsync errors: each entry is returned by that call. */
@@ -66,14 +68,19 @@ function fakeClient(opts: FakeOptions = {}): {
         const text = opts.replies
           ? opts.replies[Math.min(replyIndex++, opts.replies.length - 1)] ?? ""
           : opts.reply ?? ""
-        return {
-          data: [
-            {
-              info: { role: "assistant", tokens: opts.tokens ?? { input: 10, output: 5, reasoning: 1 } },
-              parts: [{ type: "text", text }],
-            },
-          ],
+        const rows = [
+          {
+            info: { role: "assistant", tokens: opts.tokens ?? { input: 10, output: 5, reasoning: 1 } },
+            parts: [{ type: "text", text }],
+          },
+        ]
+        if (opts.trailingReply) {
+          rows.push({
+            info: { role: "assistant", tokens: { input: 1, output: 1, reasoning: 0 } },
+            parts: [{ type: "text", text: opts.trailingReply }],
+          })
         }
+        return { data: rows }
       },
       async abort(args) {
         calls.abort.push(args)
@@ -240,8 +247,26 @@ test("a malformed reply is retried once with a correction note", async () => {
   assert.deepEqual(warnings, [])
 })
 
-test("timeouts and spawn errors degrade to the fallback", async () => {
+test("a late reply is used instead of discarding it on timeout", async () => {
   const timedOutClient = fakeClient({ reply: REPLY })
+  const late = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    {
+      client: timedOutClient.client,
+      directory: "/work",
+      maxItems: 6,
+      waitForIdle: async () => false,
+    },
+  )
+  assert.equal(late.degraded, undefined)
+  assert.equal(late.lateReply, true)
+  assert.equal(late.items.length, 2)
+  assert.equal(timedOutClient.calls.abort.length, 1, "timed-out child is still aborted")
+  assert.equal(timedOutClient.calls.abort[0].path.id, "ses_sum")
+})
+
+test("timeouts without a reply and spawn errors degrade to the fallback", async () => {
+  const timedOutClient = fakeClient({ reply: "" })
   const timedOut = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
     {
@@ -252,11 +277,13 @@ test("timeouts and spawn errors degrade to the fallback", async () => {
     },
   )
   assert.equal(timedOut.degraded, "summarizer-fallback")
+  assert.equal(timedOut.errorCode, "timeout")
   assert.match(timedOut.error ?? "", /timed out/)
   assert.equal(timedOutClient.calls.abort.length, 1, "timed-out child is aborted")
   assert.equal(timedOutClient.calls.abort[0].path.id, "ses_sum")
+  assert.equal(timedOutClient.calls.messages.length, 1, "the reply is read before abort")
 
-  const failedAbort = fakeClient({ reply: REPLY, failAbort: true })
+  const failedAbort = fakeClient({ reply: "", failAbort: true })
   const abortResult = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
     {
@@ -267,6 +294,7 @@ test("timeouts and spawn errors degrade to the fallback", async () => {
     },
   )
   assert.equal(abortResult.degraded, "summarizer-fallback")
+  assert.equal(abortResult.errorCode, "timeout")
   assert.match(abortResult.error ?? "", /abort failed: abort rejected/)
 
   const crashed = await summarizeSession(
@@ -279,6 +307,7 @@ test("timeouts and spawn errors degrade to the fallback", async () => {
     },
   )
   assert.equal(crashed.degraded, "summarizer-fallback")
+  assert.equal(crashed.errorCode, "spawn")
   assert.match(crashed.error ?? "", /create failed/)
 })
 
@@ -328,4 +357,17 @@ test("a prompt error degrades to the fallback without a second child", async () 
   assert.match(result.error ?? "", /model overloaded/)
   assert.equal(calls.create.length, 1)
   assert.equal(calls.prompt.length, 1)
+})
+
+
+test("the last valid block wins when the final message is an acknowledgement", async () => {
+  const { client } = fakeClient({ reply: REPLY, trailingReply: "Done — all set." })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+  )
+
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.items.length, 2)
+  assert.match(result.items[0].title, /wireguard/i)
 })

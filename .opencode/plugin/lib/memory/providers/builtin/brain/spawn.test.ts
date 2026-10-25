@@ -88,7 +88,7 @@ test("omits the model when writer_model is empty", async () => {
   assert.equal("model" in calls.prompt[0].body, false)
 })
 
-test("timeouts are non-fatal, abort the child, and are reported", async () => {
+test("a late reply is used, and the timed-out writer is still aborted", async () => {
   const { client: c, calls } = client({ rows: ROWS })
   const waits = [false, true]
   const result = await spawnConsolidationChild(c, {
@@ -97,15 +97,17 @@ test("timeouts are non-fatal, abort the child, and are reported", async () => {
     waitForIdle: async () => waits.shift() ?? true,
     abortConfirmMs: 50,
   })
-  assert.equal(result.ok, false)
-  assert.equal(result.error, "timeout")
+  assert.equal(result.ok, true)
+  assert.equal(result.lateReply, true)
+  assert.equal(result.reply, "second reply")
+  assert.deepEqual(result.replies, ["second reply", "first reply"])
   assert.equal(calls.abort.length, 1, "timed-out writer is aborted")
   assert.equal(calls.abort[0].path.id, "ses_writer")
   assert.equal(calls.abort[0].query.directory, "/work")
 })
 
 test("a failed abort is recorded instead of claiming a stop", async () => {
-  const { client: c, calls } = client({ rows: ROWS, failAbort: true })
+  const { client: c, calls } = client({ rows: [], failAbort: true })
   const result = await spawnConsolidationChild(c, {
     directory: "/work",
     prompt: "x",
@@ -118,7 +120,7 @@ test("a failed abort is recorded instead of claiming a stop", async () => {
 })
 
 test("an unconfirmed abort is reported, never a clean timeout", async () => {
-  const { client: c, calls } = client({ rows: ROWS })
+  const { client: c, calls } = client({ rows: [] })
   const result = await spawnConsolidationChild(c, {
     directory: "/work",
     prompt: "x",

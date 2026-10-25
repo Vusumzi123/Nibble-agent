@@ -87,7 +87,7 @@ test("parseRetrievalConfig returns empty object when section is missing", () => 
   assert.deepEqual(parseRetrievalConfig("mail:\n  enabled: false\n"), {})
 })
 
-test("DEFAULT_RETRIEVAL is enabled, gated, and fail-closed-biased", () => {
+test("DEFAULT_RETRIEVAL is enabled and gated", () => {
   assert.equal(DEFAULT_RETRIEVAL.enabled, true)
   assert.equal(DEFAULT_RETRIEVAL.gate, true)
   assert.equal(DEFAULT_RETRIEVAL.force_intent, true)
@@ -163,7 +163,7 @@ test("every intent pattern is a valid global regex", () => {
 })
 
 // ---------------------------------------------------------------------------
-// Request + evaluation (fail-closed)
+// Request + evaluation
 
 test("buildRetrievalRequest emits an abstain-able noul with a capped state", () => {
   const req = buildRetrievalRequest("x".repeat(100), "assertion-here", 10)
@@ -191,8 +191,8 @@ test("evaluateRetrieval retrieves when a TRUE verdict is below threshold", () =>
   })
 })
 
-test("evaluateRetrieval fails closed on error, abstain, and bad shape", () => {
-  assert.deepEqual(evaluateRetrieval(result({ error: "boom" }), 0.8), { skip: true, reason: "error" })
+test("evaluateRetrieval fails open on error and skips abstain/bad shape", () => {
+  assert.deepEqual(evaluateRetrieval(result({ error: "boom" }), 0.8), { skip: false, reason: "error" })
   assert.deepEqual(evaluateRetrieval(result({ abstained: true }), 0.8), { skip: true, reason: "abstain" })
   assert.deepEqual(evaluateRetrieval(result({ value: null }), 0.8), { skip: true, reason: "shape" })
   assert.deepEqual(evaluateRetrieval(result({ probabilities: {} }), 0.8), {

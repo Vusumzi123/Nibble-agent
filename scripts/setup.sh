@@ -111,7 +111,7 @@ echo "== markdown-vault MCP =="
 MCP_DIR=".opencode/mcp/markdown-vault"
 MCP_BIN="$MCP_DIR/dist/index.js"
 MCP_REPO="https://github.com/Vusumzi123/mcp-markdown-vault.git"
-MCP_SHA="c3420632dab84801a94372c0edf4eadb8fd379e2"
+MCP_SHA="a44907dddd3e9a5fe3419ca8a9432e5f03ce21f7"
 
 mcp_head() { git -C "$MCP_DIR" rev-parse HEAD 2>/dev/null || true; }
 mcp_ready() {

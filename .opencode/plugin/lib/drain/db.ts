@@ -246,10 +246,24 @@ function marksJson(marks: Record<string, number> | undefined): string {
   return JSON.stringify(marks ?? {})
 }
 
+/** Queries above this are reported so a wedged store is visible in the log. */
+const SLOW_QUERY_MS = 250
+
+function timed<T>(label: string, fn: () => T, warn?: DrainWarn): T {
+  const started = Date.now()
+  try {
+    return fn()
+  } finally {
+    const ms = Date.now() - started
+    if (ms >= SLOW_QUERY_MS) warn?.(`drain db: slow ${label} query (${ms}ms)`)
+  }
+}
+
 function sqliteSource(
   db: SqliteDatabase,
   projectDir: string,
   excludeMissions: readonly string[],
+  warn?: DrainWarn,
 ): DrainSource {
   const titles = automationSessionTitles(excludeMissions)
   const discover = db.prepare(withTitles(DISCOVER_SQL, titles))
@@ -260,11 +274,10 @@ function sqliteSource(
   return {
     kind: "sqlite",
     async discover(lastTs, limit) {
-      const rows = discover.all(
-        projectDir,
-        lastTs,
-        ...titles,
-        limit,
+      const rows = timed(
+        "discover",
+        () => discover.all(projectDir, lastTs, ...titles, limit),
+        warn,
       ) as Array<Record<string, unknown>>
       return rows.map((row) => ({
         id: String(row.id ?? ""),
@@ -274,19 +287,27 @@ function sqliteSource(
       }))
     },
     async fetch(sessionID, lastTs, limit) {
-      const rows = fetch.all(sessionID, lastTs, limit) as Array<Record<string, unknown>>
+      const rows = timed(
+        "fetch",
+        () => fetch.all(sessionID, lastTs, limit),
+        warn,
+      ) as Array<Record<string, unknown>>
       return rows.map(turnFromRow)
     },
     async unconsumedCount(lastTs, marks) {
-      const row = count.get(marksJson(marks), projectDir, lastTs, ...titles) as
-        | { n?: unknown }
-        | undefined
+      const row = timed(
+        "count",
+        () => count.get(marksJson(marks), projectDir, lastTs, ...titles),
+        warn,
+      ) as { n?: unknown } | undefined
       return Number(row?.n ?? 0)
     },
     async oldestUnconsumedTs(lastTs, marks) {
-      const row = oldest.get(marksJson(marks), projectDir, lastTs, ...titles) as
-        | { t?: unknown }
-        | undefined
+      const row = timed(
+        "oldest",
+        () => oldest.get(marksJson(marks), projectDir, lastTs, ...titles),
+        warn,
+      ) as { t?: unknown } | undefined
       const t = Number(row?.t ?? 0)
       return Number.isFinite(t) && t > 0 ? t : null
     },
@@ -592,5 +613,5 @@ export async function openDrainSource(opts: OpenDrainSourceOptions): Promise<Dra
     return sdkSource(opts.client, opts.projectDir, "schema-mismatch", opts.excludeMissions ?? [])
   }
 
-  return sqliteSource(db, opts.projectDir, opts.excludeMissions ?? [])
+  return sqliteSource(db, opts.projectDir, opts.excludeMissions ?? [], warn)
 }
