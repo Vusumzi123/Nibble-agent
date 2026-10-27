@@ -38,6 +38,25 @@ Override with `--serve-port N` (or `NIBBLE_SERVE_PORT`). Run plain `opencode`
 instead if you don't want Ollama (the MCP then falls back to local transformer
 embeddings).
 
+## Dashboard
+
+The operator dashboard lives in [`Dashboard/`](Dashboard/) and is part of this
+repo. It serves a dense Angular SPA and a dependency-free Node API from
+`127.0.0.1:4097`, reading the same state, ledgers and opencode SQLite database
+as the harness.
+
+```bash
+cd Dashboard
+npm install
+npm run build
+npm run server       # http://127.0.0.1:4097
+```
+
+Pages: FLIGHT, METRICS, QUEUE (including the SWRR scheduler panel), MISSIONS,
+LOGS, SETTINGS. The SETTINGS schema includes `scheduler.fair` and the per-kind
+weights. The server is independent of the opencode process; restart it after
+changing `Dashboard/server/*.mjs`. See [`Dashboard/SPEC.md`](Dashboard/SPEC.md).
+
 ## Requirements
 
 - [opencode](https://opencode.ai) with at least one model connected.
@@ -62,6 +81,7 @@ embeddings).
 | Tracked (public) | Local-only (gitignored) |
 | --- | --- |
 | `.opencode/` — hooks, shared libs, agents, scripts | `.opencode/sysop-config.yaml` — your settings (generated from the tracked `.example`) |
+| `Dashboard/` — operator UI + local API | `Dashboard/node_modules/`, `Dashboard/dist/` — rebuilt locally |
 | `AGENTS.md` — agent operating instructions | `Brain/` — your knowledge vault (stubs generated) |
 | `SETUP.example.md`, `scripts/setup.sh` | `SETUP.md` — your machine's profile (generated) |
 | | `.opencode/state/` — memory buffer, tag index, hook state |
@@ -88,14 +108,18 @@ the child (drain uses `drain_run`); it never bypasses the agent. Every mission
 ends by calling `mission_result`; `on_decline: reroll` lets the orchestrator
 exclude the mission and pick another one once in the same tick.
 
-Work reaches missions through **lane queues** ([`docs/heartbeat-lanes.md`](docs/heartbeat-lanes.md)):
-a tick drains a persistent work queue instead of running one thing. `lane:
-primary` missions are picked by the JEV digest (one per tick); `lane: side`
-missions (drain, staleness) are status-fed, ride a strict-FIFO side queue, and
-run **alongside** the primary in the same tick — one side item per tick, no
-expiry. Empty queues make a tick a silent no-action tick with zero LLM calls.
-See [`docs/missions.md`](docs/missions.md) and
-[`docs/heartbeat-mission-architecture.md`](docs/heartbeat-mission-architecture.md).
+Work reaches missions through **one persistent work queue**. Producers state
+intent (`mission`, `staleness`, `drain-pass`); the heartbeat executes exactly
+one unit per tick. A **smooth weighted round-robin (SWRR)** scheduler picks the
+work *kind* (default mission 4 / drain 3 / maintenance 1), then JEV chooses the
+mission inside a mission slot. This makes starvation structural: a perpetual
+mission candidate cannot lock drain out. Weights and the one-release
+`fair: false` rollback live under `scheduler:` in sysop-config; see
+[`docs/swrr-work-scheduler-plan.md`](docs/swrr-work-scheduler-plan.md). The
+old lane-queue and drain-consumer pages are retained as history. Empty queues
+make a tick a silent no-action tick with zero LLM calls. See
+[`AGENTS.md`](AGENTS.md) and the
+[SWRR plan](docs/swrr-work-scheduler-plan.md).
 
 ## Modes
 

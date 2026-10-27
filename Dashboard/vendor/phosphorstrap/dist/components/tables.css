@@ -1,0 +1,45 @@
+/* Phosphorstrap — tables
+   Color comes from the bridge: --bs-table-color/bg/border resolve to
+   tokens, and the striped/active/hover washes decompose
+   --bs-emphasis-color-rgb (= --ph-text-rgb) so they flip per theme.
+   This file adds the terminal header treatment and a warm hover fade. */
+
+.table > tbody > tr > * {
+  line-height: var(--ph-leading-base);
+  padding: var(--ph-space-3) var(--ph-space-4);
+  transition: background-color var(--ph-transition-fast);
+}
+
+/* terminal header — gradient rail echoing panel/modal headers */
+.table thead th {
+  background-image: var(--ph-gradient-header);
+  border-bottom-width: 2px;
+  border-bottom-color: var(--ph-border);
+  color: var(--ph-text);
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: var(--ph-leading-tight);
+  padding: var(--ph-space-3) var(--ph-space-4);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.table th {
+  font-size: var(--ph-text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ph-text-muted);
+}
+
+.table td {
+  color: var(--ph-text);
+}
+
+.table caption {
+  font-family: var(--ph-font-mono);
+  color: var(--ph-text-muted);
+  font-size: var(--ph-text-sm);
+  padding: var(--ph-space-2) var(--ph-space-4);
+}

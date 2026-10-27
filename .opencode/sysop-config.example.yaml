@@ -29,10 +29,9 @@ audit:
   rotate_by: size            # size | daily | weekly
 
 drain:
-  # Cursor-backed conversation consolidation (drain-pipe). With consumer: true
-  # (default) a demand-driven in-process loop runs passes on its own timer
-  # (docs/drain-consumer.md); consumer: false returns drain to the heartbeat
-  # side lane (the rollback path). All keys are optional and hot-read.
+  # Cursor-backed conversation consolidation (drain-pipe). consumer: true
+  # (default) makes drain a heartbeat `drain-pass` work item; consumer: false
+  # is the legacy side-mission rollback. All keys are optional and hot-read.
   enabled: true
   consumer: true
   cursor_file: drain-cursor.json   # leaf under <state>
@@ -261,6 +260,16 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   mission_lock_refresh_ms: 60000    # live holder re-stamps this often
   mission_summary_timeout_ms: 90000 # bound for the attempt summary (under the lock)
   mission_max_resumes: 3            # resumes before a timed-out mission drops
+
+scheduler:                      # SWRR work-kind fairness (docs/swrr-work-scheduler-plan.md)
+  fair: true                    # false = legacy static-priority rollback
+  weights:                      # relative shares; 0 disables a kind
+    mission: 4
+    drain-pass: 3
+    quiet-hours: 1
+    staleness: 1
+    profile-update: 1
+    soul-update: 1
 
 idea:                          # idea missions (§17.10) — card 7a reads this
   enabled: true                # day draw + post-run dedupe/review/append gate

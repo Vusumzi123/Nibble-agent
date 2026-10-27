@@ -1,13 +1,19 @@
-# The Drain Consumer
+# The Drain Consumer (Historical)
 
-How memory consolidation is scheduled, and how to tune or roll it back.
+> **Historical (2026-10-27).** The consumer loop and `drain.lock` described
+> here were removed in Phase 1 (`466d440`). Drain is now a `drain-pass` work
+> item executed by the single heartbeat loop; `drain.current.json`,
+> `drain.lock`, and the consumer wake loop no longer exist. The current
+> scheduling implementation is
+> [SWRR Work Scheduler](swrr-work-scheduler-plan.md). This page is retained
+> for design history.
 
 Before this change, drain rode the heartbeat's side lane as
 `candidacy: turns-pending`, so it got at most **one dequeue per tick**: a p50
 gap of 30 minutes between passes and a measured starvation stretch of 7.8 h.
-The consumer (docs/drain-consumer-plan.md) moves drain off the tick entirely:
-its own in-process loop, demand-driven, serialized with every other drain
-writer through one lock.
+The consumer (the archived design described below) moved drain off the tick
+entirely: its own in-process loop, demand-driven, serialized with every other
+drain writer through one lock.
 
 ```
 tick loop  (frequency) ──> primary lane ──> JEV digest   owns heartbeat.lock

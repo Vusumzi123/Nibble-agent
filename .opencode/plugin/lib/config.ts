@@ -251,6 +251,8 @@ export type NestedSectionOptions = {
   skipBlocks?: Set<string>
   /** Per-path coercion. Unknown keys are rejected before this is called. */
   coerce?: NestedCoerce
+  /** Key regex; defaults to DEFAULT_KEY_RE. Use HYPHEN_KEY_RE for hyphenated keys. */
+  keyPattern?: RegExp
 }
 
 const LIST_ITEM_RE = /^\s*-\s+(.*)$/
@@ -347,7 +349,7 @@ export function parseNestedSection(
       continue
     }
 
-    const m = trimmed.match(DEFAULT_KEY_RE)
+    const m = trimmed.match(opts.keyPattern ?? DEFAULT_KEY_RE)
     if (!m) continue
     const key = m[1]
     // `m[2]` may start with `#` (the key regex already ate the whitespace),

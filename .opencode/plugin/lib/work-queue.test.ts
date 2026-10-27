@@ -132,3 +132,107 @@ test("loadWorkQueue: a corrupt file is an empty queue", async () => {
   await writeFile(file, "{ not json", "utf8")
   assert.deepEqual(await loadWorkQueue(file), [])
 })
+
+import {
+  DEFAULT_WORK_WEIGHTS,
+  emptyScheduler,
+  loadWorkQueueState,
+  pickFair,
+  refundFairPick,
+  saveWorkQueueState,
+} from "./work-queue.ts"
+
+function runFairRounds(
+  kinds: Array<{ kind: WorkItem["kind"]; weight: number }>,
+  rounds: number,
+): Array<WorkItem["kind"]> {
+  const scheduler = emptyScheduler({
+    ...DEFAULT_WORK_WEIGHTS,
+    ...Object.fromEntries(kinds.map((entry) => [entry.kind, entry.weight])),
+  })
+  let state = scheduler
+  let queue: WorkItem[] = kinds.map((entry) => item({ id: `${entry.kind}:x`, kind: entry.kind }))
+  const picked: Array<WorkItem["kind"]> = []
+  for (let i = 0; i < rounds; i += 1) {
+    const pick = pickFair(queue, state, 1_000)
+    assert.ok(pick)
+    picked.push(pick!.kind)
+    state = pick!.scheduler
+    queue = dequeueById(queue, pick!.item.id)!.rest
+    queue = enqueueWork(queue, [item({ id: `${pick!.kind}:x`, kind: pick!.kind, enqueued_ms: i + 1 })])
+  }
+  return picked
+}
+
+test("SWRR: 4:3 service is proportional and never starves", () => {
+  const picked = runFairRounds(
+    [
+      { kind: "mission", weight: 4 },
+      { kind: "drain-pass", weight: 3 },
+    ],
+    14,
+  )
+  assert.equal(picked.filter((kind) => kind === "mission").length, 8)
+  assert.equal(picked.filter((kind) => kind === "drain-pass").length, 6)
+  const maxGap = (kind: WorkItem["kind"]): number => {
+    let gap = 0
+    let current = 0
+    for (const entry of picked) {
+      if (entry === kind) {
+        gap = Math.max(gap, current)
+        current = 0
+      } else current += 1
+    }
+    return gap
+  }
+  assert.ok(maxGap("drain-pass") <= 3, `drain max gap ${maxGap("drain-pass")}`)
+  assert.ok(maxGap("mission") <= 2, `mission max gap ${maxGap("mission")}`)
+})
+
+test("SWRR: a third kind gets its share without changing the core", () => {
+  const picked = runFairRounds(
+    [
+      { kind: "mission", weight: 4 },
+      { kind: "drain-pass", weight: 3 },
+      { kind: "staleness", weight: 1 },
+    ],
+    16,
+  )
+  assert.equal(picked.filter((kind) => kind === "mission").length, 8)
+  assert.equal(picked.filter((kind) => kind === "drain-pass").length, 6)
+  assert.equal(picked.filter((kind) => kind === "staleness").length, 2)
+})
+
+test("SWRR: weight 0 disables a kind and a refund restores the credit", () => {
+  const scheduler = emptyScheduler({ ...DEFAULT_WORK_WEIGHTS, "drain-pass": 0 })
+  const queue = [
+    item({ id: "mission:a", kind: "mission" }),
+    item({ id: "drain-pass", kind: "drain-pass" }),
+  ]
+  const pick = pickFair(queue, scheduler, 1_000)
+  assert.ok(pick)
+  assert.equal(pick!.kind, "mission")
+  const refunded = refundFairPick(pick!.scheduler, pick!)
+  assert.equal(refunded.last_kind, null)
+  assert.equal(refunded.served.mission, 0)
+  assert.equal(refunded.credits.mission, DEFAULT_WORK_WEIGHTS.mission)
+})
+
+test("SWRR state persists beside the queue and keeps items on corrupt scheduler", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swrr-"))
+  const file = join(dir, "work-queue.json")
+  const scheduler = pickFair(
+    [item({ id: "mission:a", kind: "mission" }), item({ id: "drain-pass", kind: "drain-pass" })],
+    emptyScheduler(),
+    1_000,
+  )!.scheduler
+  await saveWorkQueueState(file, [item({ id: "mission:a" })], scheduler)
+  const loaded = await loadWorkQueueState(file)
+  assert.equal(loaded.items.length, 1)
+  assert.equal(loaded.scheduler.served.mission, 1)
+
+  await writeFile(file, JSON.stringify({ version: 2, items: [item({ id: "mission:b" })], scheduler: "bad" }), "utf8")
+  const recovered = await loadWorkQueueState(file)
+  assert.equal(recovered.items.length, 1)
+  assert.deepEqual(recovered.scheduler.credits, {})
+})

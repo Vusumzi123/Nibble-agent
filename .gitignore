@@ -6,13 +6,14 @@ SETUP.md
 
 # Local design notes — not part of the public push
 # (public exceptions: the autonomy-integration contract, the sysop-config
-#  reference, the lane-queue architecture + producer guide, and the drain
-#  consumer contract)
+#  reference, the lane-queue architecture + producer guide, the drain
+#  consumer contract, and the SWRR scheduler plan)
 docs/*
 !docs/autonomy-integration.md
 !docs/sysop-config-reference.md
 !docs/heartbeat-lanes.md
 !docs/drain-consumer.md
+!docs/swrr-work-scheduler-plan.md
 
 # Kanban board (personal project management, local only)
 Boards/
@@ -34,6 +35,9 @@ Boards/
 # Build & runtime artifacts
 node_modules/
 dist/
+# The dashboard vendors its Phosphorstrap dist (source dependency, not a build artifact).
+!Dashboard/vendor/phosphorstrap/dist/
+!Dashboard/vendor/phosphorstrap/dist/**
 __pycache__/
 *.pyc
 .temp/

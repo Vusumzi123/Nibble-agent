@@ -25,7 +25,7 @@ export type DrainConfig = {
   drain_prompt_max_bytes: number
   /** Mission ids whose child transcripts are already represented elsewhere. */
   exclude_missions: string[]
-  /** Demand-driven consumer loop; false = the legacy side-lane behaviour. */
+  /** true = heartbeat `drain-pass` work item; false = legacy side mission. */
   consumer: boolean
   /** Run a pass while pending >= N (drain-consumer-plan §2.5). */
   trigger_pending: number

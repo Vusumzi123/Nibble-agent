@@ -1,0 +1,31 @@
+{
+  "name": "nibble-dashboard-v2",
+  "version": "0.1.0",
+  "description": "Nibble operator dashboard \u2014 dense terminal UI, Phosphorstrap nibble themes.",
+  "private": true,
+  "scripts": {
+    "start": "ng serve --proxy-config proxy.conf.cjs",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development",
+    "server": "node --no-warnings server/index.mjs",
+    "serve": "node --no-warnings server/index.mjs"
+  },
+  "dependencies": {
+    "@angular/common": "^22.1.0",
+    "@angular/compiler": "^22.1.0",
+    "@angular/core": "^22.1.0",
+    "@angular/platform-browser": "^22.1.0",
+    "@angular/router": "^22.1.0",
+    "@vusux/phosphorstrap": "file:vendor/phosphorstrap",
+    "bootstrap": "^5.3.8",
+    "rxjs": "~7.8.0",
+    "tslib": "^2.3.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@angular/build": "^22.1.4",
+    "@angular/cli": "^22.1.4",
+    "@angular/compiler-cli": "^22.1.0",
+    "typescript": "~6.0.2"
+  }
+}

@@ -1,0 +1,45 @@
+/* Phosphorstrap — panels (Phosphorstrap-only component)
+   The one component Bootstrap has no counterpart for, so it carries the
+   full ph- BEM-lite name: .ph-panel, .ph-panel__header, .ph-panel--accent.
+   Header wash comes from the --ph-gradient-header token — it flips with
+   the theme for free (light amber → dark brown). */
+
+.ph-panel {
+  background-color: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--ph-radius-lg);
+  box-shadow: var(--ph-shadow-2);
+  color: var(--ph-text);
+  overflow: hidden;
+}
+
+.ph-panel__header {
+  background-image: var(--ph-gradient-header);
+  border-bottom: 1px solid var(--ph-border);
+  color: var(--ph-text);
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: var(--ph-leading-tight);
+  padding: var(--ph-space-3) var(--ph-space-4);
+  text-transform: uppercase;
+}
+
+.ph-panel__body {
+  background-color: var(--ph-surface);
+  color: var(--ph-text);
+  line-height: var(--ph-leading-base);
+  padding: var(--ph-space-5);
+}
+
+.ph-panel__body > :last-child {
+  margin-bottom: 0;
+}
+
+/* accent — amber edge wash distinguishing a highlighted section */
+.ph-panel--accent {
+  border-color: color-mix(in srgb, var(--ph-primary) 55%, var(--ph-border));
+  box-shadow: var(--ph-shadow-3),
+    0 0 16px rgba(var(--ph-primary-rgb), 0.18);
+}

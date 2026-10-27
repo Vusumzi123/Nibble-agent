@@ -1,6 +1,13 @@
 # Heartbeat Lane Queues
 
-How a heartbeat tick picks work, and how to add new work sources.
+> **Historical (2026-10-27).** This document describes the pre-Phase-1
+> two-lane model. Commit `466d440` replaced it with one work queue and one
+> executor; the drain consumer described below was removed at the same time.
+> The current scheduling implementation is
+> [SWRR Work Scheduler](swrr-work-scheduler-plan.md). Keep this file for
+> history, not as an implementation reference.
+
+How a heartbeat tick picked work, and how new work sources were added.
 
 Before this change, every tick dispatched **exactly one** mission. `drain`
 (unconsumed turns) and `staleness` (old reference notes) qualified nearly
@@ -12,14 +19,11 @@ tick with nothing queued does nothing at all.
 Missed ticks still coalesce (`computeWakeDelayMs` — "coalesce, never
 replay"). Work piles up in the queues; ticks never pile up.
 
-> **Drain left the queues** (docs/drain-consumer-plan.md): since
-> `drain.consumer: true` (the default), consolidation runs on its own
-> demand-driven loop — the `turns-pending` producer stops collecting, the
-> side lane carries **staleness only**, and drain work appears as
-> `lane: "drain"` runs in `drain.log`. Setting
-> `drain.consumer: false` restores the pre-consumer behaviour described below
-> (the rollback path, one release of dual support). See
-> [docs/drain-consumer.md](drain-consumer.md).
+> **Drain history.** Drain first left the side lane for a demand-driven
+> consumer loop, then Phase 1 removed that loop and made drain a
+> `drain-pass` work kind executed by the single heartbeat loop. The archived
+> consumer design is in [drain-consumer.md](drain-consumer.md); the current
+> scheduling implementation is [swrr-work-scheduler-plan.md](swrr-work-scheduler-plan.md).
 
 ## The model
 

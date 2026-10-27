@@ -72,17 +72,22 @@ import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
   MAX_REQUEUES,
   WORK_QUEUE_FILE,
+  type FairPick,
+  type SchedulerState,
   type WorkItem,
   dequeueById,
   enqueueWork,
-  loadWorkQueue,
+  loadWorkQueueState,
+  pickFair,
   pickNext,
   pruneWork,
   queueDepth,
   queueEmpty,
-  saveWorkQueue,
+  refundFairPick,
+  saveWorkQueueState,
   stallResumeItem,
 } from "./lib/work-queue.ts"
+import { readSchedulerConfig } from "./lib/scheduler-config.ts"
 import {
   type ProducerCtx,
   collectWork,
@@ -101,7 +106,7 @@ import {
 } from "./lib/mission-resume.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
 import { drainDue, runDrainStep } from "./lib/drain/step.ts"
-import { runSteps } from "./lib/step-registry.ts"
+import { runSteps, type StepKind } from "./lib/step-registry.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
@@ -1016,6 +1021,7 @@ export default (async ({ client, directory, ...rest }) => {
       // or an explicit JEV no_reply choice. Each line carries the drain
       // consumer's health (plan §5.3) so the tick view never needs drain.log.
       let drainHealthCache: Awaited<ReturnType<typeof drainHealth>> | undefined
+      let schedulerFields: Record<string, unknown> = {}
       const ledger = (extra: Record<string, unknown>): Promise<void> =>
         (async () => {
           if (drainHealthCache === undefined) drainHealthCache = await drainHealth()
@@ -1026,6 +1032,7 @@ export default (async ({ client, directory, ...rest }) => {
             quiet: digest.quiet,
             candidates: digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`),
             bias: digest.bias,
+            ...schedulerFields,
             ...extra,
             ...(drainHealthCache ? { drain: drainHealthCache } : {}),
             mood_event: moodEvent,
@@ -1070,8 +1077,7 @@ export default (async ({ client, directory, ...rest }) => {
 
       // 6a. The single work queue: producers collect deterministic work — zero
       // LLM calls. The tick producer projects the digest's candidate missions;
-      // brain-stale adds a staleness item. Drain is a queued `drain-pass` kind:
-      // the picker below applies the plan's priority (mission > drain-pass).
+      // brain-stale adds a staleness item. Drain is a queued `drain-pass` kind.
       phase = "queues"
       await setCurrent({ phase })
       const drainCfgForTick = await readDrainConfig(dir).catch(() => null)
@@ -1088,11 +1094,17 @@ export default (async ({ client, directory, ...rest }) => {
         lastMission: state.last_mission,
         drainConsumer: drainConsumerOwnsDrain,
       }
-      let work = enqueueWork(await loadWorkQueue(workQueueFile), collectWork(producerCtx))
+      const schedulerCfg = await readSchedulerConfig(dir).catch(() => ({
+        fair: true,
+        weights: { mission: 4, "drain-pass": 3, "quiet-hours": 1, staleness: 1, "profile-update": 1, "soul-update": 1 },
+      }))
+      const queueState = await loadWorkQueueState(workQueueFile)
+      let work = enqueueWork(queueState.items, collectWork(producerCtx))
       work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
+      const fair = schedulerCfg.fair
+      let scheduler: SchedulerState = { ...queueState.scheduler, fair }
 
-      // Drain is work, not a loop: enqueue the kind when the backlog triggers,
-      // then let the picker order it behind every runnable mission.
+      // Drain is work, not a loop: enqueue the kind when the backlog triggers.
       if (drainCfgForTick?.enabled && drainCfgForTick.consumer) {
         const due = await drainDue({
           directory: dir,
@@ -1106,34 +1118,145 @@ export default (async ({ client, directory, ...rest }) => {
         }
       }
 
-      // runOne's picker: the highest-priority due unit. `mission` outranks
-      // `drain-pass`, so a runnable mission always wins; drain runs when the
-      // queue holds only the drain kind.
-      const nextWork = pickNext(work, nowMs, (item) => itemRunnable(producerCtx, item))
-      if (nextWork?.kind === "drain-pass") {
-        const picked = dequeueById(work, nextWork.id)
-        if (picked) work = picked.rest
-        await saveWorkQueue(workQueueFile, work)
-        phase = "drain"
-        await setCurrent({ phase })
-        const step = await runDrainWork()
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
-          token_cost: step.ran ? step.result.tokens ?? 0 : 0,
-          gate: "drain",
-          reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
-        })
-        if (step.ran) await recordExecution()
-        else await recordNoop(digest.digest_hash)
-        return "fired"
+      let fairPick: FairPick | null = null
+      let nextWork: WorkItem | null = null
+      if (fair) {
+        fairPick = pickFair(
+          work,
+          scheduler,
+          nowMs,
+          (item) => itemRunnable(producerCtx, item),
+          schedulerCfg.weights,
+        )
+        if (!fairPick) {
+          await saveWorkQueueState(workQueueFile, work, scheduler)
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: "silent",
+            token_cost: 0,
+            gate: "queues",
+            reason: "empty",
+            queues: queueDepth(work),
+            scheduler_fair: true,
+          })
+          await recordNoop(digest.digest_hash)
+          return "fired"
+        }
+        scheduler = fairPick.scheduler
+        schedulerFields = {
+          scheduler_fair: true,
+          scheduled_kind: fairPick.kind,
+          scheduler_runnable: fairPick.runnable,
+          scheduler_credit_before: fairPick.credit_before,
+          scheduler_credit_after: fairPick.credit_after,
+        }
+        if (!itemRunnable(producerCtx, fairPick.item)) {
+          scheduler = refundFairPick(scheduler, fairPick)
+          fairPick = pickFair(
+            work,
+            scheduler,
+            nowMs,
+            (item) => itemRunnable(producerCtx, item),
+            schedulerCfg.weights,
+          )
+          if (!fairPick) {
+            await saveWorkQueueState(workQueueFile, work, scheduler)
+            await ledger({
+              verdict: "no_reply",
+              mission: null,
+              outcome: "silent",
+              token_cost: 0,
+              gate: "queues",
+              reason: "empty",
+              queues: queueDepth(work),
+              scheduler_fair: true,
+            })
+            await recordNoop(digest.digest_hash)
+            return "fired"
+          }
+          scheduler = fairPick.scheduler
+          schedulerFields = {
+            scheduler_fair: true,
+            scheduled_kind: fairPick.kind,
+            scheduler_runnable: fairPick.runnable,
+            scheduler_credit_before: fairPick.credit_before,
+            scheduler_credit_after: fairPick.credit_after,
+          }
+        }
+        await saveWorkQueueState(workQueueFile, work, scheduler)
+
+        if (fairPick.kind === "drain-pass") {
+          const picked = dequeueById(work, fairPick.item.id)
+          if (picked) work = picked.rest
+          await saveWorkQueueState(workQueueFile, work, scheduler)
+          phase = "drain"
+          await setCurrent({ phase })
+          const step = await runDrainWork()
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
+            token_cost: step.ran ? step.result.tokens ?? 0 : 0,
+            gate: "drain",
+            reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
+          })
+          if (step.ran) await recordExecution()
+          else await recordNoop(digest.digest_hash)
+          return "fired"
+        }
+
+        if (fairPick.kind !== "mission" && fairPick.kind !== "staleness") {
+          const picked = dequeueById(work, fairPick.item.id)
+          if (picked) work = picked.rest
+          await saveWorkQueueState(workQueueFile, work, scheduler)
+          phase = fairPick.kind
+          await setCurrent({ phase })
+          const errors: string[] = []
+          await runSteps([fairPick.kind as StepKind], (kind, err) => {
+            errors.push(kind)
+            void diag.error(`[heartbeat-hook] step ${kind} failed:`, err)
+          })
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: errors.length ? "error" : "completed",
+            token_cost: 0,
+            gate: fairPick.kind,
+            reason: errors.length ? "step-error" : "step",
+          })
+          await recordExecution()
+          return "fired"
+        }
+      } else {
+        // Rollback path: strict priority, preserving the legacy side lane.
+        nextWork = pickNext(work, nowMs, (item) => itemRunnable(producerCtx, item))
+        schedulerFields = { scheduler_fair: false }
+        if (nextWork?.kind === "drain-pass") {
+          const picked = dequeueById(work, nextWork.id)
+          if (picked) work = picked.rest
+          await saveWorkQueueState(workQueueFile, work, scheduler)
+          phase = "drain"
+          await setCurrent({ phase })
+          const step = await runDrainWork()
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
+            token_cost: step.ran ? step.result.tokens ?? 0 : 0,
+            gate: "drain",
+            reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
+          })
+          if (step.ran) await recordExecution()
+          else await recordNoop(digest.digest_hash)
+          return "fired"
+        }
       }
 
       // No mission.lock (Phase 1): the single loop is the executor, so the
       // dispatch section cannot overlap anything else in this process.
 
-      await saveWorkQueue(workQueueFile, work)
+      await saveWorkQueueState(workQueueFile, work, scheduler)
 
       const contextFor = (d: HeartbeatDigest): string =>
         missionContextHeader(
@@ -1181,12 +1304,18 @@ export default (async ({ client, directory, ...rest }) => {
       // race on vault writes.
       type LaneRun = { mission: Mission; run: ChildRun; item: WorkItem }
       let sideRun: LaneRun | null = null
-      const sideItem = pickNext(work, nowMs, (item) =>
-        item.kind === "staleness" && itemRunnable(producerCtx, item),
-      )
+      const fairStaleness = fair && fairPick?.kind === "staleness"
+      const sideItem = fair
+        ? fairStaleness
+          ? fairPick!.item
+          : null
+        : pickNext(work, nowMs, (item) =>
+            item.kind === "staleness" && itemRunnable(producerCtx, item),
+          )
       const sidePick = sideItem ? dequeueById(work, sideItem.id) : null
       if (sidePick) {
         work = sidePick.rest
+        await saveWorkQueueState(workQueueFile, work, scheduler)
         const sideMission = allMissions.find((m) => m.id === missionIdOf(sidePick.item))
         const sideBrief = sideMission
           ? assembleMissionBrief(
@@ -1217,7 +1346,9 @@ export default (async ({ client, directory, ...rest }) => {
       // error, abstain, or unknown id all mean silence — never invent work.
       phase = "digest"
       await setCurrent({ phase })
-      let decided = await decideDigest(digest)
+      let decided = fairStaleness
+        ? { verdict: { kind: "no_reply" } as DigestVerdict, reason: "staleness", error: undefined }
+        : await decideDigest(digest)
       let verdict = decided.verdict
       let reason = decided.reason
       let digestError = decided.error
@@ -1418,12 +1549,54 @@ export default (async ({ client, directory, ...rest }) => {
         }
       }
 
+      if (fairStaleness) {
+        const sideRequeued = sideRun ? await settleItem(sideRun) : false
+        await saveWorkQueueState(workQueueFile, work, scheduler)
+        if (sideRun) {
+          const sideResultStatus = resultStatusOf(sideRun.run)
+          const sideDrainFailed =
+            sideRun.run.tool?.outcome === "error" || sideRun.run.tool?.outcome === "dropped"
+          const sideOk =
+            sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed
+          if (!sideOk) {
+            await moodFeed.apply("mission_failure")
+            moodEvent = "mission_failure"
+          }
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: sideRun.run.outcome,
+            token_cost: sideRun.run.tokenCost,
+            over_budget: overBudgetOf(sideRun.run.tokenCost),
+            gate: "staleness",
+            reason: "staleness",
+            queues: queueDepth(work),
+            runs: [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)],
+            ...sideFields(sideRun, sideRequeued),
+            ...toolFields(sideRun.run.tool),
+          })
+          await recordExecution()
+        } else {
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: "silent",
+            token_cost: 0,
+            gate: "staleness",
+            reason: "unrunnable",
+            queues: queueDepth(work),
+          })
+          await recordNoop(digest.digest_hash)
+        }
+        return "fired"
+      }
+
       const first = await selected(digest, verdict)
       if (!first) {
         // No primary mission this tick (JEV silence). The side lane may
         // still have done the tick's work — never book that as "silent".
         const sideRequeued = sideRun ? await settleItem(sideRun) : false
-        await saveWorkQueue(workQueueFile, work)
+        await saveWorkQueueState(workQueueFile, work, scheduler)
         if (sideRun) {
           const sideResultStatus = resultStatusOf(sideRun.run)
           const sideDrainFailed =
@@ -1525,7 +1698,7 @@ export default (async ({ client, directory, ...rest }) => {
       const sideRequeued = sideRun ? await settleItem(sideRun) : false
       const firstRequeued = await settleItem(first)
       const secondRequeued = secondRun ? await settleItem(secondRun) : false
-      await saveWorkQueue(workQueueFile, work)
+      await saveWorkQueueState(workQueueFile, work, scheduler)
 
       const run = chosen.run
       const finalMission = chosen.mission
@@ -1717,6 +1890,9 @@ export default (async ({ client, directory, ...rest }) => {
         mission: null,
         mission_title: null,
         session: null,
+        side_mission: null,
+        side_mission_title: null,
+        side_session: null,
         started_at: null,
       })
     }

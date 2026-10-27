@@ -35,9 +35,11 @@ config warn-once behaviour).
 | `autonomy:` | `lib/autonomy.ts` + `autonomy-gate.ts` |
 | `mood:` | `mood-hook.ts` → `lib/mood.ts` |
 | `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process scheduler + per-tick ledger) |
+| `scheduler:` | `lib/scheduler-config.ts` → `lib/work-queue.ts` (SWRR weights + rollback) |
 | `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
+| `dashboard:` | `lib/autonomy.ts` (config plumbing only) |
 
 Sections a reader does not know about are ignored by it.
 
@@ -113,10 +115,10 @@ and root/sandbox/dry flags.
 ## `drain:`
 
 Cursor-backed conversation consolidation (`lib/drain/*`, design:
-`docs/knowledge-pipeline-redesign.md`, consumer: `docs/drain-consumer.md`).
-With `consumer: true` (default) a demand-driven in-process loop runs passes
-on its own timer; `consumer: false` returns drain to the heartbeat side lane
-(the rollback path). A pass discovers top-level sessions newer than the
+`docs/knowledge-pipeline-redesign.md`; the old consumer is
+`docs/drain-consumer.md`). With `consumer: true` (default) drain is a
+`drain-pass` work item executed by the heartbeat; `consumer: false` is the
+legacy side-mission rollback. A pass discovers top-level sessions newer than the
 watermark, renders and summarizes each settled delta, and hands labelled
 `#1..N` items to `rag-brain`. The writer reports a
 `consolidated`/`skipped` fence; per-session cursor marks advance only for
@@ -551,6 +553,32 @@ a changed digest resets it — the day twin of the `quiet.backoff` ladder.
 
 ---
 
+## `scheduler:`
+
+Smooth weighted round-robin (SWRR) over work kinds
+(`lib/work-queue.ts`, `lib/scheduler-config.ts`;
+[plan](swrr-work-scheduler-plan.md)). The scheduler selects one kind per tick
+from the runnable set; the kind's own item checks still decide which concrete
+item runs. Hot-read at tick start.
+
+| Key | Meaning |
+| --- | ------- |
+| `fair` | `true` = SWRR; `false` = legacy static priority (one-release rollback, including the old staleness side lane). |
+| `weights.mission` | relative mission share (default `4`). |
+| `weights.drain-pass` | relative drain share (default `3`). |
+| `weights.quiet-hours` | relative quiet-hours step share (default `1`). |
+| `weights.staleness` | relative staleness share (default `1`). |
+| `weights.profile-update` | relative profile-update share (default `1`). |
+| `weights.soul-update` | relative soul-update share (default `1`). |
+
+Weights are positive integers; `0` disables a kind. At least one weight must be
+positive. The state (`credits`, `served`, `last_kind`) is persisted beside the
+queue in `work-queue.json`; config weights are authoritative and hot-read. The
+max gap for a continuously runnable kind is `ceil(total_weight / weight)`.
+Legacy arrays load unchanged and start with zero credits.
+
+---
+
 ## `idea:`
 
 Idea generation/expression pipeline (`heartbeat-hook.ts` → `lib/idea.ts`,
@@ -625,3 +653,18 @@ Notification/approval channels (§7).
 | `email.enabled` | M5 not ported yet; card 10 turns this on. |
 | `email.account` | himalaya account name. |
 | `email.reply_window_hours` | how long a reply is awaited. |
+
+---
+
+## `dashboard:`
+
+Local web UI (§9), read by cards 8/11.
+
+| Key | Meaning |
+| --- | ------- |
+| `bind_address` | loopback only. |
+| `port` | Backend listen port (default `0` = auto, kernel-assigned). A pinned port is used when free; when busy the launcher falls back to a free port and logs it. No config rewrite. |
+| `serve_port` | opencode TUI listen port passed as `--port` (default `0` = auto). Same pinned-busy fallback as `port`. `scripts/run.sh --serve-port N` overrides. |
+| `serve_url` | Explicit `opencode` proxy target for the transcript stream. Default `""` = automatic: `state/serve-url` (published by the hook/launcher), verified per request, then a process discovered in this project directory. A non-empty value must be loopback and wins over the automatic target (`OPENCODE_SERVE_URL` also overrides); a dead pinned target shows as `502 serve_unreachable`, while no automatic target shows `503 serve_unavailable`. |
+| `auth.mode` | `off` \| `login` \| `login+2fa` (§10). |
+| `auth.require_tls` | TLS requirement for the dashboard. |

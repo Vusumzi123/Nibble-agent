@@ -1,0 +1,42 @@
+/* Phosphorstrap — navs (tabs, pills, links)
+   Colors already resolve through the bridge: link hover → --ph-primary,
+   borders → --ph-border, active-tab bg → body surface, pills active bg
+   → --ph-primary with dark ink. This file adds the terminal treatment:
+   mono links, gradient active tab echoing .ph-panel__header, soft
+   surface wash on tab hover. */
+
+.nav-link {
+  transition:
+    color var(--ph-transition-fast),
+    background-color var(--ph-transition-fast);
+}
+
+.nav-tabs .nav-link,
+.nav-pills .nav-link,
+.nav-underline .nav-link {
+  font-family: var(--ph-font-mono);
+  font-size: var(--ph-text-sm);
+  letter-spacing: 0.04em;
+  min-height: var(--ph-control-height);
+  padding: var(--ph-space-3) var(--ph-space-4);
+}
+
+.nav-tabs .nav-link:hover {
+  background-color: var(--ph-surface-raised);
+}
+
+.nav-tabs .nav-link.active {
+  background-image: var(--ph-gradient-header);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ph-primary);
+}
+
+.nav-pills .nav-link.active {
+  font-weight: 600;
+  box-shadow: var(--ph-shadow-1);
+}
+
+/* Bootstrap's focus ring on .nav-link is hardcoded blue */
+.nav-link:focus-visible {
+  box-shadow: 0 0 0 2px rgba(var(--ph-primary-rgb), 0.35);
+}

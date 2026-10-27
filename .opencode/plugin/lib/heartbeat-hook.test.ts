@@ -23,9 +23,11 @@ async function waitFor(fn: () => boolean | Promise<boolean>, timeoutMs = 4000): 
   throw new Error("waitFor: condition not met within timeout")
 }
 
-// Phase 1: one ordered work queue, keyed by kind.
-const missionsIn = (q: any[]) => q.filter((i) => i?.kind === "mission")
-const sideIn = (q: any[]) => q.filter((i) => i?.kind === "staleness")
+// Phase 1: one ordered work queue, keyed by kind. v2 persists
+// `{version, items, scheduler}`; legacy arrays still appear in migrations.
+const queueItems = (q: any) => (Array.isArray(q) ? q : Array.isArray(q?.items) ? q.items : [])
+const missionsIn = (q: any) => queueItems(q).filter((i: any) => i?.kind === "mission")
+const sideIn = (q: any) => queueItems(q).filter((i: any) => i?.kind === "staleness")
 
 async function project(lines: string[]): Promise<string> {
   const dir = await tempDir("hbhook-proj-")
@@ -570,6 +572,8 @@ test("runner mission: drain-pipe binds drain_run; the child runs it", async () =
   assert.equal(tick.tool_status, "completed")
   assert.equal(tick.result_status, "completed")
   assert.equal(tick.result_missing, false)
+  assert.equal(tick.scheduler_fair, true)
+  assert.equal(tick.scheduled_kind, "mission")
 
   const entries = await readBacklog(dir)
   assert.equal(entries[0].status, "done")
@@ -1327,6 +1331,50 @@ function writeLaneMission(
   )
 }
 
+test("fair scheduler runs a staleness item as the tick's one work unit without JEV", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "",
+    "decisions:",
+    "  enabled: true",
+    "  provider: openjev",
+    "",
+    "drain:",
+    "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: true",
+  ])
+  await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
+  await seedTurns(dir, "fair-staleness")
+
+  const client = laneClient()
+  let jevCalls = 0
+  const spawner = async () => {
+    jevCalls += 1
+    return {
+      code: 0,
+      stdout: JSON.stringify({ kind: "no_reply", value: null, confidence: 0, abstained: false, provider: "openjev", backend: "test", latencyMs: 1 }),
+      stderr: "",
+    }
+  }
+  const hooks = await createHook({ client, directory: dir, spawner } as any)
+
+  await waitFor(() => client.calls.prompts.length === 1)
+  assert.match(String(client.calls.prompts[0].body.parts[0].text), /Verdict: mission:drain/)
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.mission, null)
+  assert.equal(tick.gate, "staleness")
+  assert.equal(tick.scheduled_kind, "staleness")
+  assert.equal(tick.scheduler_fair, true)
+  assert.equal(tick.side_mission, "drain")
+  assert.equal(jevCalls, 0, "staleness is selected by SWRR, not JEV")
+  assert.equal(client.calls.create, 1)
+})
+
 test("side lane and primary both run in one tick", async () => {
   const dir = await project([
     "autonomy:",
@@ -1340,6 +1388,9 @@ test("side lane and primary both run in one tick", async () => {
     "# rollback path of docs/drain-consumer-plan.md §9).",
     "drain:",
     "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: false",
     "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
@@ -1377,7 +1428,7 @@ test("side lane and primary both run in one tick", async () => {
 
   // Both items left the queues (completed → drop).
   const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
-  assert.deepEqual(lanes, [])
+  assert.deepEqual(queueItems(lanes), [])
 })
 
 test("the side lane dequeues one item per tick; the rest wait", async () => {
@@ -1393,6 +1444,9 @@ test("the side lane dequeues one item per tick; the rest wait", async () => {
     "# rollback path of docs/drain-consumer-plan.md §9).",
     "drain:",
     "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: false",
     "",
   ])
   // Two status-fed side missions, no primary work at all.
@@ -1452,6 +1506,9 @@ test("a timed-out side run is re-enqueued at the tail with the reason", async ()
     "# rollback path of docs/drain-consumer-plan.md §9).",
     "drain:",
     "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: false",
     "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
@@ -1515,6 +1572,9 @@ test("a failed abort is recorded as an error, never a clean stop", async () => {
     "drain:",
     "  consumer: false",
     "",
+    "scheduler:",
+    "  fair: false",
+    "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
   await seedTurns(dir, "lanes-abort-fail")
@@ -1555,6 +1615,9 @@ const stallProject = () =>
     "",
     "drain:",
     "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: false",
     "",
   ])
 
@@ -1759,6 +1822,9 @@ test("a resumed mission carries the === RESUMED MISSION === block into the next 
     "drain:",
     "  consumer: false",
     "",
+    "scheduler:",
+    "  fair: false",
+    "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
   await seedTurns(dir, "resume-block")
@@ -1820,6 +1886,9 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
     "",
     "drain:",
     "  consumer: false",
+    "",
+    "scheduler:",
+    "  fair: false",
     "",
   ])
   await writeLaneMission(dir, "drain", { lane: "side", candidacy: "turns-pending" })
