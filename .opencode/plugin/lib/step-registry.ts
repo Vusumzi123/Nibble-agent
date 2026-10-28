@@ -6,12 +6,11 @@
 // is not due (it self-gates on its own window/cooldown).
 //
 // Loaded via relative import only.
-export type StepKind = "quiet-hours" | "staleness" | "profile-update" | "soul-update"
+export type StepKind = "quiet-hours" | "profile-update" | "soul-update"
 
 /** Priority order for background steps, after mission and drain-pass. */
 export const STEP_ORDER: readonly StepKind[] = [
   "quiet-hours",
-  "staleness",
   "profile-update",
   "soul-update",
 ]

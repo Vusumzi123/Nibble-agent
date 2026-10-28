@@ -5,7 +5,7 @@ frequency: high
 menus: [day]
 min_level: 1
 approval: n/a
-candidacy: digest
+candidacy: always
 agent: ""
 enabled: false
 ---

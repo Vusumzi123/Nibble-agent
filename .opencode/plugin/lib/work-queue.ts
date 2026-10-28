@@ -7,8 +7,7 @@
 //
 //   mission, drain-pass, quiet-hours, staleness, profile-update, soul-update
 //
-// The default picker is smooth weighted round-robin (`pickFair`); the legacy
-// `pickNext` static order remains only for the `scheduler.fair: false` rollback.
+// The picker is smooth weighted round-robin (`pickFair`).
 //
 // The dream *mission* is an ordinary `mission` item, night-gated by its
 // `menus: [night]` frontmatter; `quiet-hours` is the sleep/dream orchestration
@@ -51,7 +50,7 @@ export const KIND_ORDER: readonly WorkKind[] = [
   "soul-update",
 ]
 
-/** Lower runs first. Kept as a deterministic tie-break and for `fair: false`. */
+/** Lower runs first. Deterministic tie-break for equal SWRR credits. */
 export const WORK_PRIORITY: Readonly<Record<WorkKind, number>> = {
   mission: 0,
   "drain-pass": 1,
@@ -112,12 +111,9 @@ export function emptyQueue(): WorkItem[] {
   return []
 }
 
-export function emptyScheduler(
-  weights: WorkWeights = DEFAULT_WORK_WEIGHTS,
-  fair = true,
-): SchedulerState {
+export function emptyScheduler(weights: WorkWeights = DEFAULT_WORK_WEIGHTS): SchedulerState {
   return {
-    fair,
+    fair: true,
     weights: normalizeWeights(weights),
     credits: {},
     served: {},
@@ -145,12 +141,8 @@ export function isDue(item: WorkItem, nowMs: number): boolean {
   return item.not_before_ms === undefined || nowMs >= item.not_before_ms
 }
 
-export function priorityOf(kind: WorkKind): number {
-  return WORK_PRIORITY[kind] ?? Number.MAX_SAFE_INTEGER
-}
-
 /** Parse persisted work + scheduler state. A missing/corrupt file yields an
- *  empty queue. Legacy arrays and `{primary, side}` lane files still load. */
+ *  empty queue. Only the v2 `{ items, scheduler }` shape is accepted. */
 export async function loadWorkQueueState(file: string): Promise<WorkQueueState> {
   const text = await atomicRead(file)
   if (!text) return { items: emptyQueue(), scheduler: emptyScheduler() }
@@ -159,25 +151,12 @@ export async function loadWorkQueueState(file: string): Promise<WorkQueueState> 
     if (Array.isArray(parsed)) {
       return { items: sanitize(parsed), scheduler: emptyScheduler() }
     }
-    const state = parsed as {
-      items?: unknown
-      scheduler?: unknown
-      primary?: unknown
-      side?: unknown
-    }
-    if (Array.isArray(state.items)) {
-      return {
-        items: sanitize(state.items),
-        scheduler: sanitizeScheduler(state.scheduler),
-      }
+    const state = parsed as { items?: unknown; scheduler?: unknown }
+    if (!Array.isArray(state.items)) {
+      return { items: emptyQueue(), scheduler: emptyScheduler() }
     }
     return {
-      items: sanitize([
-        ...(Array.isArray(state.primary) ? state.primary : []),
-        ...(Array.isArray(state.side)
-          ? state.side.map((i) => ({ ...(i as object), kind: "staleness" }))
-          : []),
-      ]),
+      items: sanitize(state.items),
       scheduler: sanitizeScheduler(state.scheduler),
     }
   } catch {
@@ -205,7 +184,6 @@ function sanitizeScheduler(raw: unknown): SchedulerState {
     value.weights && typeof value.weights === "object"
       ? normalizeWeights(value.weights as Record<string, unknown>)
       : DEFAULT_WORK_WEIGHTS,
-    value.fair !== false,
   )
   for (const kind of KIND_ORDER) {
     const credit = (value.credits as Record<string, unknown> | undefined)?.[kind]
@@ -228,9 +206,9 @@ function sanitize(raw: unknown[]): WorkItem[] {
   const out: WorkItem[] = []
   for (const entry of raw) {
     if (!entry || typeof entry !== "object") continue
-    const item = entry as Partial<WorkItem> & { lane?: string }
+    const item = entry as Partial<WorkItem>
     if (typeof item.id !== "string" || item.id === "") continue
-    const kind = normalizeKind(item.kind, item.lane)
+    const kind = normalizeKind(item.kind)
     if (!kind) continue
     out.push({
       id: item.id,
@@ -247,7 +225,7 @@ function sanitize(raw: unknown[]): WorkItem[] {
   return out.sort((a, b) => a.enqueued_ms - b.enqueued_ms)
 }
 
-function normalizeKind(kind: unknown, lane: unknown): WorkKind | null {
+function normalizeKind(kind: unknown): WorkKind | null {
   // Legacy value from the first Phase 1 cut: the step was called "dream".
   if (kind === "dream") return "quiet-hours"
   if (
@@ -260,9 +238,7 @@ function normalizeKind(kind: unknown, lane: unknown): WorkKind | null {
   ) {
     return kind
   }
-  // Legacy lane file: every bare mission item was a mission; side items were
-  // staleness-driven missions.
-  if (kind === "mission" || kind === undefined) return lane === "side" ? "staleness" : "mission"
+  if (kind === undefined) return "mission"
   return null
 }
 
@@ -301,26 +277,6 @@ export function enqueueWork(queue: WorkItem[], items: readonly WorkItem[]): Work
 
 function cap(items: WorkItem[]): WorkItem[] {
   return items.length > MAX_QUEUE_DEPTH ? items.slice(items.length - MAX_QUEUE_DEPTH) : items
-}
-
-/**
- * The runOne picker: the highest-priority due item, FIFO within a kind.
- * `isRunnable` may veto an item (menu window, level, status no longer true);
- * a vetoed item stays queued so a day-window item can wait through the night.
- */
-export function pickNext(
-  queue: WorkItem[],
-  nowMs: number,
-  isRunnable: (item: WorkItem) => boolean = () => true,
-): WorkItem | null {
-  const due = queue.filter((item) => isDue(item, nowMs) && isRunnable(item))
-  if (due.length === 0) return null
-  let best = due[0]
-  for (const item of due.slice(1)) {
-    const dp = priorityOf(item.kind) - priorityOf(best.kind)
-    if (dp < 0 || (dp === 0 && item.enqueued_ms < best.enqueued_ms)) best = item
-  }
-  return best
 }
 
 export type FairPick = {
@@ -389,22 +345,6 @@ export function pickFair(
     credit_after: credits[kind] ?? 0,
     total_weight: totalWeight,
     previous_kind: scheduler.last_kind,
-  }
-}
-
-/** Undo a spent pick when the chosen item becomes unrunnable before dispatch. */
-export function refundFairPick(scheduler: SchedulerState, pick: FairPick): SchedulerState {
-  return {
-    ...scheduler,
-    credits: {
-      ...scheduler.credits,
-      [pick.kind]: (scheduler.credits[pick.kind] ?? 0) + pick.total_weight,
-    },
-    served: {
-      ...scheduler.served,
-      [pick.kind]: Math.max(0, (scheduler.served[pick.kind] ?? 1) - 1),
-    },
-    last_kind: pick.previous_kind,
   }
 }
 

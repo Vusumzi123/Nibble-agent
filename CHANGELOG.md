@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-10-28
+
+### Changed
+
+- **One work pool, one item per tick — JEV removed from dispatch.** Producers
+  decide at enqueue time (weighted draw for missions, a status predicate for
+  staleness, `drainDue` for `drain-pass`) and emit at most one item each per
+  tick. The consumer picks exactly one runnable pool item and runs it, or skips
+  the tick when the pool is empty. `decideDigest`, `DigestVerdict`,
+  `buildDigestChoiceRequest`, `digestStateSummary`, `candidateWarrant`,
+  `soleDeterministicVerdict`, `deterministicDigestFallback`, and the `digest:`
+  prompt section are gone.
+- **Missions are reservations, not re-offered candidates.** `itemRunnable` is
+  structural only (`enabled ∧ menus ∧ level`): once queued, a mission runs even
+  if its `roll:`/`min-gap:` gate would not pass again. `collectMissions` draws
+  one candidate per tick instead of enqueueing the whole list.
+- **`candidacy: digest` → `always`; `research` uses `min-gap:research` (24 h).**
+  `turns-pending` is removed; drain is only the `drain-pass` work kind.
+- **Side lane and legacy drain rollback removed.** `lane`, `runner`,
+  `on_decline`, `drain.md`, the `drain_run` tool, `runDrainForMission`,
+  `findDrainToolResult`, and `drain.consumer` are gone. A stalled mission still
+  resumes with a summary; a declined one drops. `scheduler.fair: false` is gone
+  (SWRR only).
+- **Dream hook picks the sole/weighted candidate** instead of asking JEV.
+
 ## 2026-10-23
 
 ### Added

@@ -42,7 +42,6 @@ const FULL_FM = [
   "approval: per-item",
   "candidacy: min-gap:last_refresh",
   'agent: "profile-writer"',
-  "on_decline: reroll",
   "enabled: false",
   "---",
   "",
@@ -65,24 +64,9 @@ test("parseMissionFile parses a full frontmatter mission", () => {
     approval: "per-item",
     candidacy: "min-gap:last_refresh",
     agent: "profile-writer",
-    runner: "",
-    onDecline: "reroll",
     enabled: false,
-    lane: "primary",
     body: "Do the thing.",
   })
-})
-
-test("parseMissionFile parses lane: side and rejects an unknown lane", () => {
-  const parse = (lane: string) =>
-    parseMissionFile(`---\nid: s\nlane: ${lane}\n---\nbody`, "s")
-  assert.equal(parse("side").mission.lane, "side")
-  assert.equal(parse("primary").mission.lane, "primary")
-  const bad = parse("sideways")
-  assert.equal(bad.mission.lane, DEFAULT_MISSION.lane)
-  assert.ok(bad.issues.some((i) => i.key === "lane"))
-  const missing = parseMissionFile("---\nid: s\n---\nbody", "s")
-  assert.equal(missing.mission.lane, DEFAULT_MISSION.lane)
 })
 
 test("parseMissionFile accepts brain-stale and brain-stale:<hours>", () => {
@@ -92,15 +76,6 @@ test("parseMissionFile accepts brain-stale and brain-stale:<hours>", () => {
   assert.equal(parse("brain-stale:720").mission.candidacy, "brain-stale:720")
   assert.equal(parse("brain-stale:soon").mission.candidacy, DEFAULT_MISSION.candidacy)
   assert.ok(parse("brain-stale:soon").issues.some((i) => i.key === "candidacy"))
-})
-
-test("parseMissionFile reads the runner key", () => {
-  const { mission, issues } = parseMissionFile(
-    "---\nid: drain\nrunner: drain-pipe\n---\nBody.\n",
-    "fallback",
-  )
-  assert.deepEqual(issues, [])
-  assert.equal(mission.runner, "drain-pipe")
 })
 
 test("parseMissionFile falls back to safe defaults for missing keys", () => {
@@ -114,8 +89,6 @@ test("parseMissionFile falls back to safe defaults for missing keys", () => {
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
   assert.equal(mission.agent, DEFAULT_MISSION.agent)
-  assert.equal(mission.runner, DEFAULT_MISSION.runner)
-  assert.equal(mission.onDecline, "stop")
   assert.equal(mission.enabled, true)
   assert.equal(mission.body, "Body here.")
 })
@@ -152,7 +125,6 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
     "menus: [weekend]",
     "approval: yolo",
     "candidacy: whenever",
-    "on_decline: maybe",
     "enabled: maybe",
     "---",
     "b",
@@ -160,24 +132,14 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
   const { mission, issues } = parseMissionFile(content, "x")
   assert.deepEqual(
     issues.map((i) => i.key).sort(),
-    ["approval", "candidacy", "enabled", "frequency", "menus", "min_level", "on_decline"],
+    ["approval", "candidacy", "enabled", "frequency", "menus", "min_level"],
   )
   assert.equal(mission.frequency, DEFAULT_MISSION.frequency)
   assert.equal(mission.min_level, DEFAULT_MISSION.min_level)
   assert.deepEqual(mission.menus, DEFAULT_MISSION.menus)
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
-  assert.equal(mission.onDecline, DEFAULT_MISSION.onDecline)
   assert.equal(mission.enabled, true)
-})
-
-test("parseMissionFile reads on_decline", () => {
-  const { mission, issues } = parseMissionFile(
-    "---\nid: drain\non_decline: reroll\n---\nBody.\n",
-    "fallback",
-  )
-  assert.deepEqual(issues, [])
-  assert.equal(mission.onDecline, "reroll")
 })
 
 test("parseMissionFile never throws on garbage input", () => {
@@ -341,26 +303,16 @@ test("loadMissions with no config overlay leaves missions untouched", async () =
 // ---------------------------------------------------------------------------
 // Shipped built-ins (the real .opencode/missions/ in this repo)
 
-test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-generate/express/free-run", async () => {
+test("shipped built-ins parse clean: dream/staleness/research/notify/idea-generate/express/free-run", async () => {
   const missions = await loadMissions(PROJECT_ROOT, {
     onReject: (e) => assert.fail(`unexpected reject: ${e.path} ${e.reason}`),
   })
   const byId = new Map(missions.map((m) => [m.id, m]))
   // The shipped set must be present and parse clean; instances may carry
   // extra mission packs (e.g. the Agora kit) — those only need to parse.
-  const BASE = ["drain", "dream", "express", "free-run", "idea-generate", "notify", "research", "staleness"]
+  const BASE = ["dream", "express", "free-run", "idea-generate", "notify", "research", "staleness"]
   for (const id of BASE) assert.ok(byId.has(id), `shipped mission ${id} missing`)
   for (const m of missions) assert.ok(m.body.length > 0, `${m.id} has a body`)
-
-  const drain = byId.get("drain")!
-  assert.equal(drain.enabled, true)
-  assert.deepEqual(drain.menus, ["day", "night"]) // §5: drain is a night-capable built-in
-  assert.equal(drain.frequency, "high")
-  // §17.3 night pre-gate: drain is offered iff unconsumed turns exist.
-  assert.equal(drain.candidacy, "turns-pending")
-  // Side lane: status-fed queue, declines drop the item (never reroll).
-  assert.equal(drain.lane, "side")
-  assert.equal(drain.onDecline, "stop")
 
   // Card G: dream is night-menu only, roll/cap-gated, runs tool-free.
   const dream = byId.get("dream")!
@@ -373,6 +325,7 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-
 
   const notify = byId.get("notify")!
   assert.equal(notify.enabled, false) // comms = card 10
+  assert.equal(notify.candidacy, "always")
 
   // Card 7a: the §17.10 idea pair.
   const gen = byId.get("idea-generate")!
@@ -396,7 +349,6 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-
   assert.deepEqual(freeRun.menus, ["day"])
   assert.equal(freeRun.candidacy, "roll:0.1")
   assert.equal(freeRun.min_level, 3)
-  assert.equal(freeRun.onDecline, "reroll")
   assert.ok(freeRun.body.length > 0)
 
   for (const id of ["staleness", "research"]) {
@@ -405,10 +357,8 @@ test("shipped built-ins parse clean: drain/dream/staleness/research/notify/idea-
     assert.deepEqual(m.menus, ["day"], `${id} day-only`)
     assert.ok(m.body.length > 0, `${id} has a body`)
   }
-  // staleness rides the side queue with drain; research stays JEV-picked.
-  assert.equal(byId.get("staleness")!.lane, "side")
-  assert.equal(byId.get("staleness")!.onDecline, "stop")
-  assert.equal(byId.get("research")!.lane, "primary")
+  assert.equal(byId.get("staleness")!.candidacy, "brain-stale:720")
+  assert.equal(byId.get("research")!.candidacy, "min-gap:research")
 
   // Security prereq: built-ins must NOT be reachable without approval — the
   // gate treats their paths as self-improve (checked in autonomy-gate.test.ts).

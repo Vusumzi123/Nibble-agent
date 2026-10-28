@@ -6,7 +6,6 @@ menus: [day]
 min_level: 3
 approval: writes-follow-dial
 candidacy: roll:0.1
-on_decline: reroll
 agent: ""
 enabled: true
 ---

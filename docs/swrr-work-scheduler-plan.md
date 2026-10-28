@@ -1,10 +1,11 @@
 # SWRR Work Scheduler — Starvation-Free Heartbeat Plan
 
-Status: **implemented (core)** — SWRR picker, fair heartbeat path, persisted
-credits, Dashboard panels and the `fair: false` rollback are live as of
-2026-10-27. Background step kinds and mission-level bounded candidacy remain
+Status: **implemented, then simplified** — SWRR picker, persisted credits, and
+Dashboard panels are live. The `fair: false` rollback, the side lane, and the
+JEV digest dispatch were removed on 2026-10-28: producers decide at enqueue
+time and the consumer runs one pool item per tick. Background step kinds remain
 follow-ups (see §7.4 and §9.2).
-Date: 2026-10-27
+Date: 2026-10-27 (updated 2026-10-28)
 Scope: Kael heartbeat scheduler + Dashboard v2
 Supersedes the scheduling assumptions in `docs/heartbeat-lanes.md` and the
 consumer-era assumptions in `docs/drain-consumer.md`.
@@ -18,14 +19,15 @@ Related: [Dashboard SPEC](../Dashboard/SPEC.md) ·
 
 Landed:
 
-- `lib/work-queue.ts` — SWRR state, `pickFair`, `refundFairPick`, v2 queue file.
-- `lib/scheduler-config.ts` — `scheduler.fair` + per-kind weights, hot-read.
-- `heartbeat-hook.ts` — fair picker, no staleness side lane on the fair path,
-  persisted credits, scheduler ledger fields, `fair: false` legacy rollback.
+- `lib/work-queue.ts` — SWRR state, `pickFair`, v2 queue file.
+- `lib/scheduler-config.ts` — per-kind weights, hot-read (the `fair` scalar was
+  removed on 2026-10-28).
+- `heartbeat-hook.ts` — fair picker, persisted credits, scheduler ledger
+  fields. The staleness side lane and the `fair: false` rollback are gone.
 - `Dashboard/` — QUEUE scheduler panel, FLIGHT next-kind, METRICS service
   share, SETTINGS schema, `/api/queues` scheduler payload.
 - Tests — proportional service, no-starvation gaps, zero-weight disable,
-  refund, state persistence, config parsing, and a fair staleness integration.
+  state persistence, config parsing, and a fair staleness integration.
 
 Deferred, explicitly:
 
@@ -86,7 +88,8 @@ The fix must remove the bypass, not just change numbers.
 ## 3. Non-goals
 
 - Reintroducing the drain consumer loop or concurrent executors.
-- Replacing JEV mission judgment.
+- Replacing mission judgment with a model gate. (The JEV digest was removed on
+  2026-10-28: the producer decides, the consumer runs one item.)
 - Guaranteeing every individual mission definition runs (that needs a
   second-level policy; see §9).
 - Fixing drain summarizer/writer quality. The writer report bug is a
@@ -99,11 +102,11 @@ These are the facts the plan is built on; several older docs are stale.
 
 | Area | Current reality |
 | --- | --- |
-| Queue | One `work-queue.json`; `WORK_PRIORITY` and `pickNext()` are a static priority gate. |
-| Mission collection | `collectMissions()` re-enqueues every digest candidate each tick; dedupe preserves the first enqueue time. |
+| Queue | One `work-queue.json`; `pickFair()` is the only picker (the `pickNext()` rollback is gone). |
+| Mission collection | `collectMissions()` draws **one** candidate per tick (frequency × mood); dedupe preserves the first enqueue time. |
 | Drain | A `drain-pass` work item, enqueued by the heartbeat when `drainDue()` is true. There is no consumer loop. |
-| Staleness | A side mission that bypasses the priority picker and runs beside the mission. |
-| `drain.consumer` | Still present in config (`true`) but no longer starts a loop. Phase 1 deleted the loop in commit `466d440`; `true` now means “enqueue a `drain-pass` work item”, while `false` falls back to the legacy side-mission collection path. |
+| Staleness | A `staleness` work kind emitted by `collectStaleness()`; it goes through the same picker. |
+| `drain.consumer` | Removed (2026-10-28). Drain is always the `drain-pass` work kind; there is no side-mission fallback. |
 | Locks | No `drain.lock` or `mission.lock` in the work path; the ownership lease is the only exclusion. |
 | Docs | `docs/heartbeat-lanes.md` describes removed two-lane queues; `docs/drain-consumer.md` describes a removed consumer loop and `drain.lock`. They are historical. |
 | Mission candidacy | `idea-generate` can remain a candidate every tick after a `review-reject` because `generatedToday` stays 0. This is unbounded work pressure, not starvation by itself. |
@@ -187,13 +190,13 @@ After producers run and prunable work is removed:
 3. For every runnable kind: `credit[k] += weight[k]`.
 4. Pick `k = argmax(credit)`. Tie-break by fixed kind order for determinism.
 5. `credit[k] -= sum(weight[j] for j in runnable)`.
-6. Pick one item from `k`:
-   - `mission`: JEV chooses the mission (the class slot is already reserved).
+6. Pick one item from `k` — the item is authoritative:
+   - `mission`: the producer already chose it; run that child.
    - `drain-pass`: run the drain step.
-   - `staleness`: run that side mission.
+   - `staleness`: run that status mission.
    - `quiet-hours`, `profile-update`, `soul-update`: run their step.
-7. If the selected item becomes un-runnable before execution, refund the
-   credit and re-pick once. If no item remains, silent tick.
+7. If the selected item is no longer runnable at dequeue, skip it and pick
+   once more. If no item remains, silent tick.
 8. Persist queue + scheduler atomically before dispatch.
 
 Within a kind, keep FIFO by `enqueued_ms` and honor `not_before_ms` / TTL.
@@ -211,15 +214,12 @@ max consecutive picks without kind k <= ceil(W / w)
 No special-case drain rule is needed. The guarantee holds for every positive
 weight, including future kinds.
 
-### 5.5 JEV `no_reply`
+### 5.5 Empty queue, decline, and failure
 
-A mission slot that the JEV answers with `no_reply` should **spend** the slot.
-Silence is a valid decision, and the next tick’s credits then favor background
-work. Refunding would let repeated `no_reply` starve background work again.
-
-If the mission class was selected but no candidate exists, that is a
-producer/runnable-set bug, not a JEV outcome; do not spend credit for a class
-that was not actually runnable.
+The tick has no model gate. If no runnable item exists, the tick is silent and
+spends nothing. A mission that reports `declined` drops its queue item; the
+producer re-proposes it on a later tick if its gate still passes. A timeout
+re-enqueues the item with a resume summary. A non-timeout error drops it.
 
 ### 5.6 Failure and retry
 
@@ -275,7 +275,7 @@ Acceptance for “drain consumed” is therefore:
 - Delete the `if (nextWork?.kind === "drain-pass")` special case.
 - Delete the side-lane staleness pick at the later dispatch step.
 - Build the runnable set once; call `pickFair()`; execute the selected kind.
-- Keep the mission JEV path unchanged after a mission slot is selected.
+- The picked mission item is authoritative; there is no second model choice.
 - Record `scheduled_kind`, `scheduler_credit_before/after`, and
   `scheduler_runnable` in the tick ledger.
 - Keep one work unit per tick.
@@ -310,15 +310,12 @@ scheduler:
     quiet-hours: 1
     profile-update: 1
     soul-update: 1
-  fair: true   # false = legacy static-priority rollback
 ```
 
 - Hot-read at tick start.
 - Validate positive integers; 0 disables; unknown kind defaults to 1.
-- `fair: false` restores the static priority order for one release, then is
-  removed.
-- Expose the section in Dashboard Settings as `scheduler` (writable weights,
-  `fair` toggle with a restart/hot-read marker).
+- Expose the section in Dashboard Settings as `scheduler` (writable weights).
+  The `fair` toggle was removed with the rollback.
 - Implementation touches `.opencode/plugin`; that is approval-gated under the
   agent operating contract, even after this plan is accepted.
 
@@ -456,7 +453,7 @@ Examples: `notify`, `telegram-triage`, or a future quiet-hours variant.
 
 Adding files under `.opencode/missions/` creates more candidates inside the
 single `mission` kind. SWRR only guarantees the mission *class* gets slots.
-JEV/FIFO can still ignore one mission definition indefinitely.
+The producer/FIFO can still ignore one mission definition indefinitely.
 
 Options, in order of preference:
 

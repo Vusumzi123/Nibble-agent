@@ -1,10 +1,12 @@
 # The Drain Consumer (Historical)
 
-> **Historical (2026-10-27).** The consumer loop and `drain.lock` described
-> here were removed in Phase 1 (`466d440`). Drain is now a `drain-pass` work
-> item executed by the single heartbeat loop; `drain.current.json`,
-> `drain.lock`, and the consumer wake loop no longer exist. The current
-> scheduling implementation is
+> **Historical (2026-10-27; finalized 2026-10-28).** The consumer loop and
+> `drain.lock` described here were removed in Phase 1 (`466d440`). Drain is now
+> a `drain-pass` work item executed by the single heartbeat loop;
+> `drain.current.json`, `drain.lock`, and the consumer wake loop no longer
+> exist. The `drain.consumer: false` side-mission fallback, the `drain_run`
+> tool, and the `turns-pending` candidacy were removed on 2026-10-28. The
+> current scheduling implementation is
 > [SWRR Work Scheduler](swrr-work-scheduler-plan.md). This page is retained
 > for design history.
 

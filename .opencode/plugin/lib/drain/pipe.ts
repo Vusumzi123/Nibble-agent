@@ -4,7 +4,7 @@
 // One run: load cursor -> discover/fetch -> render -> summarize -> hand the
 // items to the active memory provider's writer -> map its WriteReport to
 // per-session cursor marks. There is no lock: the single heartbeat loop runs
-// one work unit at a time, so every caller (tick step, `drain_run` tool) is
+// one work unit at a time, so every caller (the heartbeat drain-pass step) is
 // already serialized against the rest of the harness (deconcurrency plan,
 // Phase 1).
 //

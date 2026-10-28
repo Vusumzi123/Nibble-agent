@@ -1,11 +1,13 @@
 # Heartbeat Lane Queues
 
-> **Historical (2026-10-27).** This document describes the pre-Phase-1
-> two-lane model. Commit `466d440` replaced it with one work queue and one
-> executor; the drain consumer described below was removed at the same time.
-> The current scheduling implementation is
-> [SWRR Work Scheduler](swrr-work-scheduler-plan.md). Keep this file for
-> history, not as an implementation reference.
+> **Historical (2026-10-27; superseded 2026-10-28).** The current model is a
+> **single work pool with a producer/consumer split**: producers decide at
+> enqueue time (weighted draw for missions, status predicate for staleness,
+> `drainDue` for `drain-pass`) and emit at most one item each per tick; the
+> consumer picks exactly one runnable item and runs it, or skips the tick when
+> the pool is empty. There is no JEV dispatch, no side lane, and no reroll.
+> See [SWRR Work Scheduler](swrr-work-scheduler-plan.md) for the live
+> implementation. The lane material below is kept for history.
 
 How a heartbeat tick picked work, and how new work sources were added.
 
@@ -19,11 +21,15 @@ tick with nothing queued does nothing at all.
 Missed ticks still coalesce (`computeWakeDelayMs` — "coalesce, never
 replay"). Work piles up in the queues; ticks never pile up.
 
-> **Drain history.** Drain first left the side lane for a demand-driven
-> consumer loop, then Phase 1 removed that loop and made drain a
-> `drain-pass` work kind executed by the single heartbeat loop. The archived
-> consumer design is in [drain-consumer.md](drain-consumer.md); the current
-> scheduling implementation is [swrr-work-scheduler-plan.md](swrr-work-scheduler-plan.md).
+> **Current model (2026-10-28).** One `work-queue.json`, no lanes:
+> `collectMissions` draws one candidate (frequency × mood), `collectStaleness`
+> emits one status mission, and the heartbeat enqueues `drain-pass` when due.
+> `pickFair` chooses one kind/item; the item is authoritative. A queued
+> mission is a reservation and runs even if its `roll:`/`min-gap:` gate would
+> not pass again. The producer enqueues at most one mission per tick, so the
+> ghost-item failure mode is gone. Drain is only the `drain-pass` work kind;
+> `turns-pending`, the side lane, `drain.consumer`, and the `drain_run` tool
+> were removed.
 
 ## The model
 

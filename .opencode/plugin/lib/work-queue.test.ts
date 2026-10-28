@@ -5,18 +5,19 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
-  WORK_PRIORITY,
+  DEFAULT_WORK_WEIGHTS,
   dequeueById,
   emptyQueue,
+  emptyScheduler,
   enqueueWork,
-  isDue,
   loadWorkQueue,
-  pickNext,
+  loadWorkQueueState,
+  pickFair,
   pruneWork,
   queueDepth,
-  queueEmpty,
   requeueTail,
   saveWorkQueue,
+  saveWorkQueueState,
   stallResumeItem,
   type WorkItem,
 } from "./work-queue.ts"
@@ -28,43 +29,6 @@ const item = (over: Partial<WorkItem>): WorkItem => ({
   enqueued_ms: 0,
   requeue_count: 0,
   ...over,
-})
-
-test("pickNext: priority order is mission > drain-pass > quiet-hours > staleness > profile > soul", () => {
-  const now = 1_000
-  const all: WorkItem[] = [
-    item({ id: "soul", kind: "soul-update", enqueued_ms: 1 }),
-    item({ id: "staleness", kind: "staleness", enqueued_ms: 2 }),
-    item({ id: "quiet-hours", kind: "quiet-hours", enqueued_ms: 3 }),
-    item({ id: "drain", kind: "drain-pass", enqueued_ms: 4 }),
-    item({ id: "mission", kind: "mission", enqueued_ms: 5 }),
-    item({ id: "profile", kind: "profile-update", enqueued_ms: 6 }),
-  ]
-  assert.deepEqual(
-    Object.values(WORK_PRIORITY),
-    [0, 1, 2, 3, 4, 5],
-    "the plan's order is the numeric order",
-  )
-  const picked: string[] = []
-  let queue = all
-  while (!queueEmpty(queue)) {
-    const next = pickNext(queue, now)
-    assert.ok(next)
-    picked.push(next!.id)
-    queue = dequeueById(queue, next!.id)!.rest
-  }
-  assert.deepEqual(picked, ["mission", "drain", "quiet-hours", "staleness", "profile", "soul"])
-})
-
-test("pickNext: FIFO within a kind and not_before gates visibility", () => {
-  const queue = [
-    item({ id: "mission:b", enqueued_ms: 20, not_before_ms: 5_000 }),
-    item({ id: "mission:a", enqueued_ms: 10 }),
-  ]
-  assert.equal(pickNext(queue, 1_000)?.id, "mission:a", "not_before 5000 is not due")
-  assert.equal(isDue(queue[0], 5_000), true)
-  assert.equal(pickNext(queue, 5_000)?.id, "mission:a", "earlier enqueue wins")
-  assert.equal(pickNext([queue[0]], 5_000)?.id, "mission:b")
 })
 
 test("enqueueWork dedupes by id and preserves the original enqueue time", () => {
@@ -103,24 +67,12 @@ test("pruneWork drops expired items and work whose status is gone", () => {
   assert.deepEqual(dropped.map((i) => i.id).sort(), ["mission:a", "mission:c"])
 })
 
-test("loadWorkQueue migrates a legacy lanes file and round-trips an array", async () => {
+test("loadWorkQueue round-trips a v2 array", async () => {
   const dir = await mkdtemp(join(tmpdir(), "work-queue-"))
-  const legacy = join(dir, "work-queue.json")
-  await writeFile(
-    legacy,
-    JSON.stringify({
-      primary: [{ id: "mission:a", kind: "mission", producer: "tick", enqueued_ms: 1 }],
-      side: [{ id: "mission:b", kind: "mission", producer: "turns-pending", enqueued_ms: 2 }],
-    }),
-    "utf8",
-  )
-  const migrated = await loadWorkQueue(legacy)
-  assert.equal(migrated.find((i) => i.id === "mission:a")?.kind, "mission")
-  assert.equal(migrated.find((i) => i.id === "mission:b")?.kind, "staleness")
-
+  const file = join(dir, "work-queue.json")
   const now = Date.now()
-  await saveWorkQueue(legacy, [item({ id: "mission:c", enqueued_ms: now })])
-  const reloaded = await loadWorkQueue(legacy)
+  await saveWorkQueue(file, [item({ id: "mission:c", enqueued_ms: now })])
+  const reloaded = await loadWorkQueue(file)
   assert.equal(reloaded.length, 1)
   assert.equal(reloaded[0].id, "mission:c")
   assert.equal(queueDepth(reloaded), 1)
@@ -132,15 +84,6 @@ test("loadWorkQueue: a corrupt file is an empty queue", async () => {
   await writeFile(file, "{ not json", "utf8")
   assert.deepEqual(await loadWorkQueue(file), [])
 })
-
-import {
-  DEFAULT_WORK_WEIGHTS,
-  emptyScheduler,
-  loadWorkQueueState,
-  pickFair,
-  refundFairPick,
-  saveWorkQueueState,
-} from "./work-queue.ts"
 
 function runFairRounds(
   kinds: Array<{ kind: WorkItem["kind"]; weight: number }>,
@@ -203,7 +146,7 @@ test("SWRR: a third kind gets its share without changing the core", () => {
   assert.equal(picked.filter((kind) => kind === "staleness").length, 2)
 })
 
-test("SWRR: weight 0 disables a kind and a refund restores the credit", () => {
+test("SWRR: weight 0 disables a kind", () => {
   const scheduler = emptyScheduler({ ...DEFAULT_WORK_WEIGHTS, "drain-pass": 0 })
   const queue = [
     item({ id: "mission:a", kind: "mission" }),
@@ -212,10 +155,6 @@ test("SWRR: weight 0 disables a kind and a refund restores the credit", () => {
   const pick = pickFair(queue, scheduler, 1_000)
   assert.ok(pick)
   assert.equal(pick!.kind, "mission")
-  const refunded = refundFairPick(pick!.scheduler, pick!)
-  assert.equal(refunded.last_kind, null)
-  assert.equal(refunded.served.mission, 0)
-  assert.equal(refunded.credits.mission, DEFAULT_WORK_WEIGHTS.mission)
 })
 
 test("SWRR state persists beside the queue and keeps items on corrupt scheduler", async () => {

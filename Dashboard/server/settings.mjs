@@ -660,7 +660,7 @@ export function readMissions(dir) {
         menus: Array.isArray(fm.menus) ? fm.menus : ['day'],
         min_level: typeof fm.min_level === 'number' ? fm.min_level : 0,
         approval: typeof fm.approval === 'string' ? fm.approval : 'n/a',
-        candidacy: typeof fm.candidacy === 'string' ? fm.candidacy : 'digest',
+        candidacy: typeof fm.candidacy === 'string' ? fm.candidacy : 'always',
         agent: typeof fm.agent === 'string' ? fm.agent : '',
         file_enabled: fileEnabled,
         file_min_level: typeof fm.min_level === 'number' ? fm.min_level : 0,

@@ -29,11 +29,9 @@ audit:
   rotate_by: size            # size | daily | weekly
 
 drain:
-  # Cursor-backed conversation consolidation (drain-pipe). consumer: true
-  # (default) makes drain a heartbeat `drain-pass` work item; consumer: false
-  # is the legacy side-mission rollback. All keys are optional and hot-read.
+  # Cursor-backed conversation consolidation (drain-pipe). Drain is a heartbeat
+  # `drain-pass` work item; all keys are optional and hot-read.
   enabled: true
-  consumer: true
   cursor_file: drain-cursor.json   # leaf under <state>
   writer_model: ""             # rag-brain writer; "" = the agent default
   summarize_model: ""          # session-summarizer; "" = the agent default
@@ -262,7 +260,6 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   mission_max_resumes: 3            # resumes before a timed-out mission drops
 
 scheduler:                      # SWRR work-kind fairness (docs/swrr-work-scheduler-plan.md)
-  fair: true                    # false = legacy static-priority rollback
   weights:                      # relative shares; 0 disables a kind
     mission: 4
     drain-pass: 3

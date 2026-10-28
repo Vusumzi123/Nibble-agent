@@ -5,7 +5,7 @@ frequency: mid
 menus: [day]
 min_level: 2
 approval: n/a
-candidacy: digest
+candidacy: min-gap:research
 agent: ""
 enabled: true
 ---

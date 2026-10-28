@@ -25,11 +25,8 @@ frequency: mid
 menus: [day]
 min_level: 2
 approval: writes-follow-dial
-candidacy: digest
-lane: primary
+candidacy: always
 agent: ""
-runner: ""
-on_decline: stop
 enabled: true
 ---
 
@@ -41,17 +38,14 @@ Defaults when a key is missing or invalid (`lib/missions.ts`
 
 | Key | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `id` | `[A-Za-z_][A-Za-z0-9_-]*` | filename stem | Lowercase by convention: JEV ids are lowercased before matching. A duplicate id makes the later file (sorted by filename) be skipped. |
-| `title` | string | `id` | Shown in the JEV digest and UI. |
+| `id` | `[A-Za-z_][A-Za-z0-9_-]*` | filename stem | Lowercase by convention. A duplicate id makes the later file (sorted by filename) be skipped. |
+| `title` | string | `id` | Shown in the UI and the ledger. |
 | `frequency` | `high` / `mid` / `low` | `mid` | A dispatch **weight**, never a gate: 1.0 / 0.5 / 0.2, multiplied by mood bias. |
 | `menus` | inline list of `day` / `night` / `both` | `[day]` | `both` expands to `[day, night]`. The live window is chosen from the quiet flag. |
 | `min_level` | integer 0–4 | `2` | Lowest `autonomy.level` that may run it. |
-| `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the UI. It does **not** enforce anything; the autonomy matrix and JEV gate execution. |
-| `candidacy` | see below | `digest` | Deterministic eligibility gate, evaluated before JEV. |
-| `lane` | `primary` / `side` | `primary` | Dispatch lane (docs/heartbeat-lanes.md). `primary` = JEV-picked, one per tick. `side` = status-fed queue: strict FIFO, one side item per tick, runs alongside the primary in the same tick, never offered to the JEV. Side missions should use a status candidacy (`turns-pending`, `brain-stale[:hours]`). |
+| `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the UI. It does **not** enforce anything; the autonomy matrix gates execution. |
+| `candidacy` | see below | `always` | Producer-side eligibility gate, evaluated when the item is enqueued. |
 | `agent` | opencode agent name | `""` | `""` = the default heartbeat agent. A name pins the child session to that agent (and its permissions). |
-| `runner` | tool binding name | `""` | Metadata only. It does not execute or bypass the child; the body must name the tool. Today only `drain-pipe` → `drain_run`. |
-| `on_decline` | `reroll` / `stop` | `stop` | What the orchestrator does after `mission_result` reports `declined`. Ignored on the side lane: a side decline drops the queue item and never rerolls. |
 | `enabled` | `true` / `false` | `true` | A config overlay may only turn this off. |
 
 Unknown frontmatter keys are ignored with a warn-once. Invalid values fall
@@ -61,31 +55,27 @@ back to the default above and warn once per process to
 
 ## Candidacy predicates
 
-`lib/heartbeat.ts` `candidacyPasses` is authoritative. All predicates are
+`lib/heartbeat.ts` `candidacyPasses` is authoritative. The **producer** runs it
+when deciding what to enqueue; there is no model gate. All predicates are
 deterministic and fail closed.
 
 | Value | Passes when |
 | --- | --- |
-| `digest` | Always. The JEV decides from the signals ("judgment" warrant). |
-| `always` | Always. Same eligibility as `digest`. |
+| `always` | Always (subject to `enabled`, `menus`, `min_level`). |
 | `backlog-pending` | Open backlog entries at the current level > 0. |
-| `turns-pending` | Unconsumed turn-store turns > 0. |
-| `brain-stale` | The oldest `type: reference` vault note is ≥ 720h old by its `updated:` frontmatter. `brain-stale:<hours>` overrides the threshold; absent signal fails closed. |
+| `brain-stale` | The oldest `type: reference` vault note is ≥ 720h old by its `updated:` frontmatter. `brain-stale:<hours>` overrides the threshold; absent signal fails closed. Status-fed missions are emitted as the `staleness` work kind. |
 | `dream-gate` | Sleep status is `dreaming`, under the nightly cap, and the `quiet.dream_chance` roll passes. Feature-specific (dream hook). |
 | `idea-roll` | Today's idea draw has quota left. Feature-specific (idea pipeline); absent state = fail closed. |
-| `min-gap:<key>` | Never ran, or `now - lastRun >= minGapMs[key]`. A key with no wired store/gap reads as 0 → always eligible. |
+| `min-gap:<key>` | Never ran, or `now - lastRun >= minGapMs[key]`. The heartbeat keeps per-mission last-run stamps in `heartbeat.json`; a key with no wired gap reads as 0 → always eligible. |
 | `roll:<p>` | `Math.random() < p` per tick. `<p>` must be numeric; it is not clamped. |
 
-Two special short-circuits around JEV:
+A mission enqueued on a lucky `roll:`/`min-gap:` tick is a **reservation**: once
+it is in the pool it runs even if the gate would not pass again. The producer
+enqueues at most one mission and one staleness item per tick; the consumer runs
+exactly one pool item, or skips the tick when the pool is empty.
 
-- A sole candidate whose candidacy is `min-gap:` dispatches **without** a JEV
-  call (`soleDeterministicVerdict`).
-- Inside the quiet window with sleep status `dreaming`, the tick ends with no
-  LLM call. All-quiet at level ≤ 2 also ends the tick before JEV.
-
-Before candidacy, the digest filters on `enabled`, effective `menus`
-containing the current window, and `level >= min_level`. A mission JEV cannot
-see cannot be dispatched.
+Before candidacy, the loader filters on `enabled`, effective `menus` containing
+the current window, and `level >= min_level`.
 
 New predicate names require code changes in `lib/missions.ts` (parser) and
 `lib/heartbeat.ts` (evaluation plus context wiring), with tests — a file
@@ -94,7 +84,7 @@ change alone cannot add one.
 ## Writing the body
 
 The final prompt is assembled as: context header → fixed heartbeat prompt →
-`Verdict: mission:<id> — <title>` → the body (trimmed). The body is
+`Mission: <id> — <title>` → the body (trimmed). The body is
 authoritative and is not validated, so it must be a complete, self-contained
 task brief.
 
@@ -126,11 +116,9 @@ once:
   records `result_missing: true`, and **never** infers a decline.
 - A tool returning `status: "skipped"` is telemetry, not a decline. The child
   must still call `mission_result` with `declined`.
-- `declined` + `on_decline: reroll`: the mission is excluded, the digest is
-  recomputed, and JEV is asked once more in the same tick. Second decline ends
-  the tick. `stop` ends the tick silently.
-- Side-lane missions (`lane: side`) never reroll: a decline drops the queue
-  item and the tick continues with the primary lane.
+- `declined`: the item is dropped (the producer re-proposes it next tick if its
+  gate still passes). There is no same-tick reroll.
+
 - A decline must leave no side effects.
 - Tool-free missions (`agent: dreamer`, `agent: idea-generator`) cannot call
   `mission_result`; they end with their typed object/markers and the hook
@@ -147,7 +135,6 @@ menus: [day]
 min_level: 2
 approval: n/a
 candidacy: min-gap:audit-refresh
-on_decline: stop
 enabled: true
 ---
 
@@ -177,15 +164,14 @@ eligible.
 
 ## Adding a new mission tool
 
-`mission_result` and `drain_run` are registered on the plugin tool surface in
+`mission_result` is registered on the plugin tool surface in
 `.opencode/plugin/heartbeat-hook.ts`. To add a new deterministic capability:
 
 1. Implement it under `.opencode/plugin/lib/` (pure, never throws) and test it.
 2. Register it in the hook's `tool:` object with a schema; the tool is then
    callable from mission child sessions and passes through the normal
    autonomy/permission layer.
-3. Add the tool name to the mission `runner` metadata and make the body the
-   source of truth for usage.
+3. Make the mission body the source of truth for usage.
 4. If the tool changes dispatch or result behavior, add its file to
    `HEARTBEAT_CODE_FILES` in `lib/heartbeat.ts` so the stale-code guard blocks
    an old process.
@@ -210,25 +196,21 @@ overlay may write `enabled: false`; it cannot re-enable a file-disabled mission.
 
 ## Verify
 
-1. `node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts .opencode/plugin/lib/lanes/*.test.ts`
+1. `node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts`
    — add a `parseMissionFile` fixture and, if shipped, a loader assertion in
    `lib/missions.test.ts`.
 2. Next tick, read `.opencode/logs/heartbeat.log`: one NDJSON line with
    `verdict`, `mission`, `outcome`, `token_cost`, `result_status`,
-   `result_missing`, `over_budget`, and on the decline path `reroll` /
-   `declined` / `gate` + `reason`.
+   `result_missing`, `over_budget`, and `reason`.
 3. Check `.opencode/state/heartbeat.json` for the no-op streak and
-   `.opencode/logs/autonomy-config.log` for parse/overlay rejects.
-4. A mission that never appears in `candidates:` is failing `enabled`,
-   `menus`, `min_level`, or `candidacy` — not the JEV.
+   `.opencode/state/work-queue.json` for the pool. A mission that never appears
+   in `candidates:` is failing `enabled`, `menus`, `min_level`, or `candidacy`.
 
 ## Pitfalls
 
 - `menus` defaults to `[day]`; an unset night mission silently never runs at
   night.
-- `frequency` does not force cadence — it only weights the JEV tie-break.
-- `runner` is not an execution path; putting a tool name there without a body
-  that calls it does nothing.
+- `frequency` does not force cadence — it only weights the producer's draw.
 - Do not treat `skipped` as a result. Decline explicitly.
 - Do not reuse `dream-gate`, `idea-roll`, or `min-gap:` keys unless the
   matching feature/store is actually wired.

@@ -14,7 +14,6 @@ import {
   setStatus,
 } from "./lib/backlog.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
-import { readDecisionPrompts } from "./lib/decision-prompts.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
 import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
 import {
@@ -22,12 +21,10 @@ import {
   HEARTBEAT_CURRENT_FILE,
   HEARTBEAT_STATE_FILE,
   HEARTBEAT_WAKE_CAP_MS,
+  HEARTBEAT_FIXED_PROMPT,
   assembleMissionBrief,
-  buildDigestChoiceRequest,
   computeDigest,
   computeWakeDelayMs,
-  deterministicDigestFallback,
-  digestVerdictFromResult,
   effectiveFrequencyMs,
   frequencyToMs,
   idleHeartbeatCurrent,
@@ -37,9 +34,7 @@ import {
   heartbeatErrorFields,
   missionContextHeader,
   writeHeartbeatCurrent,
-  soleDeterministicVerdict,
   staleCodeFiles,
-  type DigestVerdict,
   type HeartbeatDigest,
   type HeartbeatCurrent,
   type HeartbeatPhase,
@@ -72,18 +67,14 @@ import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
   MAX_REQUEUES,
   WORK_QUEUE_FILE,
-  type FairPick,
   type SchedulerState,
   type WorkItem,
   dequeueById,
   enqueueWork,
   loadWorkQueueState,
   pickFair,
-  pickNext,
   pruneWork,
   queueDepth,
-  queueEmpty,
-  refundFairPick,
   saveWorkQueueState,
   stallResumeItem,
 } from "./lib/work-queue.ts"
@@ -94,7 +85,6 @@ import {
   itemRunnable,
   itemStillDue,
   missionIdOf,
-  missionItemId,
 } from "./lib/work-producers.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import {
@@ -110,7 +100,6 @@ import { runSteps, type StepKind } from "./lib/step-registry.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
-import { findDrainToolResult, runDrainForMission, type DrainToolResult } from "./lib/drain/tool.ts"
 import type { DrainPipeClient } from "./lib/drain/pipe.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
@@ -119,6 +108,10 @@ import { nowIso, sleep } from "./lib/util.ts"
 
 /** Post-abort idle confirmation budget (plan 5.2) — never the tick budget. */
 const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
+
+/** `min-gap:research` cadence. Research is the only judgment mission left
+ *  after the JEV digest was removed, so its restraint lives here. */
+const RESEARCH_MIN_GAP_MS = 24 * 60 * 60_000
 
 // In-process heartbeat scheduler (kanban card D, missions-plan §12 — the
 // D-M9 locked vehicle) + outcome recording (kanban card E, plan §7): a
@@ -138,14 +131,14 @@ const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
 //      while held; a stale lease is stealable). A live lease skips the tick —
 //      one mission at a time even when a TUI-embedded server and a separate
 //      `opencode serve` both load this plugin.
-//   5. Pre-gate (card B, deterministic): all-quiet ∧ level ≤ L2 → ledger
-//      NO_REPLY, release, exit. Zero LLM calls — no session is created and no
-//      JEV provider runs on this path.
-//   6. Execute (cards B+C): JEV digest choice (`no_reply | mission:<id>`,
-//      fail-open to no_reply, `reason` explains which) → one child session via
-//      `client.session.create` + `session.promptAsync(fixed brief)`
-//      (delegation-child pattern), resolved on `session.idle`. The mission runs
-//      under the same autonomy gate and irreversibility floor as any session.
+//   5. Producers: each states intent into the single work pool — at most one
+//      mission and one staleness item per tick, plus `drain-pass` when due.
+//      This is where the decision is made (candidacy + weighted draw); there
+//      is no model gate.
+//   6. Consumer: pick exactly one runnable pool item and execute it — a
+//      `drain-pass`, a background step, or one mission child — or skip the
+//      tick when the pool is empty. The mission runs under the same autonomy
+//      gate and irreversibility floor as any session.
 //
 // Outcome recording (§7): every tick appends one NDJSON line to the
 // `heartbeat:` ledger (`ts, tick, digest_hash, level, quiet, candidates, bias,
@@ -216,12 +209,15 @@ export default (async ({ client, directory, ...rest }) => {
     noop_hash: string | null
     noop_streak: number
     last_mission: string | null
+    /** Per-mission last dispatch epoch ms (`min-gap:` candidacy). */
+    last_runs?: Record<string, number>
   }>(join(stateDir, HEARTBEAT_STATE_FILE), {
     last_tick: 0,
     ticks: 0,
     noop_hash: null,
     noop_streak: 0,
     last_mission: null,
+    last_runs: {},
   })
 
   // B7 bookkeeping: a no_reply tick on the SAME digest extends the streak, a
@@ -687,7 +683,6 @@ export default (async ({ client, directory, ...rest }) => {
     runError?: ReturnType<typeof heartbeatErrorFields>
     sessionId: string | null
     result: MissionResult | null
-    tool: DrainToolResult | null
     /** Present only when a timeout triggered an abort attempt. */
     aborted?: boolean
     abortError?: string
@@ -714,8 +709,6 @@ export default (async ({ client, directory, ...rest }) => {
     mission: Mission
     prompt: string
     agent: string
-    /** Which lane's marker fields this run patches (docs/heartbeat-lanes.md). */
-    slot?: "primary" | "side"
   }): Promise<ChildRun> => {
     let sessionId: string | null = null
     let outcome: ChildOutcome = "error"
@@ -723,7 +716,6 @@ export default (async ({ client, directory, ...rest }) => {
     let summary = ""
     let runError: ReturnType<typeof heartbeatErrorFields> | undefined
     let result: MissionResult | null = null
-    let drainTool: DrainToolResult | null = null
     let aborted: boolean | undefined
     let abortError: string | undefined
     let stopReason: "stall" | "ceiling" | undefined
@@ -733,7 +725,6 @@ export default (async ({ client, directory, ...rest }) => {
     let orphanAbortError: string | undefined
     let stoppedAt: string | undefined
     let transcriptRows: unknown[] | undefined
-    const slot = args.slot ?? "primary"
 
     try {
       const created = await (client as any).session.create({
@@ -745,21 +736,12 @@ export default (async ({ client, directory, ...rest }) => {
       sessionId = childID
       automationChildSessions.add(childID)
       trackChild(childID)
-      await setCurrent(
-        slot === "side"
-          ? {
-              phase: "mission",
-              side_mission: args.mission.id,
-              side_mission_title: args.mission.title,
-              side_session: childID,
-            }
-          : {
-              phase: "mission",
-              mission: args.mission.id,
-              mission_title: args.mission.title,
-              session: childID,
-            },
-      )
+      await setCurrent({
+        phase: "mission",
+        mission: args.mission.id,
+        mission_title: args.mission.title,
+        session: childID,
+      })
 
       const idled = waitForChildIdle(childID)
       const res = await (client as any).session.promptAsync({
@@ -822,8 +804,6 @@ export default (async ({ client, directory, ...rest }) => {
       }
 
       result = parseMissionResult(rows)
-      drainTool = findDrainToolResult(rows)
-      if (drainTool) tokenCost += drainTool.tokens
       if (!summary && result?.summary) summary = result.summary
       transcriptRows = rows
     } catch (err) {
@@ -841,7 +821,6 @@ export default (async ({ client, directory, ...rest }) => {
       runError,
       sessionId,
       result,
-      tool: drainTool,
       ...(aborted === undefined ? {} : { aborted }),
       ...(abortError === undefined ? {} : { abortError }),
       ...(stopReason === undefined ? {} : { stopReason }),
@@ -851,61 +830,6 @@ export default (async ({ client, directory, ...rest }) => {
       ...(orphanAbortError === undefined ? {} : { orphanAbortError }),
       ...(stoppedAt === undefined ? {} : { stoppedAt }),
       ...(transcriptRows === undefined ? {} : { transcriptRows }),
-    }
-  }
-
-  type Decided = {
-    verdict: DigestVerdict
-    reason: string
-    error?: ReturnType<typeof heartbeatErrorFields>
-  }
-
-  const decideDigest = async (digest: HeartbeatDigest): Promise<Decided> => {
-    // No primary candidates: the verdict is decided already — never spend a
-    // JEV call on a choice list of one (`no_reply`).
-    if (digest.candidates.length === 0) {
-      return { verdict: { kind: "no_reply" }, reason: "no-candidates" }
-    }
-    const sole = soleDeterministicVerdict(digest.candidates)
-    if (sole) return { verdict: sole, reason: "sole-min-gap" }
-
-    try {
-      const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
-      if (!gate) return { verdict: { kind: "no_reply" }, reason: "decisions-disabled" }
-      const prompts = await readDecisionPrompts(dir)
-      const outcome = await gate.decide(
-        buildDigestChoiceRequest(digest, prompts.digest.assertion),
-        { fallback: "open" },
-      )
-      let verdict = digestVerdictFromResult(
-        outcome.result,
-        digest.candidates.map((c) => c.id),
-      )
-      let reason =
-        outcome.reason !== "none"
-          ? outcome.reason
-          : verdict.kind === "no_reply"
-            ? "jev-no-reply"
-            : "none"
-      // A provider fallback (abstain/error/shape) that resolves to silence
-      // must not starve warranted work: dispatch the highest-weight
-      // pending-work candidate instead. Confident no_reply (no fallback) and
-      // usable mission verdicts are untouched.
-      if (outcome.fallback && verdict.kind === "no_reply") {
-        const pending = deterministicDigestFallback(digest)
-        if (pending) {
-          verdict = pending
-          reason = `${outcome.reason}:pending-work`
-        }
-      }
-      return { verdict, reason }
-    } catch (err) {
-      void diag.error("[heartbeat-hook] digest decision failed:", err)
-      return {
-        verdict: { kind: "no_reply" },
-        reason: "error",
-        error: heartbeatErrorFields("digest", err),
-      }
     }
   }
 
@@ -996,15 +920,18 @@ export default (async ({ client, directory, ...rest }) => {
       const digestOpts = {
         now: new Date(nowMs),
         ideaDay,
-        gaps: ideaGaps,
-        minGapMs: { express: ideaCfg.express_min_gap_hours * 3_600_000 },
+        gaps: { ...(ideaGaps ?? {}), ...(state.last_runs ?? {}) },
+        minGapMs: {
+          express: ideaCfg.express_min_gap_hours * 3_600_000,
+          research: RESEARCH_MIN_GAP_MS,
+        },
         dbFile: drainDbFile,
       }
       let digest = await computeDigest(dir, digestOpts)
 
       // Mood feed (§7): a gap of ≥ factor × frequency since the previous tick
       // means the harness was silent too long — fed once per gap, because
-      // last_tick has already advanced past it. Independent of the verdict.
+      // last_tick has already advanced past it. Independent of the dispatch result.
       let moodEvent: string | null = null
       if (
         hbCfg.long_silence_factor > 0 &&
@@ -1016,10 +943,10 @@ export default (async ({ client, directory, ...rest }) => {
         moodEvent = "long_silence"
       }
 
-      // One ledger line per tick (§7). `reason` disambiguates no_reply:
-      // all-quiet pre-gate, decisions-disabled, provider error/abstain/shape,
-      // or an explicit JEV no_reply choice. Each line carries the drain
-      // consumer's health (plan §5.3) so the tick view never needs drain.log.
+      // One ledger line per tick (§7). `reason` disambiguates a silent tick:
+      // empty/no-runnable pool, sleep gate, or a step that did nothing. Each
+      // line carries the drain health (plan §5.3) so the tick view never needs
+      // drain.log.
       let drainHealthCache: Awaited<ReturnType<typeof drainHealth>> | undefined
       let schedulerFields: Record<string, unknown> = {}
       const ledger = (extra: Record<string, unknown>): Promise<void> =>
@@ -1060,30 +987,23 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 6. Deterministic pre-gate — zero LLM calls by construction: no JEV
-      // provider, no session. Card B's digest reads every signal from disk.
-      if (digest.all_quiet && digest.level <= 2) {
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "pre-gate",
-          reason: "all-quiet",
-        })
-        await recordNoop(digest.digest_hash)
-        return "fired"
-      }
-
-      // 6a. The single work queue: producers collect deterministic work — zero
-      // LLM calls. The tick producer projects the digest's candidate missions;
-      // brain-stale adds a staleness item. Drain is a queued `drain-pass` kind.
+      // 6. Producers: each states intent — at most one mission and one
+      // staleness item per tick. The pool, not a model, owns the decision.
       phase = "queues"
       await setCurrent({ phase })
       const drainCfgForTick = await readDrainConfig(dir).catch(() => null)
       const allMissions = await loadMissions(dir).catch(() => [])
-      const drainCfgForProducers = drainCfgForTick
-      const drainConsumerOwnsDrain = Boolean(drainCfgForProducers?.enabled && drainCfgForProducers?.consumer)
+      const schedulerCfg = await readSchedulerConfig(dir).catch(() => ({
+        weights: {
+          mission: 4,
+          "drain-pass": 3,
+          "quiet-hours": 1,
+          staleness: 1,
+          "profile-update": 1,
+          "soul-update": 1,
+        },
+      }))
+      const queueState = await loadWorkQueueState(workQueueFile)
       const producerCtx: ProducerCtx = {
         nowMs,
         level: digest.level,
@@ -1091,21 +1011,15 @@ export default (async ({ client, directory, ...rest }) => {
         signals: digest.signals,
         missions: allMissions,
         candidates: digest.candidates,
-        lastMission: state.last_mission,
-        drainConsumer: drainConsumerOwnsDrain,
+        queuedIds: new Set(queueState.items.map((i) => i.id)),
+        random: Math.random,
       }
-      const schedulerCfg = await readSchedulerConfig(dir).catch(() => ({
-        fair: true,
-        weights: { mission: 4, "drain-pass": 3, "quiet-hours": 1, staleness: 1, "profile-update": 1, "soul-update": 1 },
-      }))
-      const queueState = await loadWorkQueueState(workQueueFile)
       let work = enqueueWork(queueState.items, collectWork(producerCtx))
       work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
-      const fair = schedulerCfg.fair
-      let scheduler: SchedulerState = { ...queueState.scheduler, fair }
+      let scheduler: SchedulerState = queueState.scheduler
 
-      // Drain is work, not a loop: enqueue the kind when the backlog triggers.
-      if (drainCfgForTick?.enabled && drainCfgForTick.consumer) {
+      // Drain is a work kind: enqueue it when the backlog triggers.
+      if (drainCfgForTick?.enabled) {
         const due = await drainDue({
           directory: dir,
           stateDir,
@@ -1113,151 +1027,110 @@ export default (async ({ client, directory, ...rest }) => {
         })
         if (due.due) {
           work = enqueueWork(work, [
-            { id: "drain-pass", kind: "drain-pass", producer: "scheduler", enqueued_ms: nowMs, requeue_count: 0 },
+            {
+              id: "drain-pass",
+              kind: "drain-pass",
+              producer: "scheduler",
+              enqueued_ms: nowMs,
+              requeue_count: 0,
+            },
           ])
         }
       }
 
-      let fairPick: FairPick | null = null
-      let nextWork: WorkItem | null = null
-      if (fair) {
-        fairPick = pickFair(
-          work,
-          scheduler,
-          nowMs,
-          (item) => itemRunnable(producerCtx, item),
-          schedulerCfg.weights,
-        )
-        if (!fairPick) {
-          await saveWorkQueueState(workQueueFile, work, scheduler)
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: "silent",
-            token_cost: 0,
-            gate: "queues",
-            reason: "empty",
-            queues: queueDepth(work),
-            scheduler_fair: true,
-          })
-          await recordNoop(digest.digest_hash)
-          return "fired"
-        }
-        scheduler = fairPick.scheduler
-        schedulerFields = {
-          scheduler_fair: true,
-          scheduled_kind: fairPick.kind,
-          scheduler_runnable: fairPick.runnable,
-          scheduler_credit_before: fairPick.credit_before,
-          scheduler_credit_after: fairPick.credit_after,
-        }
-        if (!itemRunnable(producerCtx, fairPick.item)) {
-          scheduler = refundFairPick(scheduler, fairPick)
-          fairPick = pickFair(
-            work,
-            scheduler,
-            nowMs,
-            (item) => itemRunnable(producerCtx, item),
-            schedulerCfg.weights,
-          )
-          if (!fairPick) {
-            await saveWorkQueueState(workQueueFile, work, scheduler)
-            await ledger({
-              verdict: "no_reply",
-              mission: null,
-              outcome: "silent",
-              token_cost: 0,
-              gate: "queues",
-              reason: "empty",
-              queues: queueDepth(work),
-              scheduler_fair: true,
-            })
-            await recordNoop(digest.digest_hash)
-            return "fired"
-          }
-          scheduler = fairPick.scheduler
-          schedulerFields = {
-            scheduler_fair: true,
-            scheduled_kind: fairPick.kind,
-            scheduler_runnable: fairPick.runnable,
-            scheduler_credit_before: fairPick.credit_before,
-            scheduler_credit_after: fairPick.credit_after,
-          }
-        }
+      // 7. Consumer: exactly one item per tick, or skip.
+      const fairPick = pickFair(
+        work,
+        scheduler,
+        nowMs,
+        (item) => itemRunnable(producerCtx, item),
+        schedulerCfg.weights,
+      )
+      if (!fairPick) {
         await saveWorkQueueState(workQueueFile, work, scheduler)
-
-        if (fairPick.kind === "drain-pass") {
-          const picked = dequeueById(work, fairPick.item.id)
-          if (picked) work = picked.rest
-          await saveWorkQueueState(workQueueFile, work, scheduler)
-          phase = "drain"
-          await setCurrent({ phase })
-          const step = await runDrainWork()
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
-            token_cost: step.ran ? step.result.tokens ?? 0 : 0,
-            gate: "drain",
-            reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
-          })
-          if (step.ran) await recordExecution()
-          else await recordNoop(digest.digest_hash)
-          return "fired"
-        }
-
-        if (fairPick.kind !== "mission" && fairPick.kind !== "staleness") {
-          const picked = dequeueById(work, fairPick.item.id)
-          if (picked) work = picked.rest
-          await saveWorkQueueState(workQueueFile, work, scheduler)
-          phase = fairPick.kind
-          await setCurrent({ phase })
-          const errors: string[] = []
-          await runSteps([fairPick.kind as StepKind], (kind, err) => {
-            errors.push(kind)
-            void diag.error(`[heartbeat-hook] step ${kind} failed:`, err)
-          })
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: errors.length ? "error" : "completed",
-            token_cost: 0,
-            gate: fairPick.kind,
-            reason: errors.length ? "step-error" : "step",
-          })
-          await recordExecution()
-          return "fired"
-        }
-      } else {
-        // Rollback path: strict priority, preserving the legacy side lane.
-        nextWork = pickNext(work, nowMs, (item) => itemRunnable(producerCtx, item))
-        schedulerFields = { scheduler_fair: false }
-        if (nextWork?.kind === "drain-pass") {
-          const picked = dequeueById(work, nextWork.id)
-          if (picked) work = picked.rest
-          await saveWorkQueueState(workQueueFile, work, scheduler)
-          phase = "drain"
-          await setCurrent({ phase })
-          const step = await runDrainWork()
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: step.ran ? (step.result.outcome === "error" ? "error" : "completed") : "silent",
-            token_cost: step.ran ? step.result.tokens ?? 0 : 0,
-            gate: "drain",
-            reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
-          })
-          if (step.ran) await recordExecution()
-          else await recordNoop(digest.digest_hash)
-          return "fired"
-        }
+        const depth = queueDepth(work)
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: "silent",
+          token_cost: 0,
+          gate: "queues",
+          reason: depth === 0 ? "empty" : "no-runnable",
+          queues: depth,
+        })
+        await recordNoop(digest.digest_hash)
+        return "fired"
       }
-
-      // No mission.lock (Phase 1): the single loop is the executor, so the
-      // dispatch section cannot overlap anything else in this process.
-
+      scheduler = fairPick.scheduler
+      schedulerFields = {
+        scheduler_fair: true,
+        scheduled_kind: fairPick.kind,
+        scheduler_runnable: fairPick.runnable,
+        scheduler_credit_before: fairPick.credit_before,
+        scheduler_credit_after: fairPick.credit_after,
+      }
+      const picked = dequeueById(work, fairPick.item.id)
+      if (!picked) {
+        await saveWorkQueueState(workQueueFile, work, scheduler)
+        const depth = queueDepth(work)
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: "silent",
+          token_cost: 0,
+          gate: "queues",
+          reason: depth === 0 ? "empty" : "no-runnable",
+          queues: depth,
+        })
+        await recordNoop(digest.digest_hash)
+        return "fired"
+      }
+      work = picked.rest
       await saveWorkQueueState(workQueueFile, work, scheduler)
 
+      // 8. Drain and background steps are one work item each.
+      if (fairPick.kind === "drain-pass") {
+        phase = "drain"
+        await setCurrent({ phase })
+        const step = await runDrainWork()
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: step.ran
+            ? step.result.outcome === "error"
+              ? "error"
+              : "completed"
+            : "silent",
+          token_cost: step.ran ? step.result.tokens ?? 0 : 0,
+          gate: "drain",
+          reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
+        })
+        if (step.ran) await recordExecution()
+        else await recordNoop(digest.digest_hash)
+        return "fired"
+      }
+      if (fairPick.kind !== "mission" && fairPick.kind !== "staleness") {
+        phase = fairPick.kind
+        await setCurrent({ phase })
+        const errors: string[] = []
+        await runSteps([fairPick.kind as StepKind], (kind, err) => {
+          errors.push(kind)
+          void diag.error(`[heartbeat-hook] step ${kind} failed:`, err)
+        })
+        await ledger({
+          verdict: "no_reply",
+          mission: null,
+          outcome: errors.length ? "error" : "completed",
+          token_cost: 0,
+          gate: fairPick.kind,
+          reason: errors.length ? "step-error" : "step",
+        })
+        await recordExecution()
+        return "fired"
+      }
+
+      // 9. One mission child. The picked item is authoritative: no second
+      // model choice, no side lane, no reroll in the same tick.
       const contextFor = (d: HeartbeatDigest): string =>
         missionContextHeader(
           {
@@ -1270,138 +1143,15 @@ export default (async ({ client, directory, ...rest }) => {
           },
           { tokenBudget: autonomy.mission_token_budget },
         )
-      // P4c (§5.5): a dequeued item that carries a resume payload injects the
-      // continuation block AFTER the mission context header, for both lanes.
       const resumeBlockFor = (item: WorkItem | null | undefined): string => {
         const payload = item?.payload as Partial<ResumePayload> | undefined
         if (!payload || payload.resume !== true || !payload.summary) return ""
         try {
           return resumeContextBlock(payload as ResumePayload)
         } catch {
-          // A malformed legacy payload must never fail the dispatch.
           return ""
         }
       }
-
-      // Nothing queued: nothing to do this tick — silent, zero LLM calls.
-      if (queueEmpty(work)) {
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "queues",
-          reason: "empty",
-          queues: queueDepth(work),
-        })
-        await recordNoop(digest.digest_hash)
-        return "fired"
-      }
-
-      // 6c. Side lane: exactly one dequeue per tick, FIFO among runnable
-      // items (a menu-window-blocked item stays queued). The side child runs
-      // to completion BEFORE the primary lane starts, so the lanes never
-      // race on vault writes.
-      type LaneRun = { mission: Mission; run: ChildRun; item: WorkItem }
-      let sideRun: LaneRun | null = null
-      const fairStaleness = fair && fairPick?.kind === "staleness"
-      const sideItem = fair
-        ? fairStaleness
-          ? fairPick!.item
-          : null
-        : pickNext(work, nowMs, (item) =>
-            item.kind === "staleness" && itemRunnable(producerCtx, item),
-          )
-      const sidePick = sideItem ? dequeueById(work, sideItem.id) : null
-      if (sidePick) {
-        work = sidePick.rest
-        await saveWorkQueueState(workQueueFile, work, scheduler)
-        const sideMission = allMissions.find((m) => m.id === missionIdOf(sidePick.item))
-        const sideBrief = sideMission
-          ? assembleMissionBrief(
-              { kind: "mission", id: sideMission.id },
-              sideMission,
-              undefined,
-              contextFor(digest),
-              resumeBlockFor(sidePick.item),
-            )
-          : null
-        if (sideMission && sideBrief) {
-          // Record the attempt before dispatch (same discipline as primary):
-          // the no-repeat suppression reads it back through `last_mission`.
-          await stateStore.update((s) => ({ ...s, last_mission: sideMission.id }))
-          phase = "dispatch"
-          await setCurrent({ phase })
-          const run = await runMissionChild({
-            mission: sideMission,
-            prompt: sideBrief.prompt,
-            agent: sideBrief.agent,
-            slot: "side",
-          })
-          sideRun = { mission: sideMission, run, item: sidePick.item }
-        }
-      }
-
-      // 7a. JEV digest decision. Fail-open to no_reply: decisions disabled,
-      // error, abstain, or unknown id all mean silence — never invent work.
-      phase = "digest"
-      await setCurrent({ phase })
-      let decided = fairStaleness
-        ? { verdict: { kind: "no_reply" } as DigestVerdict, reason: "staleness", error: undefined }
-        : await decideDigest(digest)
-      let verdict = decided.verdict
-      let reason = decided.reason
-      let digestError = decided.error
-
-      // Every mission is a child session. `runner` is a tool binding; the
-      // body names the tool. A null result means the verdict/mission pair
-      // could not be assembled (no_reply or a mismatch).
-      const selected = async (
-        d: HeartbeatDigest,
-        v: DigestVerdict,
-      ): Promise<{ mission: Mission; run: ChildRun; item: WorkItem | null } | null> => {
-        const id = v.kind === "mission" ? v.id : null
-        if (!id) return null
-        const mission = allMissions.find((m) => m.id === id)
-        if (!mission) return null
-        // The dequeued item is needed BEFORE the brief is assembled: a resume
-        // item injects the === RESUMED MISSION === block (plan §5.5).
-        const pick = dequeueById(work, missionItemId(mission.id))
-        if (pick) work = pick.rest
-        const brief = assembleMissionBrief(
-          v,
-          mission,
-          undefined,
-          contextFor(d),
-          resumeBlockFor(pick?.item),
-        )
-        if (!brief) return null
-        // Record the attempt before dispatch: a declined mission still counts
-        // as the last mission, so a no-repeat mission is not re-offered next
-        // tick (the digest reads this back through `last_mission`).
-        await stateStore.update((s) => ({ ...s, last_mission: mission.id }))
-        const extra =
-          ideaCfg.enabled && brief.mission_id === "idea-generate"
-            ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
-            : ""
-        phase = "dispatch"
-        await setCurrent({ phase })
-        const run = await runMissionChild({
-          mission,
-          prompt: brief.prompt + extra,
-          agent: brief.agent,
-          slot: "primary",
-        })
-        return { mission, run, item: pick?.item ?? null }
-      }
-
-      // Item settlement (docs/heartbeat-lanes.md): a timeout re-enqueues at
-      // the queue tail with the reason recorded; error/declined/completed
-      // drop. Past MAX_REQUEUES a timeout drops too.
-      // P4c (§5.3/§5.6): summarize the stopped attempt UNDER the mission.lock
-      // hold before the item is re-enqueued. The summarizer has its own bound
-      // (`mission_summary_timeout_ms`) and always degrades to the deterministic
-      // summary instead of blocking or throwing the tick away.
       const summarizeResume = async (
         mission: Mission,
         run: ChildRun,
@@ -1451,23 +1201,20 @@ export default (async ({ client, directory, ...rest }) => {
           summarizer: summarized.degraded === "summarizer-fallback" ? "fallback" : "llm",
         }
       }
-      const settleItem = async (laneRun: {
-        item: WorkItem | null
-        mission: Mission
-        run: ChildRun
-      }): Promise<boolean> => {
-        if (!laneRun.item || laneRun.run.outcome !== "timeout") return false
-        const run = laneRun.run
-        // Past the resume ceiling the item drops: do not spend an LLM call on
-        // a summary nobody will consume, and journal resume_abandoned.
-        if (laneRun.item.requeue_count >= MAX_REQUEUES) {
+      const settleItem = async (
+        item: WorkItem,
+        mission: Mission,
+        run: ChildRun,
+      ): Promise<boolean> => {
+        if (run.outcome !== "timeout") return false
+        if (item.requeue_count >= MAX_REQUEUES) {
           run.summarizer = null
           run.resumeAbandoned = true
           return false
         }
-        const resume = await summarizeResume(laneRun.mission, run)
+        const resume = await summarizeResume(mission, run)
         run.summarizer = resume.summarizer
-        const requeued = stallResumeItem(laneRun.item, resume.payload, Date.now())
+        const requeued = stallResumeItem(item, resume.payload, Date.now())
         if (!requeued) {
           run.summarizer = null
           run.resumeAbandoned = true
@@ -1483,7 +1230,7 @@ export default (async ({ client, directory, ...rest }) => {
         autonomy.mission_token_budget !== "unlimited" && tokens > autonomy.mission_token_budget
       const runEntry = (
         mission: Mission,
-        lane: "primary" | "side",
+        lane: "primary",
         r: ChildRun,
         requeued: boolean,
       ): Record<string, unknown> => ({
@@ -1501,286 +1248,73 @@ export default (async ({ client, directory, ...rest }) => {
         ...(r.stopReason === undefined ? {} : { stop_reason: r.stopReason }),
         ...(r.stalledForMs === undefined ? {} : { stalled_for_ms: r.stalledForMs }),
         ...(r.lastActivity === undefined ? {} : { last_activity: r.lastActivity }),
-        ...(r.orphanAborted === undefined
-          ? {}
-          : { orphan_abort: r.orphanAborted.length }),
+        ...(r.orphanAborted === undefined ? {} : { orphan_abort: r.orphanAborted.length }),
         ...(r.orphanAbortError === undefined ? {} : { orphan_abort_error: r.orphanAbortError }),
         ...(r.outcome === "timeout" ? { timeout_stopped: true } : {}),
         ...(r.outcome === "timeout" && r.sessionId ? { prior_session: r.sessionId } : {}),
         ...(r.resumeItem === undefined ? {} : { resume_item: r.resumeItem }),
         ...(r.summarizer === undefined ? {} : { summarizer: r.summarizer }),
         ...(r.resumeAbandoned === undefined ? {} : { resume_abandoned: r.resumeAbandoned }),
-        ...(r.tool
-          ? {
-              tool_status: r.tool.status,
-              tool_session: r.tool.session,
-              tool_outcome: r.tool.outcome,
-              ...(r.tool.error ? { tool_error: r.tool.error } : {}),
-            }
-          : {}),
       })
-      /** Legacy top-level drain-tool fields: whichever run carried the tool. */
-      const toolFields = (tool: DrainToolResult | null | undefined): Record<string, unknown> =>
-        tool
-          ? {
-              tool_status: tool.status,
-              tool_session: tool.session,
-              tool_outcome: tool.outcome,
-              ...(tool.error ? { tool_error: tool.error } : {}),
-            }
-          : {}
-      const sideFields = (laneRun: LaneRun, requeued: boolean): Record<string, unknown> => {
-        const r = laneRun.run
-        return {
-          side_mission: laneRun.mission.id,
-          side_outcome: r.outcome,
-          side_token_cost: r.tokenCost,
-          side_session: r.sessionId,
-          side_result_status: resultStatusOf(r),
-          side_requeued: requeued,
-          ...(r.aborted === undefined ? {} : { side_aborted: r.aborted }),
-          ...(r.abortError === undefined ? {} : { side_abort_error: r.abortError }),
-          ...(r.orphanAborted === undefined
-            ? {}
-            : { side_orphan_abort: r.orphanAborted.length }),
-          ...(r.orphanAbortError === undefined
-            ? {}
-            : { side_orphan_abort_error: r.orphanAbortError }),
-        }
-      }
 
-      if (fairStaleness) {
-        const sideRequeued = sideRun ? await settleItem(sideRun) : false
-        await saveWorkQueueState(workQueueFile, work, scheduler)
-        if (sideRun) {
-          const sideResultStatus = resultStatusOf(sideRun.run)
-          const sideDrainFailed =
-            sideRun.run.tool?.outcome === "error" || sideRun.run.tool?.outcome === "dropped"
-          const sideOk =
-            sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed
-          if (!sideOk) {
-            await moodFeed.apply("mission_failure")
-            moodEvent = "mission_failure"
-          }
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: sideRun.run.outcome,
-            token_cost: sideRun.run.tokenCost,
-            over_budget: overBudgetOf(sideRun.run.tokenCost),
-            gate: "staleness",
-            reason: "staleness",
-            queues: queueDepth(work),
-            runs: [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)],
-            ...sideFields(sideRun, sideRequeued),
-            ...toolFields(sideRun.run.tool),
-          })
-          await recordExecution()
-        } else {
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: "silent",
-            token_cost: 0,
-            gate: "staleness",
-            reason: "unrunnable",
-            queues: queueDepth(work),
-          })
-          await recordNoop(digest.digest_hash)
-        }
-        return "fired"
-      }
-
-      const first = await selected(digest, verdict)
-      if (!first) {
-        // No primary mission this tick (JEV silence). The side lane may
-        // still have done the tick's work — never book that as "silent".
-        const sideRequeued = sideRun ? await settleItem(sideRun) : false
-        await saveWorkQueueState(workQueueFile, work, scheduler)
-        if (sideRun) {
-          const sideResultStatus = resultStatusOf(sideRun.run)
-          const sideDrainFailed =
-            sideRun.run.tool?.outcome === "error" || sideRun.run.tool?.outcome === "dropped"
-          const sideOk =
-            sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed
-          if (!sideOk) {
-            await moodFeed.apply("mission_failure")
-            moodEvent = "mission_failure"
-          }
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: sideRun.run.outcome,
-            token_cost: sideRun.run.tokenCost,
-            over_budget: overBudgetOf(sideRun.run.tokenCost),
-            gate: "digest",
-            reason,
-            queues: queueDepth(work),
-            runs: [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)],
-            ...sideFields(sideRun, sideRequeued),
-            ...toolFields(sideRun.run.tool),
-            ...(digestError ? { error: digestError } : {}),
-          })
-          // Side work executed this tick: an executed mission resets the B7
-          // backoff streak (§17.8 reset rule).
-          await recordExecution()
-        } else {
-          await ledger({
-            verdict: "no_reply",
-            mission: null,
-            outcome: "silent",
-            token_cost: 0,
-            gate: "digest",
-            reason,
-            queues: queueDepth(work),
-            ...(digestError ? { error: digestError } : {}),
-          })
-          // Waiting side work must not be delayed by the identical-digest
-          // backoff; a primary item the JEV keeps declining backs off
-          // normally (its expiry re-offers it fresh).
-          if (work.some((i) => i.kind === "staleness")) await recordExecution()
-          else await recordNoop(digest.digest_hash)
-        }
-        return "fired"
-      }
-
-      let chosen = first
-      let secondRun: { mission: Mission; run: ChildRun; item: WorkItem | null } | null = null
-      let totalTokens = first.run.tokenCost + (sideRun?.run.tokenCost ?? 0)
-      let reroll: { from: string; reason: string } | null = null
-      const declined: string[] = []
-      let finalReason = reason
-      let finalDecision: "mission" | "no_reply" = "mission"
-      let noReplyReason = "mission-declined"
-
-      // A drain that failed at the pipe level must not be laundered into a
-      // decline (which would reroll or silence the tick without a failure).
-      const firstDrainFailed =
-        first.run.tool?.outcome === "error" || first.run.tool?.outcome === "dropped"
-      if (first.run.result?.status === "declined" && !firstDrainFailed) {
-        declined.push(first.mission.id)
-        if (first.mission.onDecline === "reroll") {
-          reroll = { from: first.mission.id, reason: first.run.result.reason ?? "declined" }
-          digest = await computeDigest(dir, {
-            ...digestOpts,
-            excludeMissions: [...declined],
-          })
-          phase = "digest"
-          await setCurrent({ phase })
-          decided = await decideDigest(digest)
-          verdict = decided.verdict
-          finalReason = decided.reason
-          digestError = decided.error
-          const second = await selected(digest, verdict)
-          if (second) {
-            secondRun = second
-            chosen = second
-            totalTokens += second.run.tokenCost
-            const secondDrainFailed =
-              second.run.tool?.outcome === "error" || second.run.tool?.outcome === "dropped"
-            if (second.run.result?.status === "declined" && !secondDrainFailed) {
-              declined.push(second.mission.id)
-              finalDecision = "no_reply"
-              noReplyReason = "mission-declined"
-            }
-          } else {
-            finalDecision = "no_reply"
-            noReplyReason = "declined-reroll-empty"
-          }
-        } else {
-          finalDecision = "no_reply"
-          noReplyReason = "mission-declined"
-        }
-      }
-
-      // Settle every dispatched item: a timeout re-enqueues at the queue tail
-      // with the reason recorded; completed/error/declined drop.
-      const sideRequeued = sideRun ? await settleItem(sideRun) : false
-      const firstRequeued = await settleItem(first)
-      const secondRequeued = secondRun ? await settleItem(secondRun) : false
-      await saveWorkQueueState(workQueueFile, work, scheduler)
-
-      const run = chosen.run
-      const finalMission = chosen.mission
-      const finalResult = run.result
-      // Legacy top-level drain-tool fields describe whichever run carried the
-      // tool (drain rides the side lane today).
-      const tickTool = sideRun?.run.tool ?? run.tool
-      const outcome = run.outcome
-      const tokenCost = totalTokens
-      const overBudget = overBudgetOf(tokenCost)
-      const runError = run.runError
-      const resultStatus: MissionResult["status"] | "missing" =
-        finalResult?.status ?? (outcome === "completed" ? "missing" : "error")
-      const resultMissing = !finalResult
-      // The drain tool reports pipe failures as `status: "completed"` with
-      // `outcome: "error" | "dropped"`, so the mission result alone cannot be
-      // trusted: the observed tool outcome is the authoritative signal.
-      const drainFailed = tickTool?.outcome === "error" || tickTool?.outcome === "dropped"
-      const toolFromSide = Boolean(sideRun?.run.tool)
-      const toolOwnerResultStatus = toolFromSide ? resultStatusOf(sideRun!.run) : resultStatus
-      const toolFailedButCompleted = drainFailed && toolOwnerResultStatus === "completed"
-      const summary = drainFailed && tickTool?.summary ? tickTool.summary : run.summary
-      const toolSkippedButCompleted =
-        tickTool?.status === "skipped" && toolOwnerResultStatus === "completed"
-      sessionId = run.sessionId
-
-      const sideResultStatus = sideRun ? resultStatusOf(sideRun.run) : null
-      const sideDrainFailed =
-        sideRun?.run.tool?.outcome === "error" || sideRun?.run.tool?.outcome === "dropped"
-      const sideOk =
-        !sideRun ||
-        (sideRun.run.outcome === "completed" && sideResultStatus !== "error" && !sideDrainFailed)
-      const dispatchedRuns = [
-        ...(sideRun ? [runEntry(sideRun.mission, "side", sideRun.run, sideRequeued)] : []),
-        runEntry(first.mission, "primary", first.run, firstRequeued),
-        ...(secondRun ? [runEntry(secondRun.mission, "primary", secondRun.run, secondRequeued)] : []),
-      ]
-
-      if (finalDecision === "no_reply") {
+      const missionId = missionIdOf(picked.item)
+      const mission = missionId ? allMissions.find((m) => m.id === missionId) : undefined
+      const brief = assembleMissionBrief(
+        mission,
+        HEARTBEAT_FIXED_PROMPT,
+        contextFor(digest),
+        resumeBlockFor(picked.item),
+      )
+      if (!mission || !brief) {
         await ledger({
           verdict: "no_reply",
           mission: null,
-          outcome: sideRun ? sideRun.run.outcome : "silent",
-          token_cost: tokenCost,
-          over_budget: overBudget,
-          gate: "digest",
-          reason: noReplyReason,
+          outcome: "silent",
+          token_cost: 0,
+          gate: fairPick.kind,
+          reason: "missing-mission",
           queues: queueDepth(work),
-          runs: dispatchedRuns,
-          ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
-          ...(sessionId ? { session: sessionId } : {}),
-          result_status: resultStatus,
-          result_missing: resultMissing,
-          ...toolFields(tickTool),
-          ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
-          ...(reroll ? { reroll } : {}),
-          ...(declined.length ? { declined } : {}),
-          ...(runError ?? digestError ? { error: runError ?? digestError } : {}),
         })
-        // A declined mission is not a mood failure; a broken side run is.
-        if (!sideOk) {
-          await moodFeed.apply("mission_failure")
-          moodEvent = "mission_failure"
-        }
-        // Executed side work — or side work still waiting — resets the B7
-        // backoff; a primary item the JEV keeps declining backs off normally.
-        if (sideRun || work.some((i) => i.kind === "staleness")) await recordExecution()
-        else await recordNoop(digest.digest_hash)
+        await recordNoop(digest.digest_hash)
         return "fired"
       }
 
-      const primaryToolFailed =
-        run.tool?.outcome === "error" || run.tool?.outcome === "dropped"
-      const missionOk =
-        outcome === "completed" &&
-        resultStatus !== "declined" &&
-        resultStatus !== "error" &&
-        !primaryToolFailed
+      // Record the attempt before dispatch: the no-repeat suppression and
+      // the `min-gap:` store both read it back.
+      const dispatchedAt = Date.now()
+      await stateStore.update((s) => ({
+        ...s,
+        last_mission: mission.id,
+        last_runs: { ...(s.last_runs ?? {}), [mission.id]: dispatchedAt },
+      }))
+      const extra =
+        ideaCfg.enabled && mission.id === "idea-generate"
+          ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
+          : ""
+      phase = "dispatch"
+      await setCurrent({ phase })
+      const run = await runMissionChild({
+        mission,
+        prompt: brief.prompt + extra,
+        agent: brief.agent,
+      })
+      const requeued = await settleItem(picked.item, mission, run)
+      await saveWorkQueueState(workQueueFile, work, scheduler)
+
+      const resultStatus: MissionResult["status"] | "missing" = resultStatusOf(run)
+      const resultMissing = !run.result
+      sessionId = run.sessionId
+      const outcome = run.outcome
+      const tokenCost = run.tokenCost
+      const overBudget = overBudgetOf(tokenCost)
+      const runError = run.runError
+      const declined = resultStatus === "declined"
+      const failed = outcome !== "completed" || resultStatus === "error"
+      const missionOk = !failed && !declined
 
       phase = "post"
       await setCurrent({ phase })
-      if (!missionOk || !sideOk) {
+      if (failed) {
         await moodFeed.apply("mission_failure")
         moodEvent = "mission_failure"
       }
@@ -1790,20 +1324,20 @@ export default (async ({ client, directory, ...rest }) => {
       // refresh. Best-effort — a ledger failure never fails the tick.
       try {
         const backlogCfg = await readBacklogConfig(dir)
-        if (backlogCfg.enabled && finalMission) {
+        if (backlogCfg.enabled && !declined) {
           const backlogFile = resolveBacklogFile(stateDir, backlogCfg)
           const { entry } = await append(backlogFile, {
             source: "heartbeat",
             kind: "task",
             payload: {
-              title: finalMission.title,
-              detail: summary || `heartbeat tick ${tick}: ${outcome}`,
+              title: mission.title,
+              detail: run.summary || `heartbeat tick ${tick}: ${outcome}`,
             },
           })
-          await setStatus(backlogFile, entry.id, missionOk ? "done" : "failed", {
+          await setStatus(backlogFile, entry.id, failed ? "failed" : "done", {
             result: {
-              ok: missionOk,
-              summary,
+              ok: !failed,
+              summary: run.summary,
               ts: nowIso(),
               token_cost: tokenCost,
             },
@@ -1816,17 +1350,14 @@ export default (async ({ client, directory, ...rest }) => {
         void diag.error("[heartbeat-hook] backlog record failed:", err)
       }
 
-      // Card 7a (§17.10): the idea pipeline's post-run half — a completed
-      // idea-generate goes through dedupe + JEV review + bucket append; a
-      // completed express stamps the `min-gap:express` store. Best-effort: a
-      // failure logs and degrades the ledger tag to "error", never the tick.
+      // Card 7a (§17.10): the idea pipeline's post-run half.
       let ideaNote: string | null = null
-      if (finalMission && ideaCfg.enabled && missionOk) {
+      if (ideaCfg.enabled && missionOk) {
         try {
-          if (finalMission.id === "idea-generate") {
-            ideaNote = await storeGeneratedIdea(summary, ideaCfg)
+          if (mission.id === "idea-generate") {
+            ideaNote = await storeGeneratedIdea(run.summary, ideaCfg)
             if (ideaNote === "stored") await ideaStateStore.update((s) => recordGenerated(s))
-          } else if (finalMission.id === "express") {
+          } else if (mission.id === "express") {
             await ideaStateStore.update((s) => recordExpressed(s, Date.now()))
             ideaNote = "expressed"
           }
@@ -1837,24 +1368,18 @@ export default (async ({ client, directory, ...rest }) => {
       }
 
       await ledger({
-        verdict: `mission:${finalMission.id}`,
-        mission: finalMission.id,
+        verdict: `mission:${mission.id}`,
+        mission: mission.id,
         outcome,
         token_cost: tokenCost,
         over_budget: overBudget,
-        gate: "digest",
-        reason: finalReason,
+        gate: fairPick.kind === "staleness" ? "staleness" : "mission",
+        reason: declined ? "declined" : outcome === "timeout" ? "timeout" : outcome === "completed" ? "none" : "error",
         queues: queueDepth(work),
-        runs: dispatchedRuns,
-        ...(sideRun ? sideFields(sideRun, sideRequeued) : {}),
+        runs: [runEntry(mission, "primary", run, requeued)],
         ...(sessionId ? { session: sessionId } : {}),
         result_status: resultStatus,
         result_missing: resultMissing,
-        ...toolFields(tickTool),
-        ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
-        ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
-        ...(reroll ? { reroll } : {}),
-        ...(declined.length ? { declined } : {}),
         ...(ideaNote ? { idea: ideaNote } : {}),
         ...(runError ? { error: runError } : {}),
       })
@@ -1956,8 +1481,8 @@ export default (async ({ client, directory, ...rest }) => {
   }, 0).unref?.()
 
   // --- Mission tools --------------------------------------------------------
-  // `mission_result` is the only accepted decline signal; `drain_run` is the
-  // deterministic drain capability bound by `runner: drain-pipe`.
+  // `mission_result` is the only accepted decline signal. The legacy
+  // `drain_run` tool is gone: drain is a `drain-pass` work kind now.
   const schema = tool.schema
 
   const missionResultTool = tool({
@@ -1976,62 +1501,10 @@ export default (async ({ client, directory, ...rest }) => {
     },
   })
 
-  const drainRunTool = tool({
-    description:
-      "Run the memory-consolidation drain once. Returns status completed or skipped plus outcome, " +
-      "summary, tokens, writer session, and cursor counts. A skipped result means the mission should " +
-      "decline via mission_result.",
-    args: {},
-    async execute() {
-      try {
-        const drainCfg = await readDrainConfig(dir)
-        const memoryCfg = await readMemoryConfig(dir)
-        const provider = resolveProvider(memoryCfg.provider, {
-          directory: dir,
-          stateDir,
-          vaultDir,
-          drain: drainCfg,
-          dbFile: drainDbFile,
-          onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
-        })
-        const result = await runDrainForMission({
-          directory: dir,
-          stateDir,
-          vaultDir,
-          config: drainCfg,
-          client: client as unknown as DrainPipeClient,
-          provider,
-          waitForIdle: waitForChildIdle,
-          registerChild: (sid) => automationChildSessions.add(sid),
-          dbFile: drainDbFile,
-          ledger: createDrainLedger({ logDir, home: homedir() }),
-          onWarn: (msg, err) => void diag.warn(`[heartbeat-hook] ${msg}`, err),
-        })
-        return JSON.stringify(result)
-      } catch (err) {
-        void diag.error("[heartbeat-hook] drain_run failed:", err)
-        return JSON.stringify({
-          status: "completed",
-          reason: null,
-          outcome: "error",
-          summary: "drain:error",
-          tokens: 0,
-          session: null,
-          cursor_before: null,
-          cursor_after: null,
-          sessions: 0,
-          items: 0,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    },
-  })
-
   // --- Hook surface ---------------------------------------------------------
   return {
     tool: {
       mission_result: missionResultTool,
-      drain_run: drainRunTool,
     },
     event: async ({ event }) => {
       const properties = (event as any).properties ?? {}

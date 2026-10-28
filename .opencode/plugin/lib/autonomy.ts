@@ -484,7 +484,6 @@ const HEARTBEAT_OPTS: NestedSectionOptions = {
 // identically.
 const DRAIN_SCALAR_RULES: Record<string, Rule> = {
   enabled: { t: "bool" },
-  consumer: { t: "bool" },
   cursor_file: { t: "string" },
   writer_model: { t: "string" },
   summarize_model: { t: "string" },

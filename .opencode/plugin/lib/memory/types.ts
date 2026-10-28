@@ -104,7 +104,7 @@ export interface MemoryProvider {
   }): Promise<MemoryEvidence[]>
   /** Drain sink. Only one active writer is allowed. */
   consolidate?(items: WriteItem[], ctx: WriteContext): Promise<WriteReport>
-  /** Un-consolidated count for `turns-pending`. */
+  /** Un-consolidated turn count (drain signal). */
   pending?(): Promise<number>
   /** Tool definitions; the generic memory hook registers them. */
   tools?(factory?: MemoryToolFactory): Record<string, unknown>

@@ -1,15 +1,14 @@
 // Work producers (deconcurrency plan, Phase 1): deterministic collectors that
-// feed the single work queue. A producer never schedules and never executes;
-// it only states intent. Dedupe and ordering belong to the queue.
+// feed the single work pool. A producer never schedules and never executes; it
+// only states intent. The producer side owns the decision — the consumer picks
+// one pool item per tick and runs it, or skips when the pool is empty.
 //
 // Shipped producers:
-//   - tick        -> `mission`: every eligible primary mission the digest
-//                    already computed (candidacy is filtered upstream).
-//   - brain-stale -> `staleness`: a side mission gated on `brain-stale[:h]`
-//                    when the oldest reference note is old.
+//   - tick        -> `mission`: at most one candidate per tick (weighted draw).
+//   - brain-stale -> `staleness`: at most one status mission per tick.
 //
-// `turns-pending` is intentionally absent: drain is a `drain-pass` work kind
-// now, not a mission someone has to dispatch.
+// `turns-pending` and the side lane are gone: drain is a `drain-pass` work
+// kind, and status missions ride the same pool as everything else.
 import {
   candidacyPasses,
   type CandidacyContext,
@@ -26,10 +25,10 @@ export type ProducerCtx = {
   signals: HeartbeatSignals
   missions: Mission[]
   candidates: DigestCandidate[]
-  lastMission: string | null
-  /** True when the drain step owns drain (it always does in Phase 1 unless
-   *  `drain.consumer` is off): turns-pending side missions are then obsolete. */
-  drainConsumer?: boolean
+  /** Ids already in the pool; a producer never re-adds one. */
+  queuedIds?: ReadonlySet<string>
+  /** Injectable randomness for the weighted draw (tests). */
+  random?: () => number
 }
 
 const MISSION_ID_PREFIX = "mission:"
@@ -49,50 +48,73 @@ function missionEligible(mission: Mission, ctx: { level: number; quiet: boolean 
   return ctx.level >= mission.min_level
 }
 
+/** Status-fed missions (staleness) are produced by their own collector. */
+export function isStatusSide(c: MissionCandidacy): boolean {
+  return c === "brain-stale" || c.startsWith("brain-stale:")
+}
+
 function statusCandidacy(ctx: ProducerCtx): CandidacyContext {
   return {
     backlogPending: ctx.signals.backlog_pending,
-    unconsumedTurns: ctx.signals.unconsumed_turns,
     brainOldest: ctx.signals.brain_oldest,
     nowMs: ctx.nowMs,
   }
 }
 
-function isStatusSide(c: MissionCandidacy): boolean {
-  return c === "turns-pending" || c === "brain-stale" || c.startsWith("brain-stale:")
+/** One weighted draw over a candidate list; null when the list is empty. */
+export function weightedPick<T extends { weight: number }>(
+  items: readonly T[],
+  random: () => number = Math.random,
+): T | null {
+  if (items.length === 0) return null
+  const total = items.reduce((sum, item) => sum + Math.max(0, item.weight), 0)
+  if (total <= 0) return items[Math.min(items.length - 1, Math.floor(random() * items.length))] ?? null
+  let roll = random() * total
+  for (const item of items) {
+    roll -= Math.max(0, item.weight)
+    if (roll <= 0) return item
+  }
+  return items[items.length - 1] ?? null
 }
 
-/** Mission work: the digest's candidate list is already filtered. */
+/** Mission work: at most one candidate per tick, chosen by frequency × mood. */
 export function collectMissions(ctx: ProducerCtx): WorkItem[] {
-  return ctx.candidates.map((c) => ({
-    id: missionItemId(c.id),
-    kind: "mission" as const,
-    producer: "tick",
-    enqueued_ms: ctx.nowMs,
-    expires_ms: ctx.nowMs + PRIMARY_TTL_MS,
-    requeue_count: 0,
-  }))
+  const eligible = ctx.candidates.filter(
+    (c) => !isStatusSide(c.candidacy) && !ctx.queuedIds?.has(missionItemId(c.id)),
+  )
+  const picked = weightedPick(eligible, ctx.random ?? Math.random)
+  if (!picked) return []
+  return [
+    {
+      id: missionItemId(picked.id),
+      kind: "mission",
+      producer: "tick",
+      enqueued_ms: ctx.nowMs,
+      expires_ms: ctx.nowMs + PRIMARY_TTL_MS,
+      requeue_count: 0,
+    },
+  ]
 }
 
-/** Staleness work: side missions whose status predicate is satisfied. */
+/** Staleness work: at most one status mission per tick. */
 export function collectStaleness(ctx: ProducerCtx): WorkItem[] {
-  const out: WorkItem[] = []
   const candidacy = statusCandidacy(ctx)
   for (const m of ctx.missions) {
-    if (m.lane !== "side") continue
     if (!isStatusSide(m.candidacy)) continue
-    if (ctx.drainConsumer && m.candidacy === "turns-pending") continue
+    if (ctx.queuedIds?.has(missionItemId(m.id))) continue
     if (!missionEligible(m, ctx)) continue
     if (!candidacyPasses(m, candidacy)) continue
-    out.push({
-      id: missionItemId(m.id),
-      kind: "staleness",
-      producer: "brain-stale",
-      enqueued_ms: ctx.nowMs,
-      requeue_count: 0,
-    })
+    return [
+      {
+        id: missionItemId(m.id),
+        kind: "staleness",
+        producer: "brain-stale",
+        enqueued_ms: ctx.nowMs,
+        requeue_count: 0,
+      },
+    ]
   }
-  return out
+  return []
 }
 
 /** Run every producer; one broken producer never blocks the others. */
@@ -108,13 +130,15 @@ export function collectWork(ctx: ProducerCtx): WorkItem[] {
   return out
 }
 
-/** Dequeue-time re-check: a mission is runnable while the digest still offers
- *  it (or it carries a resume payload); staleness while its status holds. */
+/** Dequeue-time re-check: structural eligibility only. A queued mission is a
+ *  reservation and runs even when the per-tick roll no longer offers it. */
 export function itemRunnable(ctx: ProducerCtx, item: WorkItem): boolean {
   if (item.kind === "mission") {
     if (item.payload?.resume === true) return true
     const id = missionIdOf(item)
-    return id !== null && ctx.candidates.some((c) => c.id === id)
+    if (id === null) return false
+    const mission = ctx.missions.find((m) => m.id === id)
+    return mission ? missionEligible(mission, ctx) : false
   }
   if (item.kind === "staleness") {
     const id = missionIdOf(item)
@@ -127,7 +151,8 @@ export function itemRunnable(ctx: ProducerCtx, item: WorkItem): boolean {
   return true
 }
 
-/** Prune-time "is the work still needed". Missions are governed by expiry. */
+/** Prune-time "is the work still needed". Missions are governed by expiry;
+ *  staleness drops when the status predicate stops holding. */
 export function itemStillDue(ctx: ProducerCtx, item: WorkItem): boolean {
   if (item.kind !== "staleness") return true
   const id = missionIdOf(item)

@@ -51,25 +51,6 @@ async function writeNightMissions(dir: string): Promise<void> {
   const mdir = join(dir, ".opencode", "missions")
   await mkdir(mdir, { recursive: true })
   await writeFile(
-    join(mdir, "drain.md"),
-    [
-      "---",
-      "id: drain",
-      "title: Drain conversation backlog into the vault",
-      "frequency: high",
-      "menus: [day, night]",
-      "min_level: 2",
-      "candidacy: turns-pending",
-      'agent: ""',
-      "enabled: true",
-      "---",
-      "",
-      "Do the drain thing.",
-      "",
-    ].join("\n"),
-    "utf8",
-  )
-  await writeFile(
     join(mdir, "dream.md"),
     [
       "---",
@@ -266,143 +247,9 @@ test("roll failed + no pending turns: zero LLM — no JEV call, no dream, no ses
   assert.equal(state.calls, 0, "the JEV spawner never ran")
   assert.equal(client.calls.create, 0)
 
-  const sleep = await readSleep(dir)
-  assert.equal(sleep.noop_streak, 1, "a no-op tick steps toward the §17.8 backoff")
-  assert.equal(sleep.ticks, 1)
-})
-
-// §17.12 acceptance #1 (drain half): roll failed + pending turns ⇒ drain is
-// the sole survivor and RUNS (deterministic short-circuit, no JEV call).
-test("roll failed + pending turns: drain still runs as the sole candidate, no JEV", async () => {
-  const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
-  await writeNightMissions(dir)
-  await writeSleep(dir)
-  const dbFile = await writePendingTurn(dir)
-  const client = dreamClient("drained the turns")
-  const { state, spawner } = countingSpawner()
-  const hooks = await createAndDrive({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
-
-  const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
-    const until = Date.now() + ms
-    while (Date.now() < until) {
-      if (await fn()) return
-      await new Promise((r) => setTimeout(r, 25))
-    }
-    throw new Error("waitFor timeout")
-  }
-  await waitFor(() => Promise.resolve(client.calls.prompts.length > 0))
-  assert.equal(state.calls, 0, "sole candidate dispatched without a JEV call (§17.10 short-circuit)")
-  assert.equal(client.calls.create, 1)
-  const body = client.calls.prompts[0].body
-  assert.ok(body.parts[0].text.includes(HEARTBEAT_FIXED_PROMPT), "drain uses the maintenance prompt")
-
-  await idle(hooks)
-  await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
-
-  const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
-  assert.equal(t.verdict, "mission:drain")
-  assert.equal(t.mission, "drain")
-  assert.equal(t.outcome, "completed")
-  assert.equal(t.token_cost, 150)
-  assert.equal(t.session, "ses_child", "dream ticks carry the child session id")
-  assert.equal(t.reason, "sole-candidate")
-
-  const entries = await readBacklog(dir)
-  assert.equal(entries.length, 1, "a night drain records like a heartbeat run (§7)")
-  assert.equal(entries[0].source, "heartbeat")
-  assert.equal(entries[0].result.token_cost, 150)
-
-  const sleep = await readSleep(dir)
-  assert.equal(sleep.noop_streak, 0, "an executed mission resets the streak (§17.8)")
-})
-
-// Night parity: a drain pipe error overrides a completed mission_result, so the
-// tick is recorded as a failed mission and the backlog entry is `failed`.
-test("night drain pipe failure overrides a completed mission result", async () => {
-  const dir = await project(["", "decisions:", "  enabled: true", "  provider: openjev"])
-  await writeNightMissions(dir)
-  await writeSleep(dir)
-  const dbFile = await writePendingTurn(dir)
-  const calls = { create: 0, prompts: [] as any[] }
-  const toolResult = {
-    status: "completed",
-    reason: null,
-    outcome: "error",
-    summary: "drain:error, 3 session(s), 11 item(s), 0 consolidated, 0 skipped, error:invalid report: no report fence",
-    tokens: 45,
-    session: "ses_writer",
-    cursor_before: 1000,
-    cursor_after: 1000,
-    sessions: 3,
-    items: 11,
-    error: "invalid report: no report fence",
-  }
-  const client = {
-    calls,
-    session: {
-      get: async () => ({ data: {} }),
-      messages: async () => ({
-        data: [
-          {
-            info: { role: "assistant", id: "a1", tokens: { input: 100, output: 50 } },
-            parts: [
-              {
-                type: "tool",
-                tool: "drain_run",
-                state: { input: {}, output: JSON.stringify(toolResult) },
-              },
-              {
-                type: "tool",
-                tool: "mission_result",
-                state: { input: { status: "completed", summary: "drain complete" } },
-              },
-              { type: "text", text: "drain complete" },
-            ],
-          },
-        ],
-      }),
-      create: async () => {
-        calls.create++
-        return { data: { id: "ses_child" } }
-      },
-      promptAsync: async (args: any) => {
-        calls.prompts.push(args)
-        return { response: { ok: true, status: 200 } }
-      },
-    },
-  }
-  const { spawner } = countingSpawner()
-  const hooks = await createAndDrive({ client, directory: dir, spawner, random: () => 1, drainDbFile: dbFile } as any)
-
-  const waitFor = async (fn: () => Promise<boolean>, ms = 4000): Promise<void> => {
-    const until = Date.now() + ms
-    while (Date.now() < until) {
-      if (await fn()) return
-      await new Promise((r) => setTimeout(r, 25))
-    }
-    throw new Error("waitFor timeout")
-  }
-  await waitFor(() => Promise.resolve(calls.prompts.length > 0))
-  await idle(hooks)
-  await waitFor(async () => (await readDreamLog(dir)).filter((l) => l.event === "dream-tick").length > 0)
-
-  const [t] = (await readDreamLog(dir)).filter((l) => l.event === "dream-tick")
-  assert.equal(t.mission, "drain")
-  assert.equal(t.outcome, "completed")
-  assert.equal(t.result_status, "completed")
-  assert.equal(t.tool_status, "completed")
-  assert.equal(t.tool_outcome, "error")
-  assert.equal(t.tool_error, "invalid report: no report fence")
-  assert.equal(t.tool_failed_but_completed, true)
-
-  const entries = await readBacklog(dir)
-  assert.equal(entries.length, 1)
-  assert.equal(entries[0].status, "failed")
-  assert.equal(entries[0].result.ok, false)
-  assert.ok(String(entries[0].result.summary).includes("drain:error"))
-
-  const sleep = await readSleep(dir)
-  assert.equal(sleep.noop_streak, 1, "a failed mission does not reset the streak")
+  await waitFor(async () => (await readSleep(dir)).ticks === 1)
+  assert.equal((await readSleep(dir)).noop_streak, 1, "a no-op tick steps toward the §17.8 backoff")
+  assert.equal((await readSleep(dir)).ticks, 1)
 })
 
 // §17.12 acceptance #3: a passed roll dispatches the dreamer tool-free child;
@@ -601,7 +448,7 @@ test("a timed-out child is aborted and the timeout is booked after the stop", as
     client,
     directory: dir,
     spawner,
-    random: () => 1,
+    random: () => 0,
     drainDbFile: dbFile,
     tickTimeoutMs: 50,
     abortConfirmMs: 50,
@@ -641,7 +488,7 @@ test("a failed dream abort is recorded as an error, never a clean stop", async (
     client,
     directory: dir,
     spawner,
-    random: () => 1,
+    random: () => 0,
     drainDbFile: dbFile,
     tickTimeoutMs: 50,
     abortConfirmMs: 50,

@@ -16,7 +16,6 @@ test("parseDrainConfig overlays known keys", () => {
       '  writer_model: "provider/model"',
       "  poison_attempts: 0",
       "  exclude_missions: [drain, staleness]",
-      "  consumer: false",
       "  trigger_pending: 20",
       "  trigger_max_age_hours: 4",
       "  settle_seconds: 300",
@@ -38,7 +37,6 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.writer_model, "provider/model")
   assert.equal(parsed.poison_attempts, 0)
   assert.deepEqual(parsed.exclude_missions, ["drain", "staleness"])
-  assert.equal(parsed.consumer, false)
   assert.equal(parsed.trigger_pending, 20)
   assert.equal(parsed.trigger_max_age_hours, 4)
   assert.equal(parsed.settle_seconds, 300)

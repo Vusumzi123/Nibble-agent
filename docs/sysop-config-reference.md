@@ -24,10 +24,10 @@ config warn-once behaviour).
 | `paths:` | every reader below (via `lib/paths.ts`), plus `scoped-permissions.ts` |
 | `vault:` | `vault-readonly-guard.ts`, `wikilink-guard.ts` |
 | `audit:` | `audit-hook.ts` → `lib/audit.ts` |
-| `drain:` | `drain_run` tool → `lib/drain/*` (drain pipe); `lib/heartbeat.ts` (candidacy) |
+| `drain:` | `lib/drain/*` (drain pipe, run by the `drain-pass` step); `lib/heartbeat.ts` (signals) |
 | `memory:` | `lib/memory/*` — `retrieval-hook.ts`, `memory-hook.ts`, `memory-guard.ts`, `heartbeat-hook.ts`, `dream-hook.ts`, `lib/heartbeat.ts`, `lib/drain/pipe.ts` |
 | `backlog:` | `heartbeat-hook.ts` / `dream-hook.ts` (mission + drain-fallback records) → `lib/backlog.ts` |
-| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the retrieval / profile hooks and the drain config reader, by `autonomy-gate.ts`, and by `heartbeat-hook.ts` (**hard dependency** — no JEV, no mission dispatch) |
+| `decisions:` | `lib/decisions.ts` + `lib/decision-gate.ts`, loaded by the retrieval / profile hooks and the drain config reader, by `autonomy-gate.ts`, and by the idea review. Mission dispatch no longer depends on JEV. |
 | `retrieval:` | `retrieval-hook.ts` → `lib/retrieval.ts` |
 | `browser:` | `web-scan-hook.ts` → `lib/browser.ts` (scanner: `lib/injection.ts`) |
 | `profile:` | `profile-hook.ts` (spawns `profile-writer`) |
@@ -35,7 +35,7 @@ config warn-once behaviour).
 | `autonomy:` | `lib/autonomy.ts` + `autonomy-gate.ts` |
 | `mood:` | `mood-hook.ts` → `lib/mood.ts` |
 | `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process scheduler + per-tick ledger) |
-| `scheduler:` | `lib/scheduler-config.ts` → `lib/work-queue.ts` (SWRR weights + rollback) |
+| `scheduler:` | `lib/scheduler-config.ts` → `lib/work-queue.ts` (SWRR weights) |
 | `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
@@ -115,19 +115,17 @@ and root/sandbox/dry flags.
 ## `drain:`
 
 Cursor-backed conversation consolidation (`lib/drain/*`, design:
-`docs/knowledge-pipeline-redesign.md`; the old consumer is
-`docs/drain-consumer.md`). With `consumer: true` (default) drain is a
-`drain-pass` work item executed by the heartbeat; `consumer: false` is the
-legacy side-mission rollback. A pass discovers top-level sessions newer than the
-watermark, renders and summarizes each settled delta, and hands labelled
-`#1..N` items to `rag-brain`. The writer reports a
+`docs/knowledge-pipeline-redesign.md`). Drain is always a `drain-pass` work
+item executed by the heartbeat (the old `consumer` toggle and side-mission
+fallback were removed on 2026-10-28). A pass discovers top-level sessions newer
+than the watermark, renders and summarizes each settled delta, and hands
+labelled `#1..N` items to `rag-brain`. The writer reports a
 `consolidated`/`skipped` fence; per-session cursor marks advance only for
 fully-reported sessions.
 
 | Key | Meaning |
 | --- | ------- |
-| `enabled` | Master switch (`false` = the mission declines and the consumer idles). |
-| `consumer` | `true` = the demand-driven loop owns drain; `false` = legacy side-lane behaviour (plan §9 rollback). |
+| `enabled` | Master switch (`false` = no `drain-pass` item is enqueued). |
 | `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the v2 watermark, per-session marks + continuity summaries, and the blocked/backoff counter. |
 | `writer_model` | `rag-brain` writer model; `""` = the agent default. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |
@@ -141,11 +139,11 @@ fully-reported sessions.
 | `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |
 | `settle_seconds` | A session idle for less than this is not consumed — the half-written-turn guard (default 120). |
-| `poll_seconds` | Consumer reschedule delay when the backlog is below the trigger (default 60). |
-| `max_wall_minutes` | Wall-clock ceiling for one consumer wake (default 15). |
+| `poll_seconds` | Legacy consumer dial; unused by the tick step. |
+| `max_wall_minutes` | Legacy consumer dial; unused by the tick step. |
 | `token_budget` | Per-pass token ceiling, checked between units; `0` = unlimited (default 80 000). |
 | `wake_token_budget` | Per-wake token ceiling (default 250 000). |
-| `max_passes_per_wake` | Backstop only — the observable budgets decide first (default 6). |
+| `max_passes_per_wake` | Legacy consumer dial; unused by the tick step. |
 | `lock_refresh_ms` | `drain.lock` heartbeat interval (default 60 000). |
 | `lock_stale_ms` | Stale threshold; lifted to 3 × refresh at load (default 180 000). |
 | `cursor_migration` | `carry` (default) or `recover` — v1 → v2 unknown-mark repair (plan §2.3.1). |
@@ -563,7 +561,6 @@ item runs. Hot-read at tick start.
 
 | Key | Meaning |
 | --- | ------- |
-| `fair` | `true` = SWRR; `false` = legacy static priority (one-release rollback, including the old staleness side lane). |
 | `weights.mission` | relative mission share (default `4`). |
 | `weights.drain-pass` | relative drain share (default `3`). |
 | `weights.quiet-hours` | relative quiet-hours step share (default `1`). |

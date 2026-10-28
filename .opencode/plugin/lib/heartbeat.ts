@@ -27,7 +27,6 @@ import { join } from "node:path"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
 import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
-import type { DecisionRequest, DecisionResult } from "./decisions.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
 import { readDrainConfig } from "./drain/config.ts"
@@ -179,8 +178,6 @@ export type SleepGateCtx = {
 export type CandidacyContext = {
   backlogPending: number
   nowMs: number
-  /** Unconsumed turns in the temporal buffer (`turns-pending`; §17.3 drain gate). */
-  unconsumedTurns?: number
   /** Oldest refreshable reference note (`brain-stale`; absent = fail closed). */
   brainOldest?: BrainNoteAge | null
   /** Sleep state + dream dials (`dream-gate`); absent = fail closed. */
@@ -201,9 +198,8 @@ export type CandidacyContext = {
 
 export function candidacyPasses(mission: Mission, ctx: CandidacyContext): boolean {
   const c: MissionCandidacy = mission.candidacy
-  if (c === "digest" || c === "always") return true
+  if (c === "always") return true
   if (c === "backlog-pending") return ctx.backlogPending > 0
-  if (c === "turns-pending") return (ctx.unconsumedTurns ?? 0) > 0
   if (c === "brain-stale" || c.startsWith("brain-stale:")) {
     const note = ctx.brainOldest
     if (!note) return false
@@ -281,9 +277,6 @@ export function buildCandidates(missions: Mission[], ctx: CandidateCtx): DigestC
   const moodBias = moodDispatchBias(ctx.mood, ctx.dispatchInfluence)
   const out: DigestCandidate[] = []
   for (const m of missions) {
-    // Side-lane missions never reach the JEV digest (docs/heartbeat-lanes.md):
-    // they ride the status-fed side queue instead.
-    if (m.lane === "side") continue
     if (!m.enabled) continue
     if (!m.menus.includes(window)) continue
     if (ctx.level < m.min_level) continue
@@ -364,8 +357,6 @@ export type ComputeDigestOpts = {
   onDreamGate?: CandidacyContext["onDreamGate"]
   /** Explicit opencode DB path (tests/E2E); defaults to the data dir. */
   dbFile?: string
-  /** Missions excluded from the candidate list (declined rerolls). */
-  excludeMissions?: string[]
 }
 
 /**
@@ -487,8 +478,6 @@ export async function computeDigest(
   if (lastMission && NO_REPEAT_MISSION_IDS.has(lastMission)) {
     missions = missions.filter((m) => m.id !== lastMission)
   }
-  const excluded = new Set(opts.excludeMissions ?? [])
-  if (excluded.size > 0) missions = missions.filter((m) => !excluded.has(m.id))
 
   const candidates = buildCandidates(missions, {
     level: autonomy.level,
@@ -497,7 +486,6 @@ export async function computeDigest(
     dispatchInfluence: moodCfg.dispatch_influence,
     candidacy: {
       backlogPending: backlog_pending,
-      unconsumedTurns: unconsumed_turns,
       brainOldest,
       sleep: {
         status: sleep.status,
@@ -528,85 +516,6 @@ export async function computeDigest(
 }
 
 // ---------------------------------------------------------------------------
-// JEV digest decision (kanban card C, missions-plan §3, §9 phase C): the
-// typed `no_reply | mission:<id>` choice over the already-filtered candidate
-// list, plus the brief assembly (D-M1, D-M7). Deterministic and fail-OPEN to
-// no_reply: an error, abstain, non-string, or unknown mission id all resolve
-// to silence — a broken digest never invents work.
-
-/** Built-in digest assertion (mirrored in .opencode/decision-prompts.yaml's
- *  `digest:` section — the file is the single source of truth for the live
- *  text; this is the missing-file fallback). */
-export const DEFAULT_DIGEST_ASSERTION =
-  "Decide whether this heartbeat tick should run one of the listed maintenance missions or stay silent. " +
-  "Each candidate carries a `warrant` naming why it is eligible: a pending-work warrant " +
-  "(`unconsumed_turns=N` / `backlog_pending=N`), a due gate (`min-gap ... due`, `dream gate passed`, " +
-  "`idea quota open`), or `judgment` when only the reported signals can decide. Answer mission:<id> when " +
-  "a candidate's warrant shows pending work or a gate that has come due — pending work is warranted even " +
-  "during quiet hours; for `judgment` candidates decide from the signals. Use the frequency × mood weight " +
-  "only to break ties among warranted candidates. If a candidate has no `warrant` field, judge it from " +
-  "the reported signals. Answer no_reply only when no candidate is warranted; never invent work."
-
-/** The typed digest verdict: run exactly one mission, or stay silent. */
-export type DigestVerdict = { kind: "no_reply" } | { kind: "mission"; id: string }
-
-/** Map a raw JEV choice value to a typed verdict. Anything unrecognised —
- *  non-strings, bare `mission:` with no id, ids not in the candidate list —
- *  fails closed to no_reply (mirrors taskKindFromVerdict). Ids are matched
- *  after lowercasing, per the lowercase-by-convention mission filenames. */
-export function digestVerdictFromValue(value: unknown, candidateIds: readonly string[]): DigestVerdict {
-  if (typeof value !== "string") return { kind: "no_reply" }
-  const v = value.trim().toLowerCase()
-  if (v === "no_reply") return { kind: "no_reply" }
-  if (v.startsWith("mission:")) {
-    const id = v.slice("mission:".length)
-    if (candidateIds.includes(id)) return { kind: "mission", id }
-  }
-  return { kind: "no_reply" }
-}
-
-/** Fail-open verdict reading from a full DecisionResult (mirrors jevAllows):
- *  a null result, an error, or an abstain all mean no_reply. */
-export function digestVerdictFromResult(
-  result: DecisionResult | null,
-  candidateIds: readonly string[],
-): DigestVerdict {
-  if (!result || result.error || result.abstained) return { kind: "no_reply" }
-  return digestVerdictFromValue(result.value, candidateIds)
-}
-
-/** §17.10 express short-circuit (D-M8): exactly ONE candidate whose
- *  candidacy is a deterministic `min-gap:` gate dispatches without a JEV
- *  call — a time gate offers it, the sole-candidate case needs no tie-break.
- *  Anything else returns null and the normal digest decision runs. */
-export function soleDeterministicVerdict(candidates: readonly DigestCandidate[]): DigestVerdict | null {
-  if (candidates.length !== 1) return null
-  const only = candidates[0]
-  if (only.candidacy.startsWith("min-gap:")) return { kind: "mission", id: only.id }
-  return null
-}
-
-/** Pending-work fallback for a failed/abstained JEV digest: pending work is
- *  warranted regardless of the model's confidence, so dispatch the
- *  highest-weight candidate whose candidacy is `turns-pending` or
- *  `backlog-pending`. Tie-break by weight descending, then id ascending.
- *  Anything else (judgment, min-gap, roll, dream/idea gates) returns null so
- *  the caller keeps its `no_reply`. */
-export function deterministicDigestFallback(digest: HeartbeatDigest): DigestVerdict | null {
-  let best: DigestCandidate | null = null
-  for (const c of digest.candidates) {
-    if (c.candidacy !== "turns-pending" && c.candidacy !== "backlog-pending") continue
-    if (
-      !best ||
-      c.weight > best.weight ||
-      (c.weight === best.weight && c.id < best.id)
-    ) {
-      best = c
-    }
-  }
-  return best ? { kind: "mission", id: best.id } : null
-}
-
 /** Core plugin files whose on-disk mtime must not postdate the running
  *  process: when they do, this instance loaded stale code and must not run
  *  the heartbeat scheduler (a pre-warrant instance silently answered
@@ -621,7 +530,6 @@ export const HEARTBEAT_CODE_FILES = [
   ".opencode/plugin/lib/work-producers.ts",
   ".opencode/plugin/lib/step-registry.ts",
   ".opencode/plugin/lib/drain/status.ts",
-  ".opencode/plugin/lib/drain/tool.ts",
   ".opencode/plugin/lib/drain/step.ts",
   ".opencode/plugin/lib/drain/pipe.ts",
 ]
@@ -647,88 +555,9 @@ export async function staleCodeFiles(
   return stale
 }
 
-/** Why a candidate reached the JEV — the signal half of the decision. The
- *  weight is cadence × mood, not urgency, so the model needs this field to
- *  tell "always eligible" apart from "930 turns are waiting".
- *  Compact by design: the whole state is capped at 1500 chars. */
-export function candidateWarrant(candidate: DigestCandidate, signals: HeartbeatSignals): string {
-  const c = candidate.candidacy
-  if (c === "turns-pending") return `unconsumed_turns=${signals.unconsumed_turns}`
-  if (c === "backlog-pending") return `backlog_pending=${signals.backlog_pending}`
-  if (c === "brain-stale" || c.startsWith("brain-stale:")) {
-    const note = signals.brain_oldest
-    if (!note) return "brain_stale=no-reference-notes"
-    return `brain_stale=${Math.round(note.ageHours / 24)}d path=${note.path}`
-  }
-  if (c === "dream-gate") return "dream gate passed"
-  if (c === "idea-roll") return "idea quota open"
-  if (c.startsWith("min-gap:")) return `min-gap ${c.slice("min-gap:".length)} due`
-  if (c.startsWith("roll:")) return `roll ${c.slice("roll:".length)} passed`
-  if (c === "digest" || c === "always") return "judgment"
-  return "eligible"
-}
-
-/** Compact one-block digest state for the JEV `choice` (mirrors
- *  jevStateSummary's 1500-char cap): signals, bias, and the candidates with
- *  their effective weights and warrants — everything the verdict needs,
- *  nothing more. */
-export function digestStateSummary(digest: HeartbeatDigest): string {
-  const summary = {
-    level: digest.level,
-    quiet: digest.quiet,
-    all_quiet: digest.all_quiet,
-    signals: {
-      backlog_pending: digest.signals.backlog_pending,
-      unconsumed_turns: digest.signals.unconsumed_turns,
-      audit_failures: digest.signals.audit_failures,
-      staleness: Object.fromEntries(
-        Object.entries(digest.signals.staleness).map(([k, h]) => [k, Math.round(h)]),
-      ),
-      brain_oldest: digest.signals.brain_oldest
-        ? {
-            path: digest.signals.brain_oldest.path,
-            updated: digest.signals.brain_oldest.updated,
-            age_hours: Math.round(digest.signals.brain_oldest.ageHours),
-          }
-        : null,
-    },
-    bias: digest.bias,
-    candidates: digest.candidates.map((c) => ({
-      id: c.id,
-      title: c.title,
-      weight: Number(c.weight.toFixed(2)),
-      warrant: candidateWarrant(c, digest.signals),
-    })),
-    digest_hash: digest.digest_hash,
-  }
-  const s = JSON.stringify(summary)
-  return s.length > 1500 ? s.slice(0, 1500) + "…" : s
-}
-
-/** The `choice` request for one heartbeat digest: candidates are `no_reply`
- *  plus `mission:<id>` for every candidate that passed the structural filter
- *  (a mission JEV cannot see cannot be prompted into existence — §3). */
-export function buildDigestChoiceRequest(digest: HeartbeatDigest, criteria: string): DecisionRequest {
-  return {
-    kind: "choice",
-    state: digestStateSummary(digest),
-    candidates: ["no_reply", ...digest.candidates.map((c) => `mission:${c.id}`)],
-    criteria,
-    // `no_reply` is already an explicit candidate, so a low-confidence top
-    // choice must not be turned into an abstain: with N candidates the top
-    // probability sits near 1/N and the 0.45 threshold would silence every
-    // judgment tick. Let the model choose no_reply when it means it.
-    allow_abstain: false,
-    // Ledger-only: the exact state the JEV saw, so a no_reply is diagnosable.
-    trace: { digest_state: digestStateSummary(digest) },
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Brief assembly (D-M1, D-M7): the heartbeat prompt is fixed — the plugin
-// injects the JEV verdict and the mission body (no prompt-per-mission
-// sprawl). `agent` carries the mission's `agent:` field: "" means the default
-// heartbeat agent, a name pins the child session to that opencode agent.
+// injects the mission body (no prompt-per-mission sprawl).
 
 /** The fixed heartbeat prompt every mission turn starts from. */
 export const HEARTBEAT_FIXED_PROMPT =
@@ -790,23 +619,20 @@ export function missionContextHeader(
   return lines.join("\n")
 }
 
-/** Assemble the child-session brief: context + fixed prompt + verdict + body.
- *  Returns null on a no_reply verdict or a verdict/mission mismatch — the
- *  caller treats null as "end the tick without a session" (§12.1 step 6). */
+/** Assemble the child-session brief: context + fixed prompt + mission body.
+ *  The producer already made the selection, so there is no verdict here. */
 export function assembleMissionBrief(
-  verdict: DigestVerdict,
   mission: Mission | undefined,
   fixedPrompt: string = HEARTBEAT_FIXED_PROMPT,
   context?: string,
   resumeContext?: string,
 ): MissionBrief | null {
-  if (verdict.kind === "no_reply") return null
-  if (!mission || mission.id !== verdict.id) return null
+  if (!mission) return null
   const prompt = [
     context?.trim() ?? "",
     resumeContext?.trim() ?? "",
     fixedPrompt.trim(),
-    `Verdict: mission:${mission.id} — ${mission.title}`,
+    `Mission: ${mission.id} — ${mission.title}`,
     mission.body,
   ]
     .filter((p) => p.trim() !== "")
@@ -1050,7 +876,17 @@ export async function readHeartbeatConfig(directory: string): Promise<HeartbeatC
 // a failing tick records WHERE it failed and the full error, so the ledger is
 // a troubleshooting surface, not just an outcome counter.
 
-export const HEARTBEAT_PHASES = ["pre-gate", "queues", "digest", "dispatch", "mission", "post"] as const
+export const HEARTBEAT_PHASES = [
+  "pre-gate",
+  "queues",
+  "drain",
+  "dispatch",
+  "mission",
+  "post",
+  "quiet-hours",
+  "profile-update",
+  "soul-update",
+] as const
 export type HeartbeatPhase = (typeof HEARTBEAT_PHASES)[number]
 
 export type HeartbeatError = {

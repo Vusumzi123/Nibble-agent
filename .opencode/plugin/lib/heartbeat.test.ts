@@ -14,16 +14,10 @@ import {
   MOOD_BIAS_MIN,
   assembleMissionBrief,
   buildCandidates,
-  buildDigestChoiceRequest,
   candidacyPasses,
-  candidateWarrant,
   computeDigest,
   computeWakeDelayMs,
-  deterministicDigestFallback,
   digestHash,
-  digestStateSummary,
-  digestVerdictFromResult,
-  digestVerdictFromValue,
   effectiveFrequencyMs,
   effectiveMissionLockStaleMs,
   frequencyToMs,
@@ -39,15 +33,12 @@ import {
   parseWindow,
   readHeartbeatConfig,
   readHeartbeatCurrent,
-  soleDeterministicVerdict,
   staleCodeFiles,
   writeHeartbeatCurrent,
   type CandidacyContext,
-  type DigestCandidate,
   type HeartbeatDigest,
   type HeartbeatSignals,
 } from "./heartbeat.ts"
-import type { DecisionResult } from "./decisions.ts"
 import { applyEvent, defaultMoodState, type MoodState } from "./mood.ts"
 import { parseMissionFile, type Mission } from "./missions.ts"
 
@@ -241,7 +232,7 @@ test("moodDispatchBias: bounded to [MOOD_BIAS_MIN, MOOD_BIAS_MAX]", () => {
 
 function mission(over: Partial<Mission> = {}): Mission {
   const { mission: base } = parseMissionFile(
-    "---\nid: x\ntitle: X\nfrequency: mid\nmenus: [day]\nmin_level: 2\ncandidacy: digest\n---\nBody.\n",
+    "---\nid: x\ntitle: X\nfrequency: mid\nmenus: [day]\nmin_level: 2\ncandidacy: always\n---\nBody.\n",
     "x",
   )
   return { ...base, ...over }
@@ -249,8 +240,7 @@ function mission(over: Partial<Mission> = {}): Mission {
 
 const CAND: CandidacyContext = { backlogPending: 0, nowMs: 1_000_000 }
 
-test("candidacy: digest and always always pass", () => {
-  assert.equal(candidacyPasses(mission({ candidacy: "digest" }), CAND), true)
+test("candidacy: always passes", () => {
   assert.equal(candidacyPasses(mission({ candidacy: "always" }), CAND), true)
 })
 
@@ -280,13 +270,6 @@ test("candidacy: roll passes iff the draw is under the chance", () => {
   assert.equal(candidacyPasses(m, { ...CAND, random: () => 0.49 }), true)
   assert.equal(candidacyPasses(m, { ...CAND, random: () => 0.5 }), false)
   assert.equal(candidacyPasses(m, { ...CAND, random: () => 0.99 }), false)
-})
-
-test("candidacy: turns-pending passes only with unconsumed turns (§17.3 drain gate)", () => {
-  const m = mission({ candidacy: "turns-pending" })
-  assert.equal(candidacyPasses(m, CAND), false, "absent count = no turns")
-  assert.equal(candidacyPasses(m, { ...CAND, unconsumedTurns: 0 }), false)
-  assert.equal(candidacyPasses(m, { ...CAND, unconsumedTurns: 3 }), true)
 })
 
 const OLD_NOTE = {
@@ -353,97 +336,6 @@ test("candidacy: idea-roll passes only with day budget; absent context fails clo
   assert.equal(candidacyPasses(m, { ...CAND, ideaDay: { target: 2, generated: 2 } }), false)
 })
 
-test("soleDeterministicVerdict: one min-gap candidate dispatches without a JEV call (§17.10)", () => {
-  const cand = (id: string, candidacy: DigestCandidate["candidacy"]): DigestCandidate => ({
-    id,
-    title: id,
-    frequency: "low",
-    min_level: 1,
-    menus: ["day"],
-    candidacy,
-    frequency_weight: 1,
-    mood_bias: 1,
-    weight: 1,
-  })
-  assert.deepEqual(
-    soleDeterministicVerdict([cand("express", "min-gap:express")]),
-    { kind: "mission", id: "express" },
-    "sole deterministic candidate -> auto-dispatch",
-  )
-  assert.equal(soleDeterministicVerdict([]), null, "no candidates")
-  assert.equal(
-    soleDeterministicVerdict([cand("express", "min-gap:express"), cand("drain", "turns-pending")]),
-    null,
-    "two candidates -> the JEV digest decides",
-  )
-  assert.equal(
-    soleDeterministicVerdict([cand("drain", "turns-pending")]),
-    null,
-    "sole signal-gated candidate still goes through JEV",
-  )
-  assert.equal(
-    soleDeterministicVerdict([cand("idea-generate", "idea-roll")]),
-    null,
-    "the stochastic idea-roll is not a time gate",
-  )
-})
-
-test("deterministicDigestFallback: pending work wins over judgment candidates", () => {
-  const digest = digestFixture({
-    candidates: [
-      digestCandidate("judge", "digest", 10),
-      digestCandidate("drain", "turns-pending", 1),
-    ],
-  })
-  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "drain" })
-})
-
-test("deterministicDigestFallback: a backlog-pending candidate is pending work", () => {
-  const digest = digestFixture({
-    candidates: [
-      digestCandidate("judge", "digest", 10),
-      digestCandidate("queue", "backlog-pending", 1),
-    ],
-  })
-  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "queue" })
-})
-
-test("deterministicDigestFallback: highest weight among pending candidates wins", () => {
-  const digest = digestFixture({
-    candidates: [
-      digestCandidate("drain", "turns-pending", 1),
-      digestCandidate("queue", "backlog-pending", 2.5),
-      digestCandidate("judge", "digest", 99),
-    ],
-  })
-  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "queue" })
-})
-
-test("deterministicDigestFallback: equal weights break ties by id ascending", () => {
-  const digest = digestFixture({
-    candidates: [
-      digestCandidate("zeta", "turns-pending", 1),
-      digestCandidate("alpha", "backlog-pending", 1),
-    ],
-  })
-  assert.deepEqual(deterministicDigestFallback(digest), { kind: "mission", id: "alpha" })
-})
-
-test("deterministicDigestFallback: no pending-work candidate returns null", () => {
-  const digest = digestFixture({
-    candidates: [
-      digestCandidate("judge", "digest", 10),
-      digestCandidate("always", "always", 10),
-      digestCandidate("express", "min-gap:express", 10),
-      digestCandidate("roll", "roll:0.5", 10),
-      digestCandidate("dream", "dream-gate", 10),
-      digestCandidate("idea", "idea-roll", 10),
-    ],
-  })
-  assert.equal(deterministicDigestFallback(digest), null)
-  assert.equal(deterministicDigestFallback(digestFixture({ candidates: [] })), null)
-})
-
 // ---------------------------------------------------------------------------
 // Candidate-list filter matrix
 
@@ -460,7 +352,7 @@ function candidatesFor(missions: Mission[], over: Partial<Parameters<typeof buil
 
 test("buildCandidates: enabled ∧ menus ∧ min_level ∧ candidacy filter matrix", () => {
   const missions: Mission[] = [
-    mission({ id: "pass", candidacy: "digest" }),
+    mission({ id: "pass", candidacy: "always" }),
     mission({ id: "disabled", enabled: false }),
     mission({ id: "night-only", menus: ["night"] }),
     mission({ id: "too-high", min_level: 3 }),
@@ -611,7 +503,7 @@ test("computeDigest: brain-stale candidacy follows the oldest reference note", a
 
 test("computeDigest: the last staleness run keeps staleness out of the next menu", async () => {
   const mission = (id: string, title: string): string =>
-    ["---", `id: ${id}`, `title: ${title}`, "menus: [day]", "min_level: 2", "candidacy: digest", "enabled: true", "---", "Body.", ""].join("\n")
+    ["---", `id: ${id}`, `title: ${title}`, "menus: [day]", "min_level: 2", "candidacy: always", "enabled: true", "---", "Body.", ""].join("\n")
   const ref = `---\ntitle: Old\ntype: reference\nupdated: 2026-08-01\n---\n\nBody.\n`
   const dir = await tmpProject({
     ".opencode/sysop-config.yaml": 'autonomy:\n  level: 2\n  quiet:\n    window: "23:00-08:00"\n',
@@ -672,7 +564,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "frequency: high",
       "menus: [day, night]",
       "min_level: 2",
-      "candidacy: digest",
+      "candidacy: always",
       "enabled: true",
       "---",
       "Body.",
@@ -685,7 +577,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "frequency: mid",
       "menus: [day]",
       "min_level: 2",
-      "candidacy: digest",
+      "candidacy: always",
       "enabled: true",
       "---",
       "Body.",
@@ -698,7 +590,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "frequency: high",
       "menus: [day]",
       "min_level: 1",
-      "candidacy: digest",
+      "candidacy: always",
       "enabled: false",
       "---",
       "Body.",
@@ -855,160 +747,37 @@ function jevResult(over: Partial<DecisionResult> = {}): DecisionResult {
   }
 }
 
-test("digestVerdictFromValue: no_reply and mission:<id> parse to the typed verdict", () => {
-  assert.deepEqual(digestVerdictFromValue("no_reply", ["drain"]), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue(" mission:drain ", ["drain", "research"]), { kind: "mission", id: "drain" })
-  assert.deepEqual(digestVerdictFromValue("MISSION:RESEARCH", ["drain", "research"]), { kind: "mission", id: "research" })
-})
-
-test("digestVerdictFromValue: unknown ids and malformed values fail closed to no_reply", () => {
-  const ids = ["drain"]
-  assert.deepEqual(digestVerdictFromValue("mission:not-a-candidate", ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue("mission:", ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue("drain", ids), { kind: "no_reply" }, "bare id is not a verdict")
-  assert.deepEqual(digestVerdictFromValue("", ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue(null, ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue(42, ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromValue(undefined, []), { kind: "no_reply" }, "no candidates -> no mission")
-})
-
-test("digestVerdictFromResult: error, abstain, and null results mean no_reply", () => {
-  const ids = ["drain"]
-  assert.deepEqual(digestVerdictFromResult(null, ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromResult(jevResult({ error: "bridge exploded" }), ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromResult(jevResult({ abstained: true, value: null }), ids), { kind: "no_reply" })
-  assert.deepEqual(digestVerdictFromResult(jevResult({ value: "mission:drain" }), ids), { kind: "mission", id: "drain" })
-  assert.deepEqual(digestVerdictFromResult(jevResult({ value: "no_reply" }), ids), { kind: "no_reply" })
-})
-
-test("buildDigestChoiceRequest: choice over no_reply + mission:<id>, capped state, criteria passthrough", () => {
-  const digest = digestFixture()
-  const req = buildDigestChoiceRequest(digest, "pick a mission")
-  assert.equal(req.kind, "choice")
-  assert.equal(req.criteria, "pick a mission")
-  assert.equal(req.allow_abstain, false, "the digest has an explicit no_reply, so it must not abstain")
-  assert.deepEqual(req.candidates, ["no_reply", "mission:drain", "mission:research"])
-  const state = String(req.state)
-  assert.ok(state.includes("drain"), "state carries candidate ids")
-  assert.ok(state.includes("backlog_pending"), "state carries the signals")
-  assert.equal(state, digestStateSummary(digest))
-})
-
-test("candidateWarrant: one line per candidacy predicate", () => {
-  const base: DigestCandidate = {
-    id: "x",
-    title: "X",
-    frequency: "mid",
-    min_level: 2,
-    menus: ["day"],
-    candidacy: "digest",
-    frequency_weight: 0.5,
-    mood_bias: 1,
-    weight: 0.5,
-  }
-  const sig = signals({ unconsumed_turns: 930, backlog_pending: 2 })
-  const w = (candidacy: DigestCandidate["candidacy"]): string =>
-    candidateWarrant({ ...base, candidacy }, sig)
-  assert.equal(w("turns-pending"), "unconsumed_turns=930")
-  assert.equal(w("backlog-pending"), "backlog_pending=2")
-  assert.equal(
-    candidateWarrant(
-      { ...base, candidacy: "brain-stale:720" },
-      signals({ brain_oldest: { ...OLD_NOTE, ageHours: 744 } }),
-    ),
-    "brain_stale=31d path=AI/Old Reference.md",
-  )
-  assert.equal(
-    candidateWarrant({ ...base, candidacy: "brain-stale" }, signals()),
-    "brain_stale=no-reference-notes",
-  )
-  assert.equal(w("dream-gate"), "dream gate passed")
-  assert.equal(w("idea-roll"), "idea quota open")
-  assert.equal(w("min-gap:express"), "min-gap express due")
-  assert.equal(w("roll:0.5"), "roll 0.5 passed")
-  assert.equal(w("digest"), "judgment")
-  assert.equal(w("always"), "judgment")
-})
-
-test("digestStateSummary: warrants make overdue-ness legible to the JEV", () => {
-  const digest = digestFixture({
-    signals: signals({ unconsumed_turns: 930, backlog_pending: 2 }),
-    candidates: candidatesFor(
-      [
-        mission({ id: "drain", title: "Drain", frequency: "high", candidacy: "turns-pending" }),
-        mission({ id: "queue", title: "Queue", frequency: "mid", candidacy: "backlog-pending" }),
-        mission({ id: "express", title: "Express", frequency: "mid", candidacy: "min-gap:express" }),
-      ],
-      { candidacy: { backlogPending: 2, unconsumedTurns: 930, nowMs: 1_000_000 } },
-    ),
-  })
-  const parsed = JSON.parse(digestStateSummary(digest)) as {
-    candidates: Array<{ id: string; warrant: string }>
-  }
-  assert.deepEqual(
-    parsed.candidates.map((c) => [c.id, c.warrant]),
-    [
-      ["drain", "unconsumed_turns=930"],
-      ["queue", "backlog_pending=2"],
-      ["express", "min-gap express due"],
-    ],
-  )
-})
-
-test("digestStateSummary: caps oversized digests with an ellipsis", () => {
-  const huge = digestFixture({
-    candidates: Array.from({ length: 200 }, (_, i) => ({
-      id: `m${i}`,
-      title: `Mission ${i}`,
-      frequency: "mid" as const,
-      min_level: 2,
-      menus: ["day"],
-      candidacy: "digest" as const,
-      frequency_weight: 0.5,
-      mood_bias: 1,
-      weight: 0.5,
-    })),
-  })
-  const s = digestStateSummary(huge)
-  assert.ok(s.length <= 1501, `len=${s.length}`)
-  assert.ok(s.endsWith("…"))
-})
-
-test("assembleMissionBrief: fixed prompt + verdict + mission body, agent from D-M7", () => {
+test("assembleMissionBrief: fixed prompt + mission body, agent from D-M7", () => {
   const drain = mission({ id: "drain", title: "Drain", body: "Do the drain thing.", agent: "rag-brain" })
-  const brief = assembleMissionBrief({ kind: "mission", id: "drain" }, drain)
+  const brief = assembleMissionBrief(drain)
   assert.ok(brief)
   assert.equal(brief.agent, "rag-brain", "agent: set -> child session pins that agent")
   assert.equal(brief.mission_id, "drain")
   assert.ok(brief.prompt.startsWith(HEARTBEAT_FIXED_PROMPT))
-  assert.ok(brief.prompt.includes("Verdict: mission:drain — Drain"))
+  assert.ok(brief.prompt.includes("Mission: drain — Drain"))
   assert.ok(brief.prompt.endsWith("Do the drain thing."))
 })
 
 test("assembleMissionBrief: empty agent means the default heartbeat agent", () => {
   const drain = mission({ id: "drain", agent: "" })
-  const brief = assembleMissionBrief({ kind: "mission", id: "drain" }, drain)
+  const brief = assembleMissionBrief(drain)
   assert.ok(brief)
   assert.equal(brief.agent, "")
 })
 
 test("assembleMissionBrief: custom fixed prompt is honoured", () => {
   const m = mission({ id: "drain", body: "B." })
-  const brief = assembleMissionBrief({ kind: "mission", id: "drain" }, m, "Fixed frame.")
+  const brief = assembleMissionBrief(m, "Fixed frame.")
   assert.ok(brief)
   assert.ok(brief.prompt.startsWith("Fixed frame."))
 })
 
-test("assembleMissionBrief: no_reply path -> null, no session to create", () => {
-  const drain = mission({ id: "drain" })
-  assert.equal(assembleMissionBrief({ kind: "no_reply" }, drain), null)
-  assert.equal(assembleMissionBrief({ kind: "no_reply" }, undefined), null)
+test("assembleMissionBrief: missing mission -> null, no session to create", () => {
+  assert.equal(assembleMissionBrief(undefined), null)
 })
 
-test("assembleMissionBrief: verdict/mission mismatch or missing mission -> null", () => {
-  const drain = mission({ id: "drain" })
-  assert.equal(assembleMissionBrief({ kind: "mission", id: "research" }, drain), null)
-  assert.equal(assembleMissionBrief({ kind: "mission", id: "drain" }, undefined), null)
+test("assembleMissionBrief: missing mission -> null", () => {
+  assert.equal(assembleMissionBrief(undefined), null)
 })
 
 // ---------------------------------------------------------------------------
@@ -1240,7 +1009,7 @@ test("computeDigest: memory.provider none yields zero unconsumed turns", async (
       "frequency: high",
       "menus: [day, night]",
       "min_level: 2",
-      "candidacy: turns-pending",
+      "candidacy: always",
       "enabled: true",
       "---",
       "Body.",
@@ -1250,7 +1019,7 @@ test("computeDigest: memory.provider none yields zero unconsumed turns", async (
   const dbFile = seedTurnsDb(dir, [Date.parse("2026-10-13T00:00:00.000Z")])
   const digest = await computeDigest(dir, { now: at(12, 0), dbFile })
   assert.equal(digest.signals.unconsumed_turns, 0)
-  assert.deepEqual(digest.candidates.map((c) => c.id), [])
+  assert.deepEqual(digest.candidates.map((c) => c.id), ["drain"])
 })
 
 // ---------------------------------------------------------------------------

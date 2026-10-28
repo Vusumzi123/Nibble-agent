@@ -12,9 +12,6 @@ import {
   resolveViewFile,
   setStatus,
 } from "./lib/backlog.ts"
-import { openDecisionGate } from "./lib/decision-gate.ts"
-import { readDecisionPrompts } from "./lib/decision-prompts.ts"
-import type { BridgeSpawner } from "./lib/decisions.ts"
 import {
   appendDream,
   buildDreamSeeds,
@@ -28,20 +25,17 @@ import {
 import {
   HEARTBEAT_FIXED_PROMPT,
   assembleMissionBrief,
-  buildDigestChoiceRequest,
   computeDigest,
-  digestVerdictFromResult,
   isQuietNow,
   missionContextHeader,
   readHeartbeatConfig,
-  type DigestVerdict,
 } from "./lib/heartbeat.ts"
+import { weightedPick } from "./lib/work-producers.ts"
 import { sessionAccounting } from "./lib/transcript.ts"
 import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
 import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
-import { findDrainToolResult, type DrainToolResult } from "./lib/drain/tool.ts"
 import { loadMissions } from "./lib/missions.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
@@ -77,12 +71,11 @@ import { nowIso, sleep as delay } from "./lib/util.ts"
 //      (§17.8: 30m → 60m → 120m after 2 no-ops, `quiet.backoff` gated).
 //   3. Acquire the SHARED ownership lease; a live foreign lease skips the tick.
 //   4. DETERMINISTIC PRE-GATE (zero LLM): the digest's night candidates are
-//      already gated — drain only with pending turns (`turns-pending`), dream
+//      already gated — drain is a heartbeat `drain-pass`; dream
 //      only on status ∧ nightly cap ∧ roll (`dream-gate`, the roll journaled
-//      via `onDreamGate`). NO candidates ⇒ NO_REPLY with NO JEV call.
-//   5. ONE survivor ⇒ dispatched directly (the §17.10 sole-candidate
-//      short-circuit — deterministic "roll failed + turns pending ⇒ drain
-//      still runs"); TWO+ survivors ⇒ JEV digest choice, fail-open no_reply.
+//      via `onDreamGate`). NO candidates ⇒ NO_REPLY with no LLM call.
+//   5. ONE survivor ⇒ dispatched directly; TWO+ ⇒ a weighted draw (frequency ×
+//      mood). The producer side already decided; there is no model gate.
 //   6. Execute one mission in a child session (delegation-child pattern,
 //      15 min abandon). A dream outcome is parsed by the hook — append the
 //      bucket entry, apply the §17.7 tone→delta (never the LLM's numbers),
@@ -131,9 +124,8 @@ export default (async ({ client, directory, ...rest }) => {
   const sessions = createSessionTools(client, dir)
 
   // Test-injection seams (heartbeat-hook convention): production input never
-  // carries these; the hook tests hand them in to fake the JEV bridge and the
-  // dream roll.
-  const spawner = (rest as { spawner?: BridgeSpawner }).spawner
+  // carries these; the hook tests hand them in to control the dream roll and
+  // the drain fixture DB.
   const random = (rest as { random?: () => number }).random
   const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
   const tickTimeoutMs =
@@ -340,39 +332,19 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 5. One survivor → dispatch directly (§17.10 sole-candidate precedent:
-      //    deterministic "failed roll + pending turns ⇒ drain still runs").
-      //    Two or more → JEV digest choice, fail-open to no_reply.
-      let verdict: DigestVerdict = { kind: "no_reply" }
-      let reason: string
-      if (digest.candidates.length === 1) {
-        verdict = { kind: "mission", id: digest.candidates[0].id }
-        reason = "sole-candidate"
-      } else {
-        reason = "decisions-disabled"
-        try {
-          const gate = await openDecisionGate(dir, spawner ? { spawner } : {})
-          if (gate) {
-            const prompts = await readDecisionPrompts(dir)
-            const outcome = await gate.decide(
-              buildDigestChoiceRequest(digest, prompts.digest.assertion),
-              { fallback: "open" },
-            )
-            verdict = digestVerdictFromResult(outcome.result, digest.candidates.map((c) => c.id))
-            reason =
-              outcome.reason !== "none"
-                ? outcome.reason
-                : verdict.kind === "no_reply"
-                  ? "jev-no-reply"
-                  : "none"
-          }
-        } catch (err) {
-          void diag.error("[dream-hook] digest decision failed:", err)
-          reason = "error"
-        }
-      }
+      // 5. The night producer already filtered the candidates; pick one by
+      //    weight (or take the sole candidate). No model decision here.
+      const ranked =
+        digest.candidates.length === 1
+          ? digest.candidates[0]
+          : weightedPick(digest.candidates, random)
+      const missionId = ranked?.id ?? null
+      const reason = ranked
+        ? digest.candidates.length === 1
+          ? "sole-candidate"
+          : "weighted-draw"
+        : "no-candidate"
 
-      const missionId = verdict.kind === "mission" ? verdict.id : null
       const missions = missionId ? await loadMissions(dir).catch(() => []) : []
       const mission = missions.find((m) => m.id === missionId)
       const isDream = mission?.candidacy === "dream-gate"
@@ -398,7 +370,7 @@ export default (async ({ client, directory, ...rest }) => {
       )
       const seedBlock = seeds ? buildDreamSeeds(seeds) : ""
       const context = [contextBase, seedBlock].filter((s) => s.trim() !== "").join("\n\n")
-      const brief = assembleMissionBrief(verdict, mission, fixedPrompt, context)
+      const brief = assembleMissionBrief(mission, fixedPrompt, context)
       if (!brief) {
         await ledger({
           verdict: "no_reply",
@@ -419,13 +391,12 @@ export default (async ({ client, directory, ...rest }) => {
 
       // 6. Execute exactly one mission in a child session (D-M7: `agent:`
       //    pins the child — `dreamer` for dreams). `runner` is a tool binding;
-      //    the mission body names the tool (drain_run).
+      //    a mission body that needs no runner simply runs its prose.
       let outcome = "error"
       let tokenCost = 0
       let summary = ""
       let sessionId: string | null = null
       let result: MissionResult | null = null
-      let drainTool: DrainToolResult | null = null
       let aborted: boolean | null = null
       let abortError: string | undefined
       try {
@@ -478,8 +449,6 @@ export default (async ({ client, directory, ...rest }) => {
           await delay(250)
         }
         result = parseMissionResult(rows)
-        drainTool = findDrainToolResult(rows)
-        if (drainTool) tokenCost += drainTool.tokens
         if (!summary && result?.summary) summary = result.summary
       } catch (err) {
         void diag.error("[dream-hook] mission run failed:", err)
@@ -489,30 +458,18 @@ export default (async ({ client, directory, ...rest }) => {
       let resultStatus: MissionResult["status"] | "missing" =
         result?.status ?? (outcome === "completed" ? "missing" : "error")
       let resultMissing = !result
-      // `drain_run` reports pipe failures as `status: "completed"` with
-      // `outcome: "error" | "dropped"`; the observed outcome wins.
-      const drainFailed = drainTool?.outcome === "error" || drainTool?.outcome === "dropped"
-      if (drainFailed && drainTool?.summary) summary = drainTool.summary
 
-      if (result?.status === "declined" && !drainFailed) {
+      if (result?.status === "declined") {
         await ledger({
           verdict: "no_reply",
           mission: null,
           outcome: "silent",
           token_cost: tokenCost,
-          gate: "digest",
+          gate: "dream",
           reason: "mission-declined",
           ...(sessionId ? { session: sessionId } : {}),
           result_status: resultStatus,
           result_missing: resultMissing,
-          ...(drainTool
-            ? {
-                tool_status: drainTool.status,
-                tool_session: drainTool.session,
-                tool_outcome: drainTool.outcome,
-                ...(drainTool.error ? { tool_error: drainTool.error } : {}),
-              }
-            : {}),
         })
         await afterTick(false)
         return "fired"
@@ -562,7 +519,7 @@ export default (async ({ client, directory, ...rest }) => {
         }
       } else {
         // Non-dream night missions record exactly like a heartbeat run (§7).
-        const missionOk = outcome === "completed" && resultStatus !== "error" && !drainFailed
+        const missionOk = outcome === "completed" && resultStatus !== "error"
         if (!missionOk) {
           await moodFeed.apply("mission_failure")
           moodEvent = "mission_failure"
@@ -599,35 +556,22 @@ export default (async ({ client, directory, ...rest }) => {
       // dream_token_budget is config-validated and journaled as an overrun
       // flag (no mid-flight cap exists on the child-session path — noted as
       // an open gap; mission_token_budget is enforced nowhere either).
-      const tickOk = outcome === "completed" && resultStatus !== "error" && !drainFailed
+      const tickOk = outcome === "completed" && resultStatus !== "error"
       const budget = isDream ? q.dream_token_budget : autonomy.mission_token_budget
       const overBudget = budget !== "unlimited" && tokenCost > budget
-      const toolSkippedButCompleted =
-        drainTool?.status === "skipped" && resultStatus === "completed"
-      const toolFailedButCompleted = drainFailed && resultStatus === "completed"
       await ledger({
         verdict: `mission:${brief.mission_id}`,
         mission: brief.mission_id,
         outcome,
         token_cost: tokenCost,
         over_budget: overBudget,
-        gate: "digest",
+        gate: "dream",
         reason,
         ...(sessionId ? { session: sessionId } : {}),
         ...(aborted === null ? {} : { aborted }),
         ...(abortError === undefined ? {} : { abort_error: abortError }),
         result_status: resultStatus,
         result_missing: resultMissing,
-        ...(drainTool
-          ? {
-              tool_status: drainTool.status,
-              tool_session: drainTool.session,
-              tool_outcome: drainTool.outcome,
-              ...(drainTool.error ? { tool_error: drainTool.error } : {}),
-            }
-          : {}),
-        ...(toolSkippedButCompleted ? { tool_skipped_but_completed: true } : {}),
-        ...(toolFailedButCompleted ? { tool_failed_but_completed: true } : {}),
       })
       await afterTick(tickOk)
       return "fired"

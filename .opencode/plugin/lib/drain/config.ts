@@ -25,8 +25,6 @@ export type DrainConfig = {
   drain_prompt_max_bytes: number
   /** Mission ids whose child transcripts are already represented elsewhere. */
   exclude_missions: string[]
-  /** true = heartbeat `drain-pass` work item; false = legacy side mission. */
-  consumer: boolean
   /** Run a pass while pending >= N (drain-consumer-plan §2.5). */
   trigger_pending: number
   /** Run a pass while the oldest pending turn is >= T hours. */
@@ -68,7 +66,6 @@ export const DEFAULT_DRAIN: DrainConfig = {
   poison_attempts: 3,
   drain_prompt_max_bytes: 60000,
   exclude_missions: ["drain", "staleness", "dream"],
-  consumer: true,
   trigger_pending: 12,
   trigger_max_age_hours: 2,
   settle_seconds: 120,
@@ -82,7 +79,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   cursor_migration: "carry",
 }
 
-const BOOL_KEYS = new Set(["enabled", "consumer"])
+const BOOL_KEYS = new Set(["enabled"])
 const INT_KEYS = new Set([
   "batch_sessions",
   "initial_lookback_hours",

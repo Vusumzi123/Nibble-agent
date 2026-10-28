@@ -4,7 +4,7 @@ A barebone knowledge agent built on [opencode](https://opencode.ai) — a
 self-RAG loop over a local Obsidian-style markdown vault: retrieve when needed
 (`retrieval-hook` Brain-First gate → `rag-search`), write durable knowledge on
 request (`rag-brain`), and drain the conversation backlog into notes through the
-cursor-backed `drain` mission (via the `drain_run` tool).
+cursor-backed `drain-pass` work item.
 
 **Status:** pre-1.0, under construction. M1–M4, M8, M9 migrated (self-RAG,
 vault guards, profile, web, audit, OS agents); M5–M7 (mail/telegram/idea) +
@@ -102,14 +102,15 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 ## Missions
 
 Missions live in `.opencode/missions/*.md`: the frontmatter is configuration
-(id, frequency, menus, level, candidacy, lane, enabled, agent, runner,
-on_decline) and the body is the child-session prompt. `runner` binds a tool to
-the child (drain uses `drain_run`); it never bypasses the agent. Every mission
-ends by calling `mission_result`; `on_decline: reroll` lets the orchestrator
-exclude the mission and pick another one once in the same tick.
+(id, frequency, menus, level, candidacy, enabled, agent) and the body is the
+child-session prompt. Every mission ends by calling `mission_result`; a
+declined mission drops its queue item and the producer re-proposes it later if
+its gate still passes.
 
-Work reaches missions through **one persistent work queue**. Producers state
-intent (`mission`, `staleness`, `drain-pass`); the heartbeat executes exactly
+Work reaches missions through **one persistent work pool**. Producers decide at
+enqueue time (weighted draw for missions, status for staleness, `drainDue` for
+`drain-pass`) and emit at most one item each per tick; the heartbeat executes
+exactly
 one unit per tick. A **smooth weighted round-robin (SWRR)** scheduler picks the
 work *kind* (default mission 4 / drain 3 / maintenance 1), then JEV chooses the
 mission inside a mission slot. This makes starvation structural: a perpetual
@@ -137,10 +138,9 @@ are still consolidated by the drain pipe.
   `[brain-first]` directive and the main agent delegates to `rag-search`
   (read-only markdown-vault MCP).
 - **Remember:** vault writes go through the `rag-brain` sub-agent on explicit
-  request. The `drain` mission (heartbeat, cursor-backed) calls the
-  `drain_run` tool, which summarizes un-consolidated turns and hands labelled
-  items to `rag-brain`; the cursor advances only when the writer reports every
-  item. Un-consolidated turns stay searchable through the read-only
+  request. The `drain-pass` work item (heartbeat, cursor-backed) summarizes
+  un-consolidated turns and hands labelled items to `rag-brain`; the cursor
+  advances only when the writer reports every item. Un-consolidated turns stay searchable through the read-only
   `memory-explorer`.
 - **Memory provider:** the read plan, writer, pending count, tools, and guarded
   agents come from one active provider selected by `memory.provider` (`both`,
