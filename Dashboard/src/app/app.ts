@@ -1,10 +1,12 @@
 import { Component, OnDestroy, computed, inject, signal } from '@angular/core';
-import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { Subscription } from 'rxjs';
 
-import { DashboardStore } from './core/store';
+import { DashboardStore, scopeForUrl } from './core/store';
 import { ACCENTS, ThemeService } from './core/theme';
 import { UiService } from './core/ui';
 import { CommandPalette, PaletteItem } from './shared/command-palette';
+import { LoadOverlay } from './shared/load-overlay';
 import { StatusStrip } from './shared/status-strip';
 
 interface NavItem {
@@ -15,7 +17,7 @@ interface NavItem {
 
 @Component({
   selector: 'db-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, StatusStrip, CommandPalette],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, StatusStrip, CommandPalette, LoadOverlay],
   host: {
     '(document:keydown)': 'onKey($event)',
   },
@@ -27,6 +29,7 @@ export class App implements OnDestroy {
   protected readonly theme = inject(ThemeService);
   protected readonly ui = inject(UiService);
   private readonly router = inject(Router);
+  private readonly navSubscription: Subscription;
 
   protected readonly accents = ACCENTS;
   protected readonly paletteOpen = signal(false);
@@ -85,17 +88,26 @@ export class App implements OnDestroy {
 
   constructor() {
     const params = new URLSearchParams(location.search);
-    if (params.get('palette') === '1') this.paletteOpen.set(true);
+    if (params.get('palette') === '1') this.openPalette();
     if (params.get('appearance') === '1') this.themeOpen.set(true);
     void this.store.start();
+    this.navSubscription = this.router.events.subscribe((event) => {
+      if (event instanceof NavigationEnd) void this.store.setScope(scopeForUrl(event.urlAfterRedirects));
+    });
   }
 
   ngOnDestroy(): void {
+    this.navSubscription.unsubscribe();
     this.store.stop();
   }
 
   protected reload(): void {
     void this.store.reload();
+  }
+
+  protected openPalette(): void {
+    if (!this.paletteOpen()) void this.store.ensureMissions();
+    this.paletteOpen.set(true);
   }
 
   protected runPalette(id: string): void {
@@ -122,7 +134,8 @@ export class App implements OnDestroy {
 
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
-      this.paletteOpen.set(!this.paletteOpen());
+      if (this.paletteOpen()) this.paletteOpen.set(false);
+      else this.openPalette();
       return;
     }
     if (event.key === 'Escape') {

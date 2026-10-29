@@ -1,0 +1,12 @@
+@if (store.blockingCount() > 0) {
+  <div class="overlay" role="status" aria-busy="true" aria-live="polite">
+    <div class="panel">
+      <div class="grid" aria-hidden="true">
+        @for (cell of cells; track cell) {
+          <i></i>
+        }
+      </div>
+      <span class="label mono">▚ {{ store.blockingLabel() }}</span>
+    </div>
+  </div>
+}

@@ -22,7 +22,7 @@
             <span class="swatch" [style.background]="accentHex()"></span>
             <span class="mono">{{ theme.theme() === 'nibble' ? 'dark' : 'light' }}</span>
           </button>
-          <button type="button" class="ibtn ibtn--icon" (click)="paletteOpen.set(true)" title="Command palette (⌘K)">
+          <button type="button" class="ibtn ibtn--icon" (click)="openPalette()" title="Command palette (⌘K)">
             <span class="mono">⌘K</span>
           </button>
           <button type="button" class="ibtn ibtn--icon" (click)="reload()" [disabled]="store.refreshing()" title="Refresh">
@@ -154,4 +154,6 @@
         <span class="dim">live data from the Kael harness</span>
       </div>
     }
+
+    <db-load-overlay />
   

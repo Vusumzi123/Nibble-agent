@@ -1,0 +1,109 @@
+:host {
+  display: contents;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--ph-bg-rgb), 0.72);
+  backdrop-filter: blur(4px) saturate(0.85);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 26px 18px;
+  border: 1px solid var(--ph-border);
+  border-radius: var(--dash-radius);
+  background: var(--ph-surface);
+  box-shadow: 0 18px 50px rgba(var(--ph-bg-rgb), 0.45);
+}
+
+.grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(24, 11px);
+  gap: 3px;
+  overflow: hidden;
+  padding: 6px;
+}
+
+.grid i {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: rgba(var(--ph-primary-rgb), 0.08);
+  animation: pixel-pop 1.9s ease-in-out infinite;
+}
+
+/* staggered delays so the grid shimmers like a pixel matrix */
+.grid i:nth-child(3n) {
+  animation-delay: -0.31s;
+}
+.grid i:nth-child(4n + 1) {
+  animation-delay: -1.27s;
+}
+.grid i:nth-child(5n + 2) {
+  animation-delay: -0.62s;
+}
+.grid i:nth-child(7n + 3) {
+  animation-delay: -1.58s;
+}
+.grid i:nth-child(11n + 5) {
+  animation-delay: -0.09s;
+}
+.grid i:nth-child(13n + 7) {
+  animation-delay: -0.94s;
+}
+.grid i:nth-child(17n + 4) {
+  animation-delay: -1.73s;
+}
+
+.grid::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(var(--ph-primary-rgb), 0.16) 48%,
+    rgba(var(--ph-primary-rgb), 0.3) 50%,
+    transparent 100%
+  );
+  transform: translateY(-100%);
+  animation: pixel-scan 2.2s linear infinite;
+  pointer-events: none;
+}
+
+.label {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--ph-primary);
+}
+
+@keyframes pixel-pop {
+  0%,
+  100% {
+    background: rgba(var(--ph-primary-rgb), 0.08);
+    box-shadow: none;
+  }
+  35% {
+    background: rgba(var(--ph-primary-rgb), 0.85);
+    box-shadow: 0 0 9px rgba(var(--ph-primary-rgb), 0.55);
+  }
+}
+
+@keyframes pixel-scan {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}

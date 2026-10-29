@@ -25,6 +25,8 @@ describe('App shell', () => {
     });
     vi.spyOn(DashboardStore.prototype, 'start').mockImplementation(() => Promise.resolve());
     vi.spyOn(DashboardStore.prototype, 'stop').mockImplementation(() => undefined);
+    vi.spyOn(DashboardStore.prototype, 'setScope').mockResolvedValue(undefined);
+    vi.spyOn(DashboardStore.prototype, 'ensureMissions').mockResolvedValue(undefined);
   });
 
   afterEach(() => {
