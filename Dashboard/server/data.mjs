@@ -451,9 +451,16 @@ export function readDrain(dir, paths, state, now = Date.now()) {
   const cfg = data?.drain ?? {};
   const cursor = state.cursor ?? {};
   const validCursor = cursor.version === 2 || cursor.version === 3;
-  const watermark = validCursor && Number.isFinite(cursor.watermark_ts) ? cursor.watermark_ts : null;
+  const cursorPresent =
+    validCursor && Number.isFinite(cursor.watermark_ts) && cursor.watermark_ts > 0;
+  const watermark = cursorPresent ? cursor.watermark_ts : null;
   const exclude = Array.isArray(cfg.exclude_missions) ? cfg.exclude_missions : ['drain', 'staleness', 'dream'];
-  const pending = pendingTurns(dir, watermark, exclude, validCursor ? cursor : null);
+  // No cursor yet (fresh install, wiped state, or watermark 0): report an empty
+  // backlog instead of counting every turn in history from epoch. The pipe
+  // writes the real cursor on its next pass.
+  const pending = cursorPresent
+    ? pendingTurns(dir, watermark, exclude, cursor)
+    : { turns: 0, sessions: 0, messages: 0, oldest: null, newest: null, watermark: null, marked_sessions: 0 };
   const current = state.drain ?? {};
   const queue = Array.isArray(state.queue)
     ? state.queue
@@ -481,12 +488,15 @@ export function readDrain(dir, paths, state, now = Date.now()) {
     pending_sessions: pending.sessions,
     pending_messages: pending.messages,
     marked_sessions: pending.marked_sessions,
-    pending_definition: 'top-level text turns above the cursor watermark and each session mark',
+    pending_definition: cursorPresent
+      ? 'top-level text turns above the cursor watermark and each session mark'
+      : 'no drain cursor yet — backlog reports 0 until the first drain pass',
     oldest_pending_age_ms: pending.oldest ? Math.max(0, now - pending.oldest) : null,
     next_due: nextDue,
     trigger_pending: Number.isFinite(cfg.trigger_pending) ? cfg.trigger_pending : 12,
     trigger_max_age_hours: Number.isFinite(cfg.trigger_max_age_hours) ? cfg.trigger_max_age_hours : 2,
     watermark_ts: watermark,
+    cursor_present: cursorPresent,
     cursor_version: cursor.version ?? null,
     last_pass: lastPass
       ? {

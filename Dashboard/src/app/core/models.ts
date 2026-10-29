@@ -135,6 +135,7 @@ export interface Drain {
   trigger_pending: number;
   trigger_max_age_hours: number;
   watermark_ts: number | null;
+  cursor_present?: boolean;
   cursor_version: number | null;
   last_pass: DrainPass | null;
   recent: DrainPass[];

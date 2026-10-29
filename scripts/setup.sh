@@ -6,6 +6,7 @@
 #                   python3 (openjev decision provider, stdlib-only)
 #   2. LLM        — connect a provider (`opencode providers login`)
 #   3. config     — .opencode/sysop-config.yaml + model selection
+#   3b. drain      — seed .opencode/state/drain-cursor.json if absent
 #   4. skip       — disable LLM-dependent features when no provider connected
 #   4b. models     — optional subagent model pins (.opencode/agents/*.md)
 #   5. profiles   — Brain/Agent.md + Brain/User.md interactive Q&A
@@ -501,6 +502,34 @@ else
   if confirm "Configure the openjev decision provider now?" n; then
     configure_decision_gate
   fi
+fi
+
+# ------------------------------------------------------------ 3b. drain cursor
+# Seed the drain cursor so the dashboard's backlog starts at zero instead of
+# replaying the whole session history. A non-zero watermark also means the pipe
+# will NOT apply drain.initial_lookback_hours; that is deliberate.
+echo "== drain cursor =="
+STATE_DIR=".opencode/state"
+CURSOR="$STATE_DIR/drain-cursor.json"
+if [ -e "$CURSOR" ]; then
+  mark "$CURSOR" skipped
+  echo "  $CURSOR exists (kept)"
+elif [ "$DRY" -eq 1 ]; then
+  echo "  [dry-run] seed $CURSOR (watermark = now)"
+else
+  mkdir -p "$STATE_DIR"
+  node -e '
+const fs=require("fs"),f=process.argv[1];
+const now=Date.now();
+const cursor={version:3,watermark_ts:now,sessions:{},
+  blocked:{ts:now,attempts:0,blocked_until:0},failures:{},written:{},
+  updated_at:new Date(now).toISOString()};
+const tmp=f+".tmp-"+process.pid;
+fs.writeFileSync(tmp,JSON.stringify(cursor,null,2)+"\n");
+fs.renameSync(tmp,f);
+' "$CURSOR"
+  mark "$CURSOR" created
+  echo "  seeded $CURSOR (watermark = now)"
 fi
 
 # ------------------------------------------------------- 4. subagent models

@@ -38,7 +38,7 @@ Angular 22 SPA (Dashboard/) ── same origin ──► Node server (Dashboard/
 | `heartbeat.current.json`, `heartbeat.json` | current flight, lock/stale, tick counters, next-tick schedule |
 | `mood.json`, `sleep.json`, `idea.json` | mood valence/arousal, quiet-hours state, daily idea draw |
 | `work-queue.json` | unified queue + SWRR scheduler: kind, priority, age, due/not-before, TTL, requeues, weights/credits/served |
-| `drain.current.json`, `drain-cursor.json`, `drain.log` | drain lag, pending turns/sessions, passes, last outcome |
+| `drain.current.json`, `drain-cursor.json`, `drain.log` | drain lag, pending turns/sessions, passes, last outcome (no cursor ⇒ pending 0) |
 | `backlog.ndjson` | open/total counts and entries |
 | `heartbeat.log` + `drain.log` + `opencode.db` | runs with mission, kind, outcome, tokens, cost, model, duration, abort reason; drain pipe passes included |
 | `autonomy-gate.log` | gate verdicts (allow/ask/deny) and classes |
@@ -191,6 +191,10 @@ Env: `KAEL_DIR` (default repo root), `DASHBOARD_PORT` (4097), `DASHBOARD_HOST`
 
 ## Known limits
 
+- No drain cursor yet (fresh install, wiped state, or `watermark_ts <= 0`):
+  `/api/drain` reports `pending: 0` and `cursor_present: false` without querying
+  the session DB. `setup.sh` seeds a v3 cursor at setup time; the drain pipe
+  writes and advances it on its next pass.
 - SWRR currently covers queued work (`mission`, `drain-pass`, `staleness`).
   `quiet-hours`, `profile-update` and `soul-update` are still self-gating
   maintenance steps after the tick; their weights are reserved until their
