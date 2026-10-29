@@ -1,0 +1,90 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  background: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--dash-radius);
+  flex-wrap: wrap;
+}
+
+.legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+}
+
+/* chart bars */
+
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 150px;
+  padding: 6px 2px 0;
+}
+
+.bars__col {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+}
+
+.bars__bar {
+  width: 100%;
+  max-width: 22px;
+  background: linear-gradient(180deg, rgba(var(--ph-primary-rgb), 0.85), rgba(var(--ph-primary-rgb), 0.28));
+  border-top: 1px solid var(--ph-primary);
+  border-radius: 1px 1px 0 0;
+  transition: height var(--ph-transition-base);
+}
+
+.bars__bar--over {
+  background: linear-gradient(180deg, rgba(var(--ph-danger-rgb), 0.85), rgba(var(--ph-danger-rgb), 0.25));
+  border-top-color: var(--ph-danger);
+}
+
+.bars__tick {
+  position: absolute;
+  bottom: -13px;
+  font-size: 8px;
+  color: var(--ph-text-muted);
+}
+
+.bars__legend {
+  display: flex;
+  gap: 14px;
+  padding-top: 16px;
+  font-size: 9px;
+}
+
+.share {
+  width: 33%;
+  min-width: 60px;
+  background: var(--ph-bg);
+  border-radius: 1px;
+}
+
+.share span {
+  display: block;
+  height: 4px;
+  background: var(--ph-primary);
+  border-radius: 1px;
+}
+
+.signal-row {
+  display: flex;
+  gap: 14px;
+  padding: 5px 10px;
+  border-top: 1px dashed var(--ph-border);
+  font-size: 9px;
+}

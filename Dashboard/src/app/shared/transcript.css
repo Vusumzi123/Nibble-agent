@@ -1,0 +1,128 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+.transcript__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--ph-border);
+  background: var(--ph-bg);
+  flex-wrap: wrap;
+}
+
+.transcript__tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--ph-text-muted);
+}
+
+.transcript__body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 10px;
+  overflow: auto;
+  max-height: 420px;
+  min-height: 160px;
+}
+
+.msg {
+  border: 1px solid var(--ph-border);
+  border-radius: var(--dash-radius);
+  background: var(--ph-surface-raised);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.msg--user {
+  border-left: 2px solid var(--ph-info);
+}
+
+.msg--thought {
+  border-left: 2px solid rgba(var(--ph-primary-rgb), 0.7);
+  background: rgba(var(--ph-primary-rgb), 0.04);
+}
+
+.msg__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--ph-border);
+  font-size: 9.5px;
+}
+
+.msg--thought .msg__head {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.msg__role {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ph-text-muted);
+}
+
+.msg__role--assistant {
+  color: var(--ph-primary);
+}
+
+.msg__time {
+  color: var(--ph-text-muted);
+  font-size: 9px;
+}
+
+.part-text {
+  margin: 0;
+  padding: 7px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--ph-font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.part-thought {
+  margin: 0;
+  padding: 4px 9px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ph-text-muted);
+  font-style: italic;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.msg--tool summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px;
+  cursor: pointer;
+  font-size: 10px;
+  list-style: none;
+}
+
+.msg--tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.msg--tool pre {
+  margin: 0;
+  padding: 8px 9px;
+  border-top: 1px solid var(--ph-border);
+  background: var(--ph-bg);
+  font-size: 10px;
+  line-height: 1.45;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg__time {
+  margin-left: auto;
+}

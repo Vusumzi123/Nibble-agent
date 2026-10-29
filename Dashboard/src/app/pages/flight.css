@@ -1,0 +1,118 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* flight */
+
+.mission-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px dashed var(--ph-border);
+}
+
+.mission-line__id {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ph-primary);
+}
+
+.mission-line__title {
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+.mission-line__side {
+  font-size: 9.5px;
+  color: var(--ph-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.budget__figures {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.big {
+  font-size: 27px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.bar__fill {
+  display: block;
+  height: 100%;
+  background: var(--ph-primary);
+  transition: width var(--ph-transition-base);
+}
+
+.bar--over .bar__fill {
+  background: var(--ph-danger);
+}
+
+.transcript-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 300px;
+}
+
+.transcript-panel db-transcript {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* queue peek + activity feed */
+
+.queue-peek,
+.feed {
+  display: flex;
+  flex-direction: column;
+  max-height: 250px;
+  overflow: auto;
+}
+
+.queue-peek__row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) 28px 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--ph-border);
+  font-size: 10.5px;
+}
+
+.queue-peek__row:last-child,
+.feed__row:last-child {
+  border-bottom: 0;
+}
+
+.queue-peek__title {
+  font-size: 10.5px;
+}
+
+.feed__row {
+  display: grid;
+  grid-template-columns: 52px 66px minmax(0, 1fr) minmax(0, 1.15fr);
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--ph-border);
+  font-size: 10px;
+}
+
+.feed__time {
+  font-size: 9px;
+}
+
+.feed__title {
+  font-size: 10.5px;
+}
+
+.feed__detail {
+  font-size: 9.5px;
+}

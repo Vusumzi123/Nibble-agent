@@ -1,0 +1,336 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* ------------------------------------------------------------------ shell */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  padding: 0 12px;
+  background: var(--ph-surface);
+  border-bottom: 1px solid var(--ph-border);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand__mark {
+  color: var(--ph-primary);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.brand__name {
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  font-weight: 700;
+}
+
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meta {
+  font-size: 10.5px;
+  color: var(--ph-text-muted);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--ph-border);
+  border-radius: 999px;
+  font-family: var(--ph-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ph-text-muted);
+}
+
+.pill--demo {
+  border-color: rgba(var(--ph-warning-rgb), 0.5);
+  color: var(--ph-warning);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ph-text-muted);
+}
+
+.dot--ok {
+  background: var(--ph-success);
+  box-shadow: 0 0 6px rgba(var(--ph-success-rgb), 0.7);
+}
+
+.dot--demo {
+  background: var(--ph-warning);
+  box-shadow: 0 0 6px rgba(var(--ph-warning-rgb), 0.6);
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+  border: 1px solid rgba(var(--ph-text-rgb), 0.2);
+}
+
+.swatch--lg {
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+}
+
+.ibtn--icon {
+  padding: 0 8px;
+}
+
+.ibtn--ghost {
+  background: transparent;
+}
+
+/* nav */
+
+.nav {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 34px;
+  padding: 0 8px;
+  background: var(--ph-bg);
+  border-bottom: 1px solid var(--ph-border);
+  position: sticky;
+  top: 46px;
+  z-index: 25;
+  overflow-x: auto;
+}
+
+.nav__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  color: var(--ph-text-muted);
+  text-decoration: none;
+  font-size: 10.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.nav__link:hover {
+  color: var(--ph-text);
+  background: rgba(var(--ph-primary-rgb), 0.04);
+}
+
+.nav__link--on {
+  color: var(--ph-primary);
+  border-bottom-color: var(--ph-primary);
+  background: linear-gradient(180deg, rgba(var(--ph-primary-rgb), 0.08), rgba(var(--ph-primary-rgb), 0.02));
+}
+
+.nav__key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--ph-border);
+  border-radius: 2px;
+  font-size: 8.5px;
+  color: var(--ph-text-muted);
+}
+
+.nav__link--on .nav__key {
+  border-color: rgba(var(--ph-primary-rgb), 0.5);
+  color: var(--ph-primary);
+}
+
+.nav__hint {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 9.5px;
+  color: var(--ph-text-muted);
+  letter-spacing: 0.06em;
+}
+
+/* main + footer */
+
+.main {
+  flex: 1;
+  min-height: 0;
+  padding: var(--dash-gap);
+  overflow: auto;
+}
+
+.seg--full {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+}
+
+/* offline banner */
+
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: rgba(var(--ph-warning-rgb), 0.07);
+  border-bottom: 1px solid rgba(var(--ph-warning-rgb), 0.35);
+  color: var(--ph-warning);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+/* popover */
+
+.popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.popover {
+  position: fixed;
+  top: 52px;
+  right: 12px;
+  z-index: 55;
+  width: 290px;
+  background: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--dash-radius);
+  box-shadow: var(--ph-shadow-3);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.popover__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.popover__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.swatch-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 2px;
+  border: 1px solid var(--ph-border);
+  border-radius: 2px;
+  background: var(--ph-bg);
+  color: var(--ph-text-muted);
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.swatch-btn:hover,
+.swatch-btn--on {
+  border-color: var(--ph-primary);
+  color: var(--ph-text);
+}
+
+.popover__foot {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.4;
+  border-top: 1px dashed var(--ph-border);
+  padding-top: 7px;
+}
+
+/* toast */
+
+.toast {
+  position: fixed;
+  right: 14px;
+  bottom: 38px;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--ph-surface-raised);
+  border: 1px solid var(--ph-border);
+  border-radius: var(--dash-radius);
+  box-shadow: var(--ph-shadow-2);
+  font-size: 11px;
+  cursor: pointer;
+  animation: slide-up 160ms ease;
+}
+
+.toast__bar {
+  width: 3px;
+  height: 16px;
+  border-radius: 1px;
+  background: var(--ph-info);
+}
+
+.toast--success .toast__bar {
+  background: var(--ph-success);
+}
+
+.toast--warning .toast__bar {
+  background: var(--ph-warning);
+}
+
+.toast--danger .toast__bar {
+  background: var(--ph-danger);
+}
+
+/* boot */
+
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--ph-bg);
+  font-size: 12px;
+}
+
+.boot__mark {
+  font-size: 30px;
+  color: var(--ph-primary);
+}

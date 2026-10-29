@@ -2,20 +2,8 @@ import { Component, computed, input } from '@angular/core';
 
 @Component({
   selector: 'db-spark',
-  template: `
-    <svg
-      class="spark"
-      [class]="'spark spark--' + tone()"
-      [attr.viewBox]="'0 0 100 ' + height()"
-      preserveAspectRatio="none"
-      aria-hidden="true"
-    >
-      @if (area()) {
-        <polygon class="spark__area" [attr.points]="polygon()" />
-      }
-      <polyline class="spark__line" [attr.points]="line()" vector-effect="non-scaling-stroke" />
-    </svg>
-  `,
+  templateUrl: './sparkline.html',
+  styleUrl: './sparkline.css',
 })
 export class Sparkline {
   readonly points = input<number[]>([]);

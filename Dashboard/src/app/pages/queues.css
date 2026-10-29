@@ -1,0 +1,70 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+.block {
+  display: block;
+}
+
+.section-title {
+  font-family: var(--ph-font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ph-text-muted);
+  margin: 12px 0 6px;
+}
+
+/* drawer */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(var(--ph-bg-rgb), 0.55);
+  backdrop-filter: blur(1px);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 65;
+  width: min(460px, 92vw);
+  background: var(--ph-surface);
+  border-left: 1px solid var(--ph-border);
+  box-shadow: var(--ph-shadow-3);
+  display: flex;
+  flex-direction: column;
+  animation: slide-in 160ms ease;
+}
+
+.drawer__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ph-border);
+  background: var(--ph-surface-raised);
+}
+
+.drawer__eyebrow {
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ph-primary);
+}
+
+.drawer__title {
+  margin: 2px 0 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.drawer__body {
+  padding: 12px;
+  overflow: auto;
+}
+
+.drawer__body db-transcript {
+  display: block;
+}

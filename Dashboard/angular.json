@@ -68,6 +68,16 @@
             }
           },
           "defaultConfiguration": "development"
+        },
+        "test": {
+          "builder": "@angular/build:unit-test",
+          "options": {
+            "buildTarget": "dashboard:build:development",
+            "tsConfig": "tsconfig.spec.json",
+            "runner": "vitest",
+            "providersFile": "src/test-providers.ts",
+            "watch": false
+          }
         }
       }
     }

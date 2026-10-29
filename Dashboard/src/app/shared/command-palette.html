@@ -1,0 +1,39 @@
+
+    @if (open()) {
+      <div class="palette-backdrop" (click)="closed.emit()"></div>
+      <div class="palette" role="dialog" aria-label="Command palette">
+        <div class="palette__head">
+          <span class="mono dim">⌘K</span>
+          <input
+            #input
+            class="palette__input mono"
+            type="text"
+            placeholder="jump to page, mission, theme…"
+            [value]="query()"
+            (input)="onInput($event)"
+            (keydown)="onKey($event)"
+            autofocus
+          />
+          <span class="mono dim">{{ filtered().length }}</span>
+        </div>
+        <div class="palette__list">
+          @for (item of filtered(); track item.id; let i = $index) {
+            <button
+              type="button"
+              class="palette__item"
+              [class.palette__item--on]="i === active()"
+              (mouseenter)="active.set(i)"
+              (click)="choose(item)"
+            >
+              <span class="palette__group mono">{{ item.group }}</span>
+              <span class="palette__label">{{ item.label }}</span>
+              <span class="palette__hint mono">{{ item.hint }}</span>
+            </button>
+          } @empty {
+            <p class="empty pad">no matches</p>
+          }
+        </div>
+        <div class="palette__foot mono dim">↑↓ navigate · enter run · esc close</div>
+      </div>
+    }
+  

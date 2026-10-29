@@ -1,0 +1,76 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* palette */
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(var(--ph-bg-rgb), 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.palette__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ph-border);
+  background: var(--ph-surface-raised);
+}
+
+.palette__input {
+  flex: 1;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--ph-text);
+  font-size: 12px;
+  outline: none;
+}
+
+.palette__list {
+  max-height: 44vh;
+  overflow: auto;
+  padding: 4px;
+}
+
+.palette__item {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ph-text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.palette__item--on {
+  background: rgba(var(--ph-primary-rgb), 0.1);
+  border-color: rgba(var(--ph-primary-rgb), 0.35);
+}
+
+.palette__group {
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ph-text-muted);
+}
+
+.palette__hint {
+  font-size: 9px;
+  color: var(--ph-text-muted);
+}
+
+.palette__foot {
+  padding: 6px 10px;
+  border-top: 1px solid var(--ph-border);
+  background: var(--ph-surface-raised);
+  font-size: 9px;
+}

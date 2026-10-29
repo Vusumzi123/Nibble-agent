@@ -1,0 +1,20 @@
+
+    <div class="strip">
+      @for (cell of cells(); track cell.key) {
+        <button
+          class="cell"
+          type="button"
+          [class]="'cell cell--' + cell.tone + (cell.spark.length > 1 ? ' cell--spark' : '')"
+          (click)="go(cell.link)"
+          [title]="cell.label + ' — open ' + cell.link"
+        >
+          <span class="cell__label">{{ cell.label }}</span>
+          <span class="cell__value mono">{{ cell.value }}</span>
+          <span class="cell__sub">{{ cell.sub }}</span>
+          @if (cell.spark.length > 1) {
+            <db-spark class="cell__spark" [points]="cell.spark" [tone]="sparkTone(cell.tone)" [height]="20" />
+          }
+        </button>
+      }
+    </div>
+  

@@ -5,53 +5,8 @@ import { RunRow } from '../core/models';
 
 @Component({
   selector: 'db-run-table',
-  template: `
-    <div class="table-wrap">
-      <table class="tbl">
-        <thead>
-          <tr>
-            <th class="num">tick</th>
-            <th>time</th>
-            <th>mission</th>
-            <th>kind</th>
-            <th>outcome</th>
-            <th class="num">tokens</th>
-            <th class="num">cost</th>
-            <th class="num">dur</th>
-            <th class="num">flags</th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (run of runs(); track run.session + '-' + run.ts + '-' + run.mission) {
-            <tr (click)="select.emit(run)" tabindex="0" (keydown.enter)="select.emit(run)">
-              <td class="num mono">{{ run.tick ?? '—' }}</td>
-              <td class="mono dim">{{ fmtTime(run.ts) }}</td>
-              <td class="mission">
-                <span class="mono">{{ run.mission ?? '—' }}</span>
-                <span class="sub">{{ run.mission_title }}{{ run.model ? ' · ' + run.model : '' }}</span>
-              </td>
-              <td><span class="tag" [class]="'tag tag--' + kindTone(run.kind)">{{ run.kind }}</span></td>
-              <td><span class="tag" [class]="'tag tag--' + outcomeTone(run.outcome)">{{ run.outcome ?? 'unknown' }}</span></td>
-              <td class="num mono" [class.warn]="run.over_budget">{{ fmtTokens(run.token_cost) }}</td>
-              <td class="num mono">{{ fmtCost(run.cost) }}</td>
-              <td class="num mono">{{ fmtDuration(run.duration_ms) }}</td>
-              <td class="num flags">
-                @if (run.over_budget) { <span class="tag tag--danger">over</span> }
-                @if (run.requeued) { <span class="tag tag--warning">rq</span> }
-                @if (run.result_missing) { <span class="tag tag--warning">no-result</span> }
-                @if (run.aborted) { <span class="tag tag--danger">abort</span> }
-                @if (!run.over_budget && !run.requeued && !run.result_missing && !run.aborted) { <span class="dim">—</span> }
-              </td>
-            </tr>
-          } @empty {
-            <tr>
-              <td colspan="9" class="empty">no runs recorded</td>
-            </tr>
-          }
-        </tbody>
-      </table>
-    </div>
-  `,
+  templateUrl: './run-table.html',
+  styleUrl: './run-table.css',
 })
 export class RunTable {
   readonly runs = input<RunRow[]>([]);

@@ -1,0 +1,58 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+.cell__label {
+  font-family: var(--ph-font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ph-text-muted);
+  white-space: nowrap;
+}
+
+.cell__value {
+  font-size: 15.5px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell__sub {
+  font-size: 9.5px;
+  color: var(--ph-text-muted);
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell--spark {
+  padding-right: 62px;
+}
+
+.cell__spark {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 50px;
+  height: 20px;
+  opacity: 0.85;
+}
+
+.cell--primary .cell__value {
+  color: var(--ph-primary);
+}
+
+.cell--success .cell__value {
+  color: var(--ph-success);
+}
+
+.cell--warning .cell__value {
+  color: var(--ph-warning);
+}
+
+.cell--danger .cell__value {
+  color: var(--ph-danger);
+}

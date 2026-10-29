@@ -1,0 +1,222 @@
+
+    <div class="page">
+      <section class="panel">
+        <header class="panel__head">
+          <span class="panel__title">runtime target</span>
+          <span class="tag" [class]="'tag tag--' + (store.online() ? 'success' : 'danger')">
+            {{ store.online() ? 'connected' : 'offline' }}
+          </span>
+        </header>
+        <div class="panel__body">
+          <div class="mini-grid mini-grid--wide">
+            <div class="mini">
+              <span class="mini__label">project</span>
+              <span class="mini__value mono ellipsis" [title]="store.health()?.directory ?? ''">{{ store.health()?.directory ?? '—' }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">opencode serve</span>
+              <span class="mini__value mono">{{ store.health()?.serve_url ?? '—' }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">serve reachable</span>
+              <span class="mini__value mono" [class.warn]="!store.health()?.serve_ok">{{ store.health()?.serve_ok ? 'yes' : 'no' }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">config</span>
+              <span class="mini__value mono ellipsis" [title]="store.settings()?.file ?? ''">{{ store.settings()?.file ?? '—' }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">updater</span>
+              <span class="mini__value mono">{{ store.updatedLabel() }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">uptime</span>
+              <span class="mini__value mono">{{ fmtDuration(store.health()?.uptime_ms ?? null) }}</span>
+            </div>
+          </div>
+          <div class="mini-grid mini-grid--wide runtime-second">
+            <div class="mini">
+              <span class="mini__label">backlog</span>
+              <span class="mini__value mono">{{ store.overview()?.backlog?.open ?? 0 }} open / {{ store.overview()?.backlog?.total ?? 0 }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">missions</span>
+              <span class="mini__value mono">{{ store.overview()?.missions?.enabled ?? 0 }} / {{ store.overview()?.missions?.total ?? 0 }} enabled</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">queue</span>
+              <span class="mini__value mono">{{ store.overview()?.queue?.due ?? 0 }} due / {{ store.overview()?.queue?.total ?? 0 }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">drain</span>
+              <span class="mini__value mono">{{ store.overview()?.drain?.pending ?? 0 }} turns</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">audit failures</span>
+              <span class="mini__value mono" [class.warn]="(store.errors()?.audit?.failures ?? 0) > 0">{{ store.errors()?.audit?.failures ?? 0 }}</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">locks</span>
+              <span class="mini__value mono">{{ presentLocks().length }} present</span>
+            </div>
+            <div class="mini">
+              <span class="mini__label">lock ages</span>
+              <span class="mini__value mono ellipsis">{{ lockSummary() }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="settings">
+        <aside class="panel settings__nav">
+          <header class="panel__head">
+            <span class="panel__title">settings</span>
+            <span class="head-meta mono">{{ dirtyCount() }} dirty</span>
+          </header>
+          <div class="settings__nav-list">
+            @for (section of sections(); track section.id) {
+              <button
+                type="button"
+                class="settings__nav-item"
+                [class.settings__nav-item--on]="active() === section.id"
+                (click)="active.set(section.id)"
+              >
+                <span class="mono">{{ section.label }}</span>
+                <span class="settings__nav-meta">
+                  @if (!section.writable) { <span class="tag tag--ghost">ro</span> }
+                  @if (section.restart) { <span class="tag tag--warning">restart</span> }
+                  @if (dirtyFor(section).length) { <span class="tag tag--info">{{ dirtyFor(section).length }}</span> }
+                </span>
+              </button>
+            }
+          </div>
+        </aside>
+
+        @if (section(); as section) {
+          <section class="panel settings__body">
+            <header class="panel__head">
+              <span class="panel__title">{{ section.label }}</span>
+              <div class="head-tools">
+                @if (!section.writable) { <span class="tag tag--ghost">read-only</span> }
+                @if (section.restart) { <span class="tag tag--warning">restart required</span> }
+                <input
+                  class="input input--sm input--search"
+                  type="search"
+                  placeholder="filter keys…"
+                  [value]="query()"
+                  (input)="query.set(value($event))"
+                />
+              </div>
+            </header>
+            <p class="settings__desc">{{ section.description }}</p>
+
+            <div class="form-grid settings__grid">
+              @for (field of visibleFields(section); track field.path) {
+                <div class="form-row" [class.form-row--wide]="field.type === 'list'">
+                  <span class="label">
+                    {{ field.label }}
+                    @if (!field.set) { <span class="tag tag--ghost">default</span> }
+                    @if (field.readOnly) { <span class="tag tag--ghost">read-only</span> }
+                  </span>
+
+                  @switch (field.type) {
+                    @case ('bool') {
+                      <span class="switch-row">
+                        <label class="switch">
+                          <input
+                            type="checkbox"
+                            [checked]="boolValue(field)"
+                            [disabled]="field.readOnly"
+                            (change)="setBool(field, checked($event))"
+                          />
+                          <span class="switch__track"></span>
+                        </label>
+                        <span class="mono dim">{{ boolValue(field) ? 'on' : 'off' }}</span>
+                      </span>
+                    }
+                    @case ('enum') {
+                      <select class="input" [disabled]="field.readOnly" (change)="setString(field, value($event))">
+                        @for (option of field.options ?? []; track option) {
+                          <option [value]="option" [selected]="stringValue(field) === option">{{ option }}</option>
+                        }
+                      </select>
+                    }
+                    @case ('int') {
+                      <input
+                        class="input mono"
+                        type="number"
+                        [min]="field.min ?? 0"
+                        [max]="field.max ?? 0"
+                        [value]="numberValue(field)"
+                        [disabled]="field.readOnly"
+                        (change)="setNumber(field, +value($event), false)"
+                      />
+                    }
+                    @case ('float') {
+                      <input
+                        class="input mono"
+                        type="number"
+                        step="0.01"
+                        [min]="field.min ?? 0"
+                        [max]="field.max ?? 1"
+                        [value]="numberValue(field)"
+                        [disabled]="field.readOnly"
+                        (change)="setNumber(field, +value($event), true)"
+                      />
+                    }
+                    @case ('list') {
+                      <input
+                        class="input mono"
+                        type="text"
+                        [value]="listValue(field)"
+                        [disabled]="field.readOnly"
+                        (change)="setList(field, value($event))"
+                      />
+                    }
+                    @case ('budget') {
+                      <input
+                        class="input mono"
+                        type="text"
+                        [value]="stringValue(field)"
+                        [disabled]="field.readOnly"
+                        (change)="setBudget(field, value($event))"
+                      />
+                    }
+                    @default {
+                      <input
+                        class="input mono"
+                        type="text"
+                        [value]="stringValue(field)"
+                        [disabled]="field.readOnly"
+                        (change)="setString(field, value($event))"
+                      />
+                    }
+                  }
+                  <span class="hint">
+                    {{ field.help }}
+                    @if (field.default !== null && field.set) { <span class="dim"> · default {{ field.default }}</span> }
+                  </span>
+                </div>
+              } @empty {
+                <p class="empty pad">no fields match</p>
+              }
+            </div>
+
+            <footer class="settings__footer">
+              <span class="mono dim">{{ dirtyFor(section).length }} unsaved · {{ section.fields.length }} keys</span>
+              <span class="spacer"></span>
+              <button type="button" class="ibtn" [disabled]="!dirtyFor(section).length" (click)="reset(section)">reset</button>
+              <button
+                type="button"
+                class="ibtn ibtn--primary"
+                [disabled]="!section.writable || !dirtyFor(section).length || saving() === section.id"
+                (click)="apply(section)"
+              >
+                {{ saving() === section.id ? 'applying…' : 'apply ' + section.label }}
+              </button>
+            </footer>
+          </section>
+        }
+      </div>
+    </div>
+  

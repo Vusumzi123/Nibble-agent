@@ -1,0 +1,97 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dash-gap);
+}
+
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.row-click {
+  cursor: pointer;
+}
+
+.detail-row td {
+  background: var(--ph-bg);
+  padding: 8px 12px;
+}
+
+.overlay pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: 2px;
+  font-size: 9.5px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.prose {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.cand {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  gap: 3px 8px;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.cand__name {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ph-text-muted);
+}
+
+.cand__count {
+  text-align: right;
+  font-size: 10.5px;
+}
+
+.cand__bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  background: var(--ph-bg);
+  border-radius: 1px;
+}
+
+.cand__bar span {
+  display: block;
+  height: 100%;
+  background: var(--ph-primary);
+}
+
+.overlay-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.overlay-editor__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.overlay-json {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--ph-surface);
+  border: 1px solid var(--ph-border);
+  border-radius: 2px;
+  font-size: 9px;
+  line-height: 1.4;
+  max-height: 100px;
+  overflow: auto;
+}

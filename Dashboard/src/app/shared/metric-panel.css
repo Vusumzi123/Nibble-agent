@@ -1,0 +1,72 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* metric panels */
+
+.mp {
+  display: flex;
+  flex-direction: column;
+}
+
+.mp__head {
+  min-height: 24px;
+}
+
+.mp__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 8px;
+}
+
+.mp__figure {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-height: 30px;
+}
+
+.mp__value {
+  font-size: 25px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.mp__value--gap {
+  color: var(--ph-text-muted);
+}
+
+.mp__unit {
+  font-family: var(--ph-font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ph-text-muted);
+}
+
+.mp__spark {
+  height: 44px;
+  width: 100%;
+}
+
+.mp__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--ph-text-muted);
+}
+
+.mp__note {
+  color: var(--ph-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mp__caveat {
+  text-align: right;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

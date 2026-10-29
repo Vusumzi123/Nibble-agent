@@ -1,0 +1,76 @@
+
+    <div class="page page--fill">
+      <div class="logs">
+        <section class="panel logs__index">
+          <header class="panel__head">
+            <span class="panel__title">ledgers</span>
+            <span class="head-meta mono">{{ store.ledgers().length }}</span>
+          </header>
+          <div class="ledger-list">
+            @for (ledger of store.ledgers(); track ledger.name) {
+              <button
+                type="button"
+                class="ledger"
+                [class.ledger--on]="store.selectedLedger() === ledger.name"
+                (click)="select(ledger.name)"
+              >
+                <span class="ledger__name mono">{{ ledger.name }}</span>
+                <span class="ledger__meta mono dim">{{ ledger.lines }} ln · {{ fmtBytes(ledger.bytes) }}</span>
+              </button>
+            } @empty {
+              <p class="empty pad">no ledgers</p>
+            }
+          </div>
+        </section>
+
+        <section class="panel logs__view">
+          <header class="panel__head">
+            <span class="panel__title mono">{{ store.selectedLedger() }}</span>
+            <div class="head-tools">
+              <label class="check">
+                <input type="checkbox" [checked]="tail()" (change)="tail.set(checked($event))" />
+                tail
+              </label>
+              <select class="input input--sm" (change)="level.set(value($event))">
+                <option value="all">all levels</option>
+                <option value="error">error</option>
+                <option value="warn">warn</option>
+              </select>
+              <select class="input input--sm" (change)="limit.set(+value($event))">
+                <option [value]="100">100 lines</option>
+                <option [value]="300" selected>300 lines</option>
+                <option [value]="1000">1000 lines</option>
+              </select>
+              <input
+                class="input input--sm input--search"
+                type="search"
+                placeholder="filter…"
+                [value]="query()"
+                (input)="query.set(value($event))"
+              />
+              <button type="button" class="ibtn" (click)="refresh()" [disabled]="store.ledgerLoading()">
+                {{ store.ledgerLoading() ? '…' : 'refresh' }}
+              </button>
+              <button type="button" class="ibtn" (click)="download()" [disabled]="visible().length === 0">save</button>
+            </div>
+          </header>
+          <div class="logs__meta">
+            <span class="mono dim">{{ visible().length }} / {{ lines().length }} lines</span>
+            <span class="mono dim">{{ errorCount() }} errors</span>
+            <span class="spacer"></span>
+            <span class="mono dim">{{ updatedLabel() }}</span>
+          </div>
+          <div class="logs__body mono">
+            @for (line of visible(); track $index) {
+              <div class="logline" [class.logline--error]="levelOf(line) === 'error'" [class.logline--warn]="levelOf(line) === 'warn'">
+                <span class="logline__n">{{ lineNo($index) }}</span>
+                <span class="logline__text">{{ line }}</span>
+              </div>
+            } @empty {
+              <p class="empty pad">no entries — the ledger is empty or unreadable</p>
+            }
+          </div>
+        </section>
+      </div>
+    </div>
+  

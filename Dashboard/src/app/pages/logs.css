@@ -1,0 +1,103 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+.logs__index {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.ledger:hover {
+  background: var(--ph-surface-raised);
+}
+
+.ledger--on {
+  background: rgba(var(--ph-primary-rgb), 0.08);
+  border-color: rgba(var(--ph-primary-rgb), 0.35);
+}
+
+.ledger__name {
+  font-size: 10.5px;
+  color: var(--ph-text);
+}
+
+.ledger--on .ledger__name {
+  color: var(--ph-primary);
+}
+
+.ledger__meta {
+  font-size: 8.5px;
+}
+
+.logs__view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.logs__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--ph-border);
+  font-size: 9px;
+  background: var(--ph-bg);
+}
+
+.logs__body {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+  font-size: 10px;
+  line-height: 1.5;
+  background: var(--ph-bg);
+}
+
+.logline {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  padding: 0 10px;
+  border-left: 2px solid transparent;
+}
+
+.logline:hover {
+  background: rgba(var(--ph-primary-rgb), 0.04);
+}
+
+.logline--error {
+  border-left-color: var(--ph-danger);
+  background: rgba(var(--ph-danger-rgb), 0.06);
+  color: var(--ph-danger);
+}
+
+.logline--warn {
+  border-left-color: var(--ph-warning);
+  background: rgba(var(--ph-warning-rgb), 0.05);
+  color: var(--ph-warning);
+}
+
+.logline__n {
+  color: var(--ph-text-muted);
+  text-align: right;
+  user-select: none;
+  font-size: 9px;
+}
+
+.logline__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
