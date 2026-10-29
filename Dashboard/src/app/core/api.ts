@@ -19,6 +19,7 @@ import {
   Overview,
   QueueWait,
   Queues,
+  RunDetail,
   RunsSnapshot,
   SettingsResult,
   SettingsSnapshot,
@@ -106,6 +107,16 @@ export class ApiService {
 
   runs(params: { limit?: number; mission?: string; kind?: string; outcome?: string; hours?: number } = {}): Promise<RunsSnapshot> {
     return this.get<RunsSnapshot>(`/api/runs${q(params)}`);
+  }
+
+  runDetail(params: { session?: string | null; tick?: number | null; mission?: string | null }): Promise<RunDetail> {
+    return this.get<RunDetail>(
+      `/api/runs/detail${q({
+        session: params.session ?? undefined,
+        tick: params.tick ?? undefined,
+        mission: params.mission ?? undefined,
+      })}`,
+    );
   }
 
   tokens(hours = 24, bucket: 'tick' | 'hour' | 'day' = 'hour'): Promise<TokenSeries> {

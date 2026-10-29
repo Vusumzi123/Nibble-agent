@@ -30,6 +30,7 @@ import {
   readLocks,
   readMood,
   readQueue,
+  readRunDetail,
   readRuns,
   readSleep,
   readState,
@@ -279,6 +280,15 @@ const routes = {
       kind: url.searchParams.get('kind'),
       outcome: url.searchParams.get('outcome'),
       hours: url.searchParams.get('hours'),
+    }));
+  },
+
+  'GET /api/runs/detail': async (req, res, url) => {
+    const c = ctx();
+    json(res, 200, readRunDetail(DIR, c.paths, {
+      session: url.searchParams.get('session'),
+      tick: url.searchParams.get('tick'),
+      mission: url.searchParams.get('mission'),
     }));
   },
 

@@ -86,6 +86,7 @@ GET  /api/mood | /sleep | /idea  state files
 GET  /api/queues                 work queue + running + drain + SWRR scheduler
 GET  /api/drain                  drain lag, pending turns, passes
 GET  /api/runs                   ?limit&mission&kind&outcome&hours
+GET  /api/runs/detail            ?session&tick&mission  one run + session breakdown
 GET  /api/metrics/tokens         ?hours&bucket=tick|hour|day
 GET  /api/metrics/cost           ?hours  (models, days, missions, avg/run)
 GET  /api/metrics/errors         ?hours  (runs, gates, audit, retrieval, drain, series)

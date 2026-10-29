@@ -212,6 +212,25 @@ export interface RunsSnapshot {
   hours: number;
 }
 
+export interface SessionDetail {
+  id: string;
+  title: string | null;
+  model: string | null;
+  cost: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  tokens_reasoning: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  started_ms: number | null;
+  finished_ms: number | null;
+}
+
+export interface RunDetail {
+  run: RunRow | null;
+  session: SessionDetail | null;
+}
+
 export interface TokenPoint {
   bucket: string;
   tokens: number;

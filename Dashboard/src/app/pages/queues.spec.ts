@@ -50,6 +50,7 @@ interface Harness {
   store: DashboardStore;
   api: ApiService;
   sessionSpy: ReturnType<typeof vi.spyOn>;
+  detailSpy: ReturnType<typeof vi.spyOn>;
 }
 
 function createFixture(): Harness {
@@ -58,6 +59,7 @@ function createFixture(): Harness {
   store.health.set({ serve_url: 'http://127.0.0.1:4097', directory: '/repo' } as never);
   const api = TestBed.inject(ApiService);
   const sessionSpy = vi.spyOn(api, 'sessionMessages');
+  const detailSpy = vi.spyOn(api, 'runDetail').mockResolvedValue({ run: null, session: null });
   const fixture = TestBed.createComponent(QueuesPage);
   fixture.detectChanges();
   return {
@@ -66,6 +68,7 @@ function createFixture(): Harness {
     store,
     api,
     sessionSpy,
+    detailSpy,
   };
 }
 
@@ -170,5 +173,96 @@ describe('QueuesPage drawer', () => {
     h.sessionSpy.mockResolvedValueOnce([]);
     await open(h, makeRun({ session: 'ses_empty' }));
     expect(drawer(h)?.textContent).toContain('no messages in this session');
+  });
+
+  it('loads the run detail individually on open and renders the session breakdown', async () => {
+    const h = createFixture();
+    h.sessionSpy.mockResolvedValueOnce(textRow('hi'));
+    h.detailSpy.mockResolvedValueOnce({
+      run: makeRun({ model: 'detailed-model', cost: 0.42 }),
+      session: {
+        id: 'ses_a',
+        title: 'fix the vault',
+        model: 'detailed-model',
+        cost: 0.42,
+        tokens_in: 10,
+        tokens_out: 20,
+        tokens_reasoning: 5,
+        cache_read: 100,
+        cache_write: 200,
+        started_ms: 1,
+        finished_ms: 2,
+      },
+    });
+
+    await open(h, makeRun());
+
+    expect(h.detailSpy).toHaveBeenCalledWith({
+      session: 'ses_a',
+      tick: 42,
+      mission: 'missions/update-security.md',
+    });
+    const root = drawer(h);
+    expect(root?.textContent).toContain('fix the vault');
+    expect(root?.textContent).toContain('detailed-model');
+    expect(root?.textContent).toContain('session breakdown');
+    expect((h.comp['detailLoading'] as () => boolean)()).toBe(false);
+  });
+
+  it('falls back to the list row when the individual detail fetch fails', async () => {
+    const h = createFixture();
+    h.sessionSpy.mockResolvedValueOnce([]);
+    h.detailSpy.mockRejectedValueOnce(new Error('detail boom'));
+
+    await open(h, makeRun());
+
+    const root = drawer(h);
+    expect(root?.textContent).toContain('detail boom');
+    expect(root?.textContent).toContain('update security');
+    expect((h.comp['detailLoading'] as () => boolean)()).toBe(false);
+  });
+
+  it('skips the detail fetch for rows with neither session nor tick', async () => {
+    const h = createFixture();
+    await open(h, makeRun({ session: null, tick: null }));
+    expect(h.detailSpy).not.toHaveBeenCalled();
+    expect(drawer(h)?.textContent).toContain('this run has no recorded session');
+  });
+
+  it('the reload button re-fetches detail and transcript', async () => {
+    const h = createFixture();
+    h.sessionSpy.mockResolvedValue(textRow('hello'));
+    h.detailSpy.mockResolvedValue({ run: makeRun(), session: null });
+
+    await open(h, makeRun());
+    expect(h.detailSpy).toHaveBeenCalledTimes(1);
+    expect(h.sessionSpy).toHaveBeenCalledTimes(1);
+
+    const reloadButton = drawer(h)?.querySelector('.drawer__actions .ibtn[title="Reload detail and transcript"]');
+    expect(reloadButton).toBeTruthy();
+    (reloadButton as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.fixture.detectChanges();
+
+    expect(h.detailSpy).toHaveBeenCalledTimes(2);
+    expect(h.sessionSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders the per-item detail as it arrives', async () => {
+    const h = createFixture();
+    let resolveDetail!: (value: { run: RunRow | null; session: null }) => void;
+    h.detailSpy.mockImplementationOnce(() => new Promise((r) => (resolveDetail = r)));
+    h.sessionSpy.mockResolvedValueOnce([]);
+
+    const pending = (h.comp['open'] as (r: RunRow) => Promise<void>)(makeRun());
+    h.fixture.detectChanges();
+    expect(drawer(h)?.textContent).toContain('loading detail…');
+
+    resolveDetail({ run: makeRun({ model: 'late-model' }), session: null });
+    await pending;
+    h.fixture.detectChanges();
+
+    expect(drawer(h)?.textContent).toContain('late-model');
+    expect((h.comp['detailLoading'] as () => boolean)()).toBe(false);
   });
 });

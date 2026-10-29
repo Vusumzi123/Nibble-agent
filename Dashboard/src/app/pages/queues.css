@@ -54,6 +54,12 @@
   color: var(--ph-primary);
 }
 
+.drawer__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .drawer__title {
   margin: 2px 0 0;
   font-size: 15px;

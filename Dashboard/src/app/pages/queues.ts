@@ -2,7 +2,7 @@ import { Component, computed, inject, signal } from '@angular/core';
 
 import { ApiService, errorText } from '../core/api';
 import { fmtAge, fmtCost, fmtDuration, fmtTime, fmtTokens } from '../core/format';
-import { RunRow, TranscriptEntry } from '../core/models';
+import { RunDetail, RunRow, TranscriptEntry } from '../core/models';
 import { DashboardStore } from '../core/store';
 import { mapSessionMessages } from '../core/transcript-map';
 import { RunTable } from '../shared/run-table';
@@ -23,11 +23,17 @@ export class QueuesPage {
   protected readonly kind = signal('all');
   protected readonly outcome = signal('all');
   protected readonly selected = signal<RunRow | null>(null);
+  protected readonly detail = signal<RunDetail | null>(null);
+  protected readonly detailLoading = signal(false);
+  protected readonly detailError = signal<string | null>(null);
   protected readonly drawerEntries = signal<TranscriptEntry[]>([]);
   protected readonly drawerLoading = signal(false);
   protected readonly drawerError = signal<string | null>(null);
 
   private detailSeq = 0;
+
+  /** Drawer fields prefer the individually loaded detail over the list row. */
+  protected readonly viewRun = computed(() => this.detail()?.run ?? this.selected());
 
   protected fmtAge = fmtAge;
   protected fmtDuration = fmtDuration;
@@ -85,25 +91,60 @@ export class QueuesPage {
     return (event.target as HTMLSelectElement).value;
   }
 
-  /** Open the run drawer and fetch this run's own session transcript once. */
+  /** Open the run drawer: list row renders instantly, detail + transcript load individually. */
   protected async open(run: RunRow): Promise<void> {
     const seq = ++this.detailSeq;
     this.selected.set(run);
+    this.detail.set(null);
+    this.detailError.set(null);
+    this.detailLoading.set(false);
     this.drawerEntries.set([]);
     this.drawerError.set(null);
+    const loads: Array<Promise<void>> = [];
+    if (run.session || run.tick !== null) {
+      loads.push(this.fetchDetail(run, seq));
+    }
     if (!run.session) {
       this.drawerLoading.set(false);
-      return;
+    } else {
+      const directory = this.store.health()?.directory;
+      if (!directory) {
+        this.drawerLoading.set(false);
+        this.drawerError.set('backend directory unavailable');
+      } else {
+        loads.push(this.fetchTranscript(run.session, directory, seq));
+      }
     }
-    const directory = this.store.health()?.directory;
-    if (!directory) {
-      this.drawerLoading.set(false);
-      this.drawerError.set('backend directory unavailable');
-      return;
+    await Promise.allSettled(loads);
+  }
+
+  protected reload(): void {
+    const run = this.selected();
+    if (run) void this.open(run);
+  }
+
+  private async fetchDetail(run: RunRow, seq: number): Promise<void> {
+    this.detailLoading.set(true);
+    try {
+      const detail = await this.api.runDetail({
+        session: run.session,
+        tick: run.tick,
+        mission: run.mission,
+      });
+      if (seq !== this.detailSeq) return;
+      this.detail.set(detail);
+    } catch (err) {
+      if (seq !== this.detailSeq) return;
+      this.detailError.set(errorText(err));
+    } finally {
+      if (seq === this.detailSeq) this.detailLoading.set(false);
     }
+  }
+
+  private async fetchTranscript(session: string, directory: string, seq: number): Promise<void> {
     this.drawerLoading.set(true);
     try {
-      const rows = await this.api.sessionMessages(run.session, directory);
+      const rows = await this.api.sessionMessages(session, directory);
       if (seq !== this.detailSeq) return;
       this.drawerEntries.set(mapSessionMessages(rows));
     } catch (err) {
@@ -117,6 +158,9 @@ export class QueuesPage {
   protected close(): void {
     this.detailSeq++;
     this.selected.set(null);
+    this.detail.set(null);
+    this.detailLoading.set(false);
+    this.detailError.set(null);
     this.drawerEntries.set([]);
     this.drawerLoading.set(false);
     this.drawerError.set(null);

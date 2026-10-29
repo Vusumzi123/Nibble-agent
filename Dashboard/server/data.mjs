@@ -846,7 +846,8 @@ export function readRuns(dir, paths, options = {}) {
     (run) =>
       (!options.mission || run.mission === options.mission) &&
       (!options.kind || run.kind === options.kind) &&
-      (!options.outcome || run.outcome === options.outcome),
+      (!options.outcome || run.outcome === options.outcome) &&
+      (!options.session || run.session === options.session),
   );
 
   return {
@@ -856,6 +857,52 @@ export function readRuns(dir, paths, options = {}) {
     available: runs.length > 0,
     hours,
   };
+}
+
+/** Single-run lookup for the drawer: one enriched run + its session breakdown. */
+export function readRunDetail(dir, paths, params = {}) {
+  const session = params.session || null;
+  const rawTick = params.tick;
+  const tick =
+    rawTick !== null && rawTick !== undefined && rawTick !== '' && Number.isFinite(Number(rawTick))
+      ? Number(rawTick)
+      : null;
+  const mission = params.mission || null;
+  const snapshot = readRuns(dir, paths, {
+    limit: 20,
+    hours: 24 * 30,
+    session: session || undefined,
+    mission: !session && mission ? mission : undefined,
+  });
+  const run =
+    snapshot.runs.find(
+      (row) =>
+        (!session || row.session === session) &&
+        (tick === null || row.tick === tick) &&
+        (session || !mission || row.mission === mission),
+    ) ??
+    (tick !== null && !session ? snapshot.runs.find((row) => row.tick === tick) ?? null : null);
+
+  let sessionDetail = null;
+  if (run?.session) {
+    const row = sessionsByIds(dir, [run.session]).get(run.session);
+    if (row) {
+      sessionDetail = {
+        id: row.id,
+        title: row.title ?? null,
+        model: row.modelLabel ?? null,
+        cost: row.cost ?? null,
+        tokens_in: row.tokensIn ?? null,
+        tokens_out: row.tokensOut ?? null,
+        tokens_reasoning: row.tokensReasoning ?? null,
+        cache_read: row.cacheRead ?? null,
+        cache_write: row.cacheWrite ?? null,
+        started_ms: row.created ?? null,
+        finished_ms: row.updated ?? null,
+      };
+    }
+  }
+  return { run: run ?? null, session: sessionDetail };
 }
 
 /* ----------------------------------------------------------------- metrics */
