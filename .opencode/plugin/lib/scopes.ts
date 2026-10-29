@@ -26,35 +26,70 @@
 //
 // Allow rules are anchored to these EXACT paths. A bare `**/<name>/**` would
 // auto-allow edits under ANY directory with that name anywhere on the machine,
-// which is an unnecessary privilege grant. The permission engine matches paths
-// in absolute-minus-leading-slash form, so each anchor is emitted in both the
-// absolute and the slash-stripped form.
+// which is an unnecessary privilege grant. Each anchor is emitted in three
+// forms because the permission engine is form-sensitive and does no
+// normalization (anomalyco/opencode#53365):
+//
+//   absolute        /home/u/proj/Brain/**   — direct/absolute callers
+//   slash-stripped  home/u/proj/Brain/**    — absolute-minus-leading-slash
+//   worktree-rel.   Brain/**                — what tool/edit.ts passes:
+//                                             path.relative(worktree, file)
+//
+// The worktree-relative form is the one native `edit` needs on 1.19.x. Without
+// it an absolute anchor can never match the relative resource, so the `*`
+// fallback wins — and in a headless subagent that is an `ask` that never
+// resolves. Absolute/slash forms stay for callers that pass absolute paths.
+
+import { isAbsolute, relative } from "node:path"
 
 type PermissionMap = Record<string, "allow" | "ask" | "deny">
 
-// Append the two anchored allow globs for `dirAbs` onto an existing rule map.
+const toPosix = (p: string): string => p.replaceAll("\\", "/")
+
+// Worktree-relative anchor for `dirAbs` (e.g. "Brain"), or null when it cannot
+// be expressed relative to the worktree (outside it, or on another Windows
+// drive). The engine compares resources verbatim, so this must reproduce
+// exactly what tool/edit.ts builds: path.relative(worktree, filePath).
+export function worktreeRelativeAnchor(
+  worktreeAbs: string | undefined,
+  dirAbs: string,
+): string | null {
+  if (!worktreeAbs || !isAbsolute(worktreeAbs) || !isAbsolute(dirAbs)) return null
+  const rel = toPosix(relative(worktreeAbs, dirAbs))
+  if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith("../")) return null
+  return rel
+}
+
+// Append the anchored allow globs for `dirAbs` onto an existing rule map.
 // Insertion order matters: the engine honors the LAST matching rule, so the
-// caller's broad fallback (ask/deny) must already be first.
-export function appendAnchoredAllows(rules: PermissionMap, dirAbs: string): PermissionMap {
+// caller's broad fallback (ask/deny) must already be first. Pass `worktreeAbs`
+// to add the worktree-relative form the native `edit` tool needs.
+export function appendAnchoredAllows(
+  rules: PermissionMap,
+  dirAbs: string,
+  worktreeAbs?: string,
+): PermissionMap {
   rules[`${dirAbs}/**`] = "allow"
   rules[`${dirAbs.replace(/^\/+/, "")}/**`] = "allow"
+  const rel = worktreeRelativeAnchor(worktreeAbs, dirAbs)
+  if (rel) rules[`${rel}/**`] = "allow"
   return rules
 }
 
 // Vault scope rule map: everything asks except the vault directory.
-export function vaultEditRules(vaultDirAbs: string): PermissionMap {
-  return appendAnchoredAllows({ "*": "ask" }, vaultDirAbs)
+export function vaultEditRules(vaultDirAbs: string, worktreeAbs?: string): PermissionMap {
+  return appendAnchoredAllows({ "*": "ask" }, vaultDirAbs, worktreeAbs)
 }
 
 // Log scope rule map: everything is denied except the project log directory.
-export function logEditRules(logDirAbs: string): PermissionMap {
-  return appendAnchoredAllows({ "*": "deny" }, logDirAbs)
+export function logEditRules(logDirAbs: string, worktreeAbs?: string): PermissionMap {
+  return appendAnchoredAllows({ "*": "deny" }, logDirAbs, worktreeAbs)
 }
 
 // Diagram scope rule map: everything asks except the diagrams directory. The
 // `ask` fallback (not deny) is required to keep the edit/write tools enabled.
-export function diagramEditRules(diagramsDirAbs: string): PermissionMap {
-  return appendAnchoredAllows({ "*": "ask" }, diagramsDirAbs)
+export function diagramEditRules(diagramsDirAbs: string, worktreeAbs?: string): PermissionMap {
+  return appendAnchoredAllows({ "*": "ask" }, diagramsDirAbs, worktreeAbs)
 }
 
 // MCP tool groups that can MUTATE vault content, allowed silently for
@@ -70,13 +105,13 @@ export const VAULT_MCP_WRITE_TOOLS = [
 // Apply the vault scope: rag-brain edit allow + MCP VAULT_PATH + MCP write
 // tools. The top-level `permission.edit` is deliberately left untouched — the
 // main agent must stay on `ask` for vault writes.
-export function applyVaultScope(cfg: any, vaultDirAbs: string): void {
+export function applyVaultScope(cfg: any, vaultDirAbs: string, worktreeAbs?: string): void {
   if (!vaultDirAbs) return
 
   const ragBrain = cfg.agent?.["rag-brain"]
   if (ragBrain) {
     ragBrain.permission = ragBrain.permission ?? {}
-    ragBrain.permission.edit = vaultEditRules(vaultDirAbs)
+    ragBrain.permission.edit = vaultEditRules(vaultDirAbs, worktreeAbs)
     for (const tool of VAULT_MCP_WRITE_TOOLS) ragBrain.permission[tool] = "allow"
   }
 
@@ -89,9 +124,9 @@ export function applyVaultScope(cfg: any, vaultDirAbs: string): void {
 
 // Apply the log scope to deny-everything-else agents: keeps their existing
 // broad `deny` first, then appends the anchored log-dir allows.
-export function applyLogScope(cfg: any, logDirAbs: string): void {
+export function applyLogScope(cfg: any, logDirAbs: string, worktreeAbs?: string): void {
   if (!logDirAbs) return
-  const logRules = logEditRules(logDirAbs)
+  const logRules = logEditRules(logDirAbs, worktreeAbs)
   for (const name of ["security-locks"]) {
     const agent = cfg.agent?.[name]
     if (!agent) continue
@@ -109,22 +144,24 @@ export function applyLogScope(cfg: any, logDirAbs: string): void {
 }
 
 // Apply the diagram scope: diagram-developer edit allow inside <diagramsDir>.
-export function applyDiagramScope(cfg: any, diagramsDirAbs: string): void {
+export function applyDiagramScope(cfg: any, diagramsDirAbs: string, worktreeAbs?: string): void {
   if (!diagramsDirAbs) return
   const agent = cfg.agent?.["diagram-developer"]
   if (!agent) return
   agent.permission = agent.permission ?? {}
-  agent.permission.edit = diagramEditRules(diagramsDirAbs)
+  agent.permission.edit = diagramEditRules(diagramsDirAbs, worktreeAbs)
 }
 
-// Apply all scopes from resolved absolute roots.
+// Apply all scopes from resolved absolute roots. `worktreeAbs` is the project's
+// git worktree root (the base tool/edit.ts uses for its relative resource).
 export function applyConfig(
   cfg: any,
   vaultDirAbs: string,
   logDirAbs: string,
   diagramsDirAbs: string,
+  worktreeAbs?: string,
 ): void {
-  applyVaultScope(cfg, vaultDirAbs)
-  applyLogScope(cfg, logDirAbs)
-  applyDiagramScope(cfg, diagramsDirAbs)
+  applyVaultScope(cfg, vaultDirAbs, worktreeAbs)
+  applyLogScope(cfg, logDirAbs, worktreeAbs)
+  applyDiagramScope(cfg, diagramsDirAbs, worktreeAbs)
 }

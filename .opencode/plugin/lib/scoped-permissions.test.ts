@@ -56,21 +56,23 @@ test("paths: expandHome handles bare ~ and ~/ forms", () => {
   assert.equal(expandHome("rel", HOME), "rel")
 })
 
-test("vault rules: ask fallback + only anchored allows (no **/Brain/**)", () => {
-  const rules = vaultEditRules(vaultDir())
+test("vault rules: ask fallback + anchored allows incl. the worktree-relative form", () => {
+  const rules = vaultEditRules(vaultDir(), DIR)
   assert.equal(rules["*"], "ask")
   assert.equal(rules[`${vaultDir()}/**`], "allow")
   assert.equal(rules[`${strip(vaultDir())}/**`], "allow")
-  assert.equal(Object.keys(rules).length, 3)
+  assert.equal(rules[`${DEFAULT_PATHS.vault}/**`], "allow", "relative form native edit needs")
+  assert.equal(Object.keys(rules).length, 4)
   assert.equal(rules["**/Brain/**"], undefined)
 })
 
-test("log rules: deny fallback + only anchored allows (no **/.opencode/logs/**)", () => {
-  const rules = logEditRules(logDir())
+test("log rules: deny fallback + anchored allows incl. the worktree-relative form", () => {
+  const rules = logEditRules(logDir(), DIR)
   assert.equal(rules["*"], "deny")
   assert.equal(rules[`${logDir()}/**`], "allow")
   assert.equal(rules[`${strip(logDir())}/**`], "allow")
-  assert.equal(Object.keys(rules).length, 3)
+  assert.equal(rules[`${DEFAULT_PATHS.log}/**`], "allow")
+  assert.equal(Object.keys(rules).length, 4)
   assert.equal(rules["**/.opencode/logs/**"], undefined)
 })
 
@@ -80,13 +82,14 @@ test("applyVaultScope leaves the top-level edit alone; allows only rag-brain vau
     agent: { "rag-brain": { permission: { "markdown-vault_edit": "deny" } } },
     mcp: { "markdown-vault": { environment: {} } },
   }
-  applyVaultScope(cfg, vaultDir())
+  applyVaultScope(cfg, vaultDir(), DIR)
   assert.deepEqual(cfg.permission.edit, { "*": "ask" }, "main agent keeps ask-only")
   assert.equal(cfg.permission.edit[`**/${DEFAULT_PATHS.vault}/**`], undefined)
   assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_edit"], "deny")
   assert.equal(cfg.agent["rag-brain"].permission.edit["*"], "ask")
   assert.equal(cfg.agent["rag-brain"].permission.edit[`${vaultDir()}/**`], "allow")
   assert.equal(cfg.agent["rag-brain"].permission.edit[`${strip(vaultDir())}/**`], "allow")
+  assert.equal(cfg.agent["rag-brain"].permission.edit[`${DEFAULT_PATHS.vault}/**`], "allow")
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
 })
 
@@ -120,20 +123,22 @@ test("applyLogScope appends anchored allows to security-locks, preserving deny",
       "rag-brain": { permission: {} },
     },
   }
-  applyLogScope(cfg, logDir())
+  applyLogScope(cfg, logDir(), DIR)
   const edit = cfg.agent["security-locks"].permission.edit
   assert.equal(edit["*"], "deny")
   assert.equal(edit[`${logDir()}/**`], "allow")
   assert.equal(edit[`${strip(logDir())}/**`], "allow")
+  assert.equal(edit[`${DEFAULT_PATHS.log}/**`], "allow")
   assert.equal(cfg.agent["rag-brain"].permission.edit, undefined, "other agents untouched")
 })
 
-test("diagram rules: ask fallback + only anchored allows (no **/diagrams/**)", () => {
-  const rules = diagramEditRules(diagramsDir())
+test("diagram rules: ask fallback + anchored allows incl. the worktree-relative form", () => {
+  const rules = diagramEditRules(diagramsDir(), DIR)
   assert.equal(rules["*"], "ask")
   assert.equal(rules[`${diagramsDir()}/**`], "allow")
   assert.equal(rules[`${strip(diagramsDir())}/**`], "allow")
-  assert.equal(Object.keys(rules).length, 3)
+  assert.equal(rules[`${DEFAULT_PATHS.diagrams}/**`], "allow")
+  assert.equal(Object.keys(rules).length, 4)
   assert.equal(rules["**/diagrams/**"], undefined)
 })
 
@@ -144,11 +149,12 @@ test("applyDiagramScope grants only diagram-developer anchored diagram edits", (
       "web-developer": { permission: { edit: { "*": "ask" } } },
     },
   }
-  applyDiagramScope(cfg, diagramsDir())
+  applyDiagramScope(cfg, diagramsDir(), DIR)
   const edit = cfg.agent["diagram-developer"].permission.edit
   assert.equal(edit["*"], "ask")
   assert.equal(edit[`${diagramsDir()}/**`], "allow")
   assert.equal(edit[`${strip(diagramsDir())}/**`], "allow")
+  assert.equal(edit[`${DEFAULT_PATHS.diagrams}/**`], "allow")
   assert.deepEqual(cfg.agent["web-developer"].permission.edit, { "*": "ask" }, "other agents untouched")
 })
 
@@ -162,9 +168,10 @@ test("applyConfig wires all three scopes from resolved roots", () => {
     },
     mcp: { "markdown-vault": { environment: {} } },
   }
-  applyConfig(cfg, vaultDir(), logDir(), diagramsDir())
+  applyConfig(cfg, vaultDir(), logDir(), diagramsDir(), DIR)
   assert.equal(cfg.permission.edit, undefined, "no vault allow injected at top level")
   assert.equal(cfg.agent["rag-brain"].permission.edit[`${strip(vaultDir())}/**`], "allow")
+  assert.equal(cfg.agent["rag-brain"].permission.edit[`${DEFAULT_PATHS.vault}/**`], "allow")
   assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_vault"], "allow")
   assert.equal(cfg.agent["rag-brain"].permission["markdown-vault_system"], "allow")
   assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
@@ -172,10 +179,22 @@ test("applyConfig wires all three scopes from resolved roots", () => {
   assert.equal(cfg.agent["diagram-developer"].permission.edit[`${strip(diagramsDir())}/**`], "allow")
 })
 
-test("appendAnchoredAllows emits both absolute and slash-stripped forms", () => {
-  const rules = appendAnchoredAllows({ "*": "ask" }, "/etc/foo")
-  assert.equal(rules["/etc/foo/**"], "allow")
-  assert.equal(rules["etc/foo/**"], "allow")
+test("appendAnchoredAllows emits absolute, slash-stripped, and worktree-relative forms", () => {
+  const rules = appendAnchoredAllows({ "*": "ask" }, join(DIR, "Brain"), DIR)
+  assert.equal(rules[`${join(DIR, "Brain")}/**`], "allow")
+  assert.equal(rules[`${strip(join(DIR, "Brain"))}/**`], "allow")
+  assert.equal(rules["Brain/**"], "allow")
+})
+
+test("appendAnchoredAllows skips the relative form when the dir escapes the worktree", () => {
+  const rules = appendAnchoredAllows({ "*": "deny" }, "/etc/foo", DIR)
+  assert.deepEqual(Object.keys(rules).sort(), ["*", "/etc/foo/**", "etc/foo/**"].sort())
+  assert.equal(rules["../../etc/foo/**"], undefined)
+})
+
+test("appendAnchoredAllows skips the relative form without a worktree", () => {
+  const rules = appendAnchoredAllows({ "*": "ask" }, join(DIR, "Brain"))
+  assert.equal(Object.keys(rules).length, 3)
 })
 
 test("no-ops safely without a directory/home", () => {

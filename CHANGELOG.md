@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-29
+
+### Fixed
+
+- **Permission scopes emit the worktree-relative anchor.** `tool/edit.ts` hands
+  the permission engine `path.relative(worktree, filePath)`, but
+  `scoped-permissions.ts` only wrote absolute and slash-stripped rule keys, so
+  the anchored allows never matched and the `"*": "ask"` fallback fired
+  (upstream: anomalyco/opencode#53365). In a headless drain the `rag-brain`
+  writer then blocked on an unanswered prompt until the 10-minute stall
+  watchdog aborted it. `appendAnchoredAllows` now takes the worktree root and
+  adds `<worktree-relative>/**` (e.g. `Brain/**`) for the vault, log, and
+  diagram scopes; `scoped-permissions.ts` warns at startup when the vault lies
+  outside the worktree.
+
 ## 2026-10-28
 
 ### Changed
