@@ -3,6 +3,13 @@ description: Stores and synthesizes knowledge in the Brain Obsidian vault (./Bra
 mode: subagent
 color: "#FFD700"
 steps: 20
+permission:
+  markdown-vault_edit: deny
+  task: deny
+  edit:
+    "*": deny
+    "Brain/**": allow
+    "**/Brain/**": allow
 ---
 
 # RAG Brain — Hybrid Knowledge Retrieval Agent

@@ -97,7 +97,15 @@
       "mode": "subagent",
       "color": "#FFD700",
       "tools": { "markdown-vault_*": true },
-      "permission": { "markdown-vault_edit": "deny", "task": "deny" }
+      "permission": {
+        "markdown-vault_edit": "deny",
+        "task": "deny",
+        "edit": {
+          "*": "deny",
+          "Brain/**": "allow",
+          "**/Brain/**": "allow"
+        }
+      }
     },
     "memory-explorer": {
       "mode": "subagent",
