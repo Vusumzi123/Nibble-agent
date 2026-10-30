@@ -1,11 +1,11 @@
-// Read-only data layer over the live Kael harness: state files, NDJSON logs,
+// Read-only data layer over the live agent harness: state files, NDJSON logs,
 // and the opencode SQLite database (cost / model / timestamps).
 //
 // Every function degrades to null/empty when a source is missing. Nothing here
 // writes except the explicit settings/mission helpers in settings.mjs.
 
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
-import { join, resolve, isAbsolute } from 'node:path';
+import { join, resolve, isAbsolute, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -239,7 +239,7 @@ function query(sql, params = []) {
 }
 
 function sessionColumns() {
-  return `id, parent_id AS parentID, title, model, cost,
+  return `id, parent_id AS parentID, title, agent, model, cost,
           tokens_input AS tokensIn, tokens_output AS tokensOut,
           tokens_reasoning AS tokensReasoning,
           tokens_cache_read AS cacheRead, tokens_cache_write AS cacheWrite,
@@ -890,6 +890,7 @@ export function readRunDetail(dir, paths, params = {}) {
       sessionDetail = {
         id: row.id,
         title: row.title ?? null,
+        agent: row.agent ?? null,
         model: row.modelLabel ?? null,
         cost: row.cost ?? null,
         tokens_in: row.tokensIn ?? null,
@@ -1225,9 +1226,11 @@ export function healthInfo(dir, state, paths) {
     (state.serveUrl || '').trim() ||
     runtime?.opencode?.url ||
     '';
+  const configured = String(readConfig(dir).data?.dashboard?.display_name ?? '').trim();
   return {
     ok: true,
     directory: dir,
+    display_name: configured || basename(resolve(dir)),
     serve_url: serveUrl || null,
     serve_ok: null,
     auth: 'csrf',

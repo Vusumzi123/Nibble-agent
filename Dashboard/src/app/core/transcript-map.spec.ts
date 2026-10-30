@@ -8,10 +8,22 @@ function row(parts: NonNullable<MessageRow['parts']>): MessageRow {
 }
 
 describe('mapSessionMessages', () => {
-  it('maps text parts to text entries with the "kael" label for assistants', () => {
-    const out = mapSessionMessages([row([{ type: 'text', text: 'hello' }])]);
+  it('labels assistant text with the display name when the message has no agent', () => {
+    const out = mapSessionMessages([row([{ type: 'text', text: 'hello' }])], 'nemu');
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ role: 'assistant', kind: 'text', label: 'kael', body: 'hello', ts: 1700000000000 });
+    expect(out[0]).toMatchObject({ role: 'assistant', kind: 'text', label: 'nemu', body: 'hello', ts: 1700000000000 });
+  });
+
+  it('labels assistant text with its agent, mapping build to the display name', () => {
+    const out = mapSessionMessages(
+      [
+        { info: { role: 'assistant', agent: 'rag-search' }, parts: [{ type: 'text', text: 'a' }] },
+        { info: { role: 'assistant', agent: 'build' }, parts: [{ type: 'text', text: 'b' }] },
+        { info: { role: 'assistant' }, parts: [{ type: 'text', text: 'c' }] },
+      ],
+      'nemu',
+    );
+    expect(out.map((e) => e.label)).toEqual(['rag-search', 'nemu', 'nemu']);
   });
 
   it('labels user text entries by role', () => {

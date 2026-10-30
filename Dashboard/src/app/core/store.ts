@@ -89,6 +89,8 @@ export class DashboardStore {
   private loadingScope: Scope | null = null;
   private lastSession: string | null = null;
 
+  /** Persona name for the console; config-driven, project-dir fallback. */
+  readonly displayName = computed(() => this.health()?.display_name?.trim() || 'agent');
   readonly current = computed(() => this.heartbeat()?.current ?? null);
   readonly schedule = computed(() => this.heartbeat()?.schedule ?? null);
   readonly level = computed(() => this.heartbeat()?.schedule.level ?? null);
@@ -397,7 +399,7 @@ export class DashboardStore {
     this.lastSession = session;
     try {
       const rows = await this.api.sessionMessages(session, directory);
-      if (rows.length) this.transcript.set(mapSessionMessages(rows));
+      if (rows.length) this.transcript.set(mapSessionMessages(rows, this.displayName()));
     } catch {
       /* keep the last transcript */
     }

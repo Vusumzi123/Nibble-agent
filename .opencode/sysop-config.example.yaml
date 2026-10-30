@@ -15,6 +15,11 @@ vault:
   # The agent reads but never writes; enforced by vault-readonly-guard.ts.
   readonly: Journal
 
+dashboard:
+  # Console identity shown in the Nibble Dashboard and run transcripts.
+  # Empty = the project directory name (set by setup.sh from REPO_ROOT).
+  display_name: ""
+
 audit:
   # L5 audit trail: every bash command appended on tool.execute.after, redacted,
   # deterministic, no LLM (audit-hook.ts + lib/audit.ts). BARE rotation keys.

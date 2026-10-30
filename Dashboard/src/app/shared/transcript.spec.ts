@@ -9,7 +9,7 @@ function entries(...bodies: string[]): TranscriptEntry[] {
     id: String(i),
     role: 'assistant',
     kind: 'text',
-    label: 'kael',
+    label: 'agent',
     body,
     ts: 1700000000000 + i,
   }));
@@ -47,7 +47,7 @@ describe('Transcript', () => {
     fixture.componentRef.setInput('entries', entries('a', 'b'));
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelectorAll('article.msg')).toHaveLength(2);
-    expect(fixture.nativeElement.textContent).toContain('kael');
+    expect(fixture.nativeElement.textContent).toContain('agent');
   });
 
   it('filters by kind via the segment buttons', () => {

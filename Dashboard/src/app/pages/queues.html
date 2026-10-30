@@ -234,6 +234,7 @@
           } @else if (detail()?.session; as session) {
             <dl class="kv kv--dense">
               <dt>title</dt><dd class="mono ellipsis">{{ session.title ?? '—' }}</dd>
+              <dt>agent</dt><dd class="mono">{{ session.agent ?? '—' }}</dd>
               <dt>model</dt><dd class="mono ellipsis">{{ session.model ?? '—' }}</dd>
               <dt>tokens in / out</dt><dd class="mono">{{ fmtTokens(session.tokens_in ?? 0) }} / {{ fmtTokens(session.tokens_out ?? 0) }}</dd>
               <dt>reasoning</dt><dd class="mono">{{ fmtTokens(session.tokens_reasoning ?? 0) }}</dd>

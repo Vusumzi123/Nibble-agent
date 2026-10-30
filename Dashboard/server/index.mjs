@@ -1,4 +1,4 @@
-// Nibble Dashboard v2 backend — thin read/write API over the live Kael
+// Nibble Dashboard v2 backend — thin read/write API over the live agent
 // harness. Serves the built Angular app and proxies the opencode serve API.
 //
 //   node --no-warnings server/index.mjs

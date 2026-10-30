@@ -146,7 +146,7 @@ export class QueuesPage {
     try {
       const rows = await this.api.sessionMessages(session, directory);
       if (seq !== this.detailSeq) return;
-      this.drawerEntries.set(mapSessionMessages(rows));
+      this.drawerEntries.set(mapSessionMessages(rows, this.store.displayName()));
     } catch (err) {
       if (seq !== this.detailSeq) return;
       this.drawerError.set(errorText(err));

@@ -426,6 +426,31 @@ else
   echo "  $CONFIG exists (kept)"
 fi
 
+# 3a. console identity — dashboard.display_name (config wins over dir name)
+CUR_NAME="$(awk '
+  /^dashboard:[[:space:]]*(#.*)?$/ { inb=1; next }
+  inb && /^[^[:space:]#]/ { inb=0 }
+  inb && /^[[:space:]]+display_name:[[:space:]]*/ {
+    sub(/^[[:space:]]+display_name:[[:space:]]*/, "");
+    sub(/[[:space:]]+#.*$/, "");
+    print; exit
+  }
+' "$CONFIG" 2>/dev/null || true)"
+CUR_NAME="${CUR_NAME%\"}"; CUR_NAME="${CUR_NAME#\"}"
+if [ -z "$CUR_NAME" ]; then
+  DEFAULT_NAME="$(basename "$REPO_ROOT")"
+  AGENT_NAME="$(ask 'Agent display name' "$DEFAULT_NAME")"
+  if [ -n "$AGENT_NAME" ]; then
+    if [ "$DRY" -eq 1 ]; then
+      echo "  [dry-run] dashboard.display_name = $AGENT_NAME"
+    else
+      ensure_block_key "$CONFIG" dashboard display_name "$AGENT_NAME"
+      CHANGED+=("$CONFIG")
+      echo "  dashboard.display_name = $AGENT_NAME"
+    fi
+  fi
+fi
+
 if [ "$FRESH_CONFIG" -eq 1 ]; then
   if [ "$LLM_OK" -eq 1 ]; then
     echo "== models =="

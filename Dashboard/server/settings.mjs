@@ -1,4 +1,4 @@
-// Settings schema + safe YAML editing for the live Kael harness.
+// Settings schema + safe YAML editing for the live agent harness.
 //
 // The schema mirrors the keys the running plugin actually reads (config.ts /
 // autonomy.ts / heartbeat.ts / drain/config.ts and the other section readers).
@@ -165,7 +165,7 @@ export const SECTIONS = [
     restart: false,
     fields: [
       f('enabled', 'bool', { default: true }),
-      f('bucket_file', 'string', { default: 'Kael Ideas.md' }),
+      f('bucket_file', 'string', { default: 'Ideas.md' }),
       f('daily_weights', 'string', { default: '25,55,20' }),
       f('category_weights', 'string', { default: '1,1,1' }),
       f('dedupe_threshold', 'float', { min: 0, max: 1, default: 0.6 }),
@@ -335,6 +335,7 @@ export const SECTIONS = [
       f('port', 'int', { min: 0, max: 65535, default: 0 }),
       f('serve_port', 'int', { min: 0, max: 65535, default: 0 }),
       f('serve_url', 'string', { default: '', help: 'Empty = live pointer; otherwise loopback only.' }),
+      f('display_name', 'string', { default: '', help: 'Agent name shown in the console and run transcripts. Empty = project directory name.' }),
       f('auth.mode', 'enum', { options: ['off', 'login', 'login+2fa'], default: 'off', readOnly: true }),
       f('auth.require_tls', 'bool', { default: false, readOnly: true }),
     ],

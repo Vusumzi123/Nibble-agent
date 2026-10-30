@@ -60,3 +60,36 @@ for(let i=bi+1;i<end;i++){ if(kRe.test(lines[i])){ lines.splice(i,1); break; } }
 fs.writeFileSync(f,lines.join("\n"));
 ' "$1" "$2" "$3"
 }
+
+ensure_block_key() { # ensure_block_key <file> <block> <key> <default-value>
+  # Create <block> when absent and set <key> only when it is missing or has an
+  # empty value. Existing non-empty values are preserved (user edits win).
+  node -e '
+const fs=require("fs"),f=process.argv[1],block=process.argv[2],key=process.argv[3],val=process.argv[4];
+const lines=fs.readFileSync(f,"utf8").split("\n");
+const esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+const bRe=new RegExp("^"+esc(block)+":\\s*(#.*)?$");
+let bi=-1;
+for(let i=0;i<lines.length;i++){ if(bRe.test(lines[i])){ bi=i; break; } }
+if(bi<0){
+  if(lines.length && lines[lines.length-1].trim()!=="") lines.push("");
+  lines.push(block+":", "  "+key+": "+JSON.stringify(val));
+  fs.writeFileSync(f,lines.join("\n"));
+  process.exit(0);
+}
+let end=bi+1;
+for(; end<lines.length; end++){ const l=lines[end]; if(l.trim()===""||!/^\s/.test(l)) break; }
+const kRe=new RegExp("^(\\s+)"+esc(key)+":\\s*(.*)$");
+for(let i=bi+1;i<end;i++){
+  const m=lines[i].match(kRe);
+  if(m){
+    const cur=m[2].replace(/\s+#.*$/,"").trim().replace(/^"|"$/g,"");
+    if(cur==="") lines[i]="  "+key+": "+JSON.stringify(val);
+    fs.writeFileSync(f,lines.join("\n"));
+    process.exit(0);
+  }
+}
+lines.splice(end,0,"  "+key+": "+JSON.stringify(val));
+fs.writeFileSync(f,lines.join("\n"));
+' "$1" "$2" "$3" "$4"
+}

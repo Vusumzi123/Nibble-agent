@@ -1,10 +1,11 @@
 // Wire types for the v2 dashboard backend (Dashboard/server). Shapes follow
-// the live Kael harness: unified work queue, real session cost from opencode.db,
+// the live agent harness: unified work queue, real session cost from opencode.db,
 // gate/decision ledgers, and the full sysop-config schema.
 
 export interface Health {
   ok: boolean;
   directory: string;
+  display_name: string;
   serve_url: string | null;
   serve_ok: boolean | null;
   auth: string;
@@ -215,6 +216,7 @@ export interface RunsSnapshot {
 export interface SessionDetail {
   id: string;
   title: string | null;
+  agent: string | null;
   model: string | null;
   cost: number | null;
   tokens_in: number | null;
@@ -465,7 +467,7 @@ export interface TranscriptEntry {
 }
 
 export interface MessageRow {
-  info?: { id?: string; role?: string; time?: { created?: number } };
+  info?: { id?: string; role?: string; agent?: string; time?: { created?: number } };
   parts?: Array<{
     type?: string;
     text?: string;
