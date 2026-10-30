@@ -49,7 +49,15 @@ import {
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const DIR = resolve(process.env['KAEL_DIR'] || join(HERE, '..', '..'));
-const PORT = Number(process.env['DASHBOARD_PORT'] || 4097);
+const CONFIG_PORT = (() => {
+  try {
+    const port = readConfig(DIR).data?.dashboard?.port;
+    return typeof port === 'number' ? port : null;
+  } catch {
+    return null;
+  }
+})();
+const PORT = Number(process.env['DASHBOARD_PORT'] || (CONFIG_PORT ?? 4097));
 const HOST = process.env['DASHBOARD_HOST'] || '127.0.0.1';
 const DIST = resolve(process.env['DASHBOARD_DIST'] || join(HERE, '..', 'dist'));
 

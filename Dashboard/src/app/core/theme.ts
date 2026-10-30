@@ -34,6 +34,7 @@ interface Persisted {
   theme: ThemeId;
   accent: AccentId;
   density: Density;
+  accentUser?: boolean;
 }
 
 const DEFAULTS: Persisted = { theme: 'nibble', accent: 'lime', density: 'compact' };
@@ -47,6 +48,10 @@ export class ThemeService {
   readonly accent = signal<AccentId>(DEFAULTS.accent);
   readonly density = signal<Density>(DEFAULTS.density);
 
+  /** True once the user picks an accent in this browser (UI or ?accent=).
+   *  Until then the configured `dashboard.accent` owns the accent. */
+  private accentUser = false;
+
   constructor() {
     this.restore();
   }
@@ -57,8 +62,18 @@ export class ThemeService {
   }
 
   setAccent(accent: AccentId): void {
+    this.accentUser = true;
     this.accent.set(accent);
     this.apply();
+  }
+
+  /** Apply the config-file accent as the default; a user pick always wins. */
+  applyConfiguredAccent(accent: string): void {
+    if (this.accentUser) return;
+    if (!this.accents.some((a) => a.id === accent)) return;
+    if (this.accent() === accent) return;
+    this.accent.set(accent as AccentId);
+    document.documentElement.dataset['accent'] = accent;
   }
 
   setDensity(density: Density): void {
@@ -81,7 +96,10 @@ export class ThemeService {
       if (raw) {
         const saved = JSON.parse(raw) as Partial<Persisted>;
         if (saved.theme === 'nibble' || saved.theme === 'nibble-light') this.theme.set(saved.theme);
-        if (this.accents.some((a) => a.id === saved.accent)) this.accent.set(saved.accent as AccentId);
+        if (this.accents.some((a) => a.id === saved.accent)) {
+          this.accent.set(saved.accent as AccentId);
+          this.accentUser = saved.accentUser ?? true;
+        }
         if (saved.density === 'compact' || saved.density === 'comfortable') this.density.set(saved.density);
       }
     } catch {
@@ -93,7 +111,10 @@ export class ThemeService {
       const accent = params.get('accent');
       const density = params.get('density');
       if (theme === 'nibble' || theme === 'nibble-light') this.theme.set(theme);
-      if (this.accents.some((a) => a.id === accent)) this.accent.set(accent as AccentId);
+      if (this.accents.some((a) => a.id === accent)) {
+        this.accent.set(accent as AccentId);
+        this.accentUser = true;
+      }
       if (density === 'compact' || density === 'comfortable') this.density.set(density);
     } catch {
       /* no query support */
@@ -109,7 +130,7 @@ export class ThemeService {
     try {
       localStorage.setItem(
         KEY,
-        JSON.stringify({ theme: this.theme(), accent: this.accent(), density: this.density() }),
+        JSON.stringify({ theme: this.theme(), accent: this.accent(), density: this.density(), accentUser: this.accentUser }),
       );
     } catch {
       /* storage unavailable */

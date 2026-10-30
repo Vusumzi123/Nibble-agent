@@ -1,4 +1,5 @@
-import { Component, OnDestroy, computed, inject, signal } from '@angular/core';
+import { Component, OnDestroy, computed, effect, inject, signal } from '@angular/core';
+import { Title } from '@angular/platform-browser';
 import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { Subscription } from 'rxjs';
 
@@ -29,6 +30,7 @@ export class App implements OnDestroy {
   protected readonly theme = inject(ThemeService);
   protected readonly ui = inject(UiService);
   private readonly router = inject(Router);
+  private readonly title = inject(Title);
   private readonly navSubscription: Subscription;
 
   protected readonly accents = ACCENTS;
@@ -87,6 +89,11 @@ export class App implements OnDestroy {
   });
 
   constructor() {
+    effect(() => this.title.setTitle(`${this.store.displayName()} · operator console`));
+    effect(() => {
+      const accent = this.store.health()?.accent;
+      if (accent) this.theme.applyConfiguredAccent(accent);
+    });
     const params = new URLSearchParams(location.search);
     if (params.get('palette') === '1') this.openPalette();
     if (params.get('appearance') === '1') this.themeOpen.set(true);

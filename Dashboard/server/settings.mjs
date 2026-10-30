@@ -336,6 +336,7 @@ export const SECTIONS = [
       f('serve_port', 'int', { min: 0, max: 65535, default: 0 }),
       f('serve_url', 'string', { default: '', help: 'Empty = live pointer; otherwise loopback only.' }),
       f('display_name', 'string', { default: '', help: 'Agent name shown in the console and run transcripts. Empty = project directory name.' }),
+      f('accent', 'enum', { options: ['lime', 'amber', 'cyan', 'violet', 'rose'], default: 'lime', help: 'Console accent color. A pick made in the UI overrides it for that browser.' }),
       f('auth.mode', 'enum', { options: ['off', 'login', 'login+2fa'], default: 'off', readOnly: true }),
       f('auth.require_tls', 'bool', { default: false, readOnly: true }),
     ],

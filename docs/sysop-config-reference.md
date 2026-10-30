@@ -660,6 +660,7 @@ Local web UI (§9), read by cards 8/11.
 | Key | Meaning |
 | --- | ------- |
 | `display_name` | Agent name shown in the console and run-history transcripts. Default `""` = the project directory name. `scripts/setup.sh` seeds it. |
+| `accent` | Console accent color: `lime` \| `amber` \| `cyan` \| `violet` \| `rose`. A choice made in the UI overrides it for that browser. |
 | `bind_address` | loopback only. |
 | `port` | Backend listen port (default `0` = auto, kernel-assigned). A pinned port is used when free; when busy the launcher falls back to a free port and logs it. No config rewrite. |
 | `serve_port` | opencode TUI listen port passed as `--port` (default `0` = auto). Same pinned-busy fallback as `port`. `scripts/run.sh --serve-port N` overrides. |

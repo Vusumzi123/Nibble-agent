@@ -6,6 +6,7 @@ export interface Health {
   ok: boolean;
   directory: string;
   display_name: string;
+  accent?: string;
   serve_url: string | null;
   serve_ok: boolean | null;
   auth: string;

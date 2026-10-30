@@ -16,9 +16,16 @@ vault:
   readonly: Journal
 
 dashboard:
-  # Console identity shown in the Nibble Dashboard and run transcripts.
-  # Empty = the project directory name (set by setup.sh from REPO_ROOT).
-  display_name: ""
+  # Console identity and server bind. Read at console start; auth is read-only.
+  bind_address: "127.0.0.1"  # loopback only; non-loopback is refused
+  port: 4097                 # backend listen port; 0 = auto (kernel-assigned)
+  serve_port: 0              # opencode TUI port; 0 = auto
+  serve_url: ""              # empty = live pointer; otherwise loopback only
+  display_name: ""           # console/transcript name; empty = project directory name
+  accent: lime               # lime | amber | cyan | violet | rose
+  auth:
+    mode: off                # off | login | login+2fa (read-only)
+    require_tls: false       # read-only
 
 audit:
   # L5 audit trail: every bash command appended on tool.execute.after, redacted,

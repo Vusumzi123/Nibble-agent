@@ -39,6 +39,20 @@
   font-weight: 700;
 }
 
+.brand__agent {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ph-primary);
+  border: 1px solid rgba(var(--ph-primary-rgb), 0.4);
+  background: rgba(var(--ph-primary-rgb), 0.08);
+  border-radius: 3px;
+  padding: 1px 6px;
+  align-self: center;
+  white-space: nowrap;
+}
+
 .topbar__actions {
   display: flex;
   align-items: center;

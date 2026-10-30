@@ -1226,11 +1226,14 @@ export function healthInfo(dir, state, paths) {
     (state.serveUrl || '').trim() ||
     runtime?.opencode?.url ||
     '';
-  const configured = String(readConfig(dir).data?.dashboard?.display_name ?? '').trim();
+  const dashboard = readConfig(dir).data?.dashboard ?? {};
+  const configured = String(dashboard.display_name ?? '').trim();
+  const accent = String(dashboard.accent ?? '').trim();
   return {
     ok: true,
     directory: dir,
     display_name: configured || basename(resolve(dir)),
+    accent: accent || 'lime',
     serve_url: serveUrl || null,
     serve_ok: null,
     auth: 'csrf',
