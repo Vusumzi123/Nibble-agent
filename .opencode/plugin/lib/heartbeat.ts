@@ -25,6 +25,7 @@ import { createHash } from "node:crypto"
 import { stat } from "node:fs/promises"
 import { join } from "node:path"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
+import { HEARTBEAT_CODE_FILES } from "./code-files.ts"
 import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
 import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
@@ -519,20 +520,9 @@ export async function computeDigest(
 /** Core plugin files whose on-disk mtime must not postdate the running
  *  process: when they do, this instance loaded stale code and must not run
  *  the heartbeat scheduler (a pre-warrant instance silently answered
- *  `no_reply` despite pending turns). */
-export const HEARTBEAT_CODE_FILES = [
-  ".opencode/plugin/heartbeat-hook.ts",
-  ".opencode/plugin/lib/heartbeat.ts",
-  ".opencode/plugin/lib/missions.ts",
-  ".opencode/plugin/lib/mission-result.ts",
-  ".opencode/plugin/lib/vault-stale.ts",
-  ".opencode/plugin/lib/work-queue.ts",
-  ".opencode/plugin/lib/work-producers.ts",
-  ".opencode/plugin/lib/step-registry.ts",
-  ".opencode/plugin/lib/drain/status.ts",
-  ".opencode/plugin/lib/drain/step.ts",
-  ".opencode/plugin/lib/drain/pipe.ts",
-]
+ *  `no_reply` despite pending turns). The list lives in `code-files.ts` so
+ *  adding a work kind never edits this module. */
+export { HEARTBEAT_CODE_FILES }
 
 /** Relative plugin files modified after the process started (mtime newer
  *  than `startedAtMs`, with a small clock tolerance). Missing files are not

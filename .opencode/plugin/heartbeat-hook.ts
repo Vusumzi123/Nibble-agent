@@ -21,8 +21,6 @@ import {
   HEARTBEAT_CURRENT_FILE,
   HEARTBEAT_STATE_FILE,
   HEARTBEAT_WAKE_CAP_MS,
-  HEARTBEAT_FIXED_PROMPT,
-  assembleMissionBrief,
   computeDigest,
   computeWakeDelayMs,
   effectiveFrequencyMs,
@@ -32,7 +30,6 @@ import {
   missionTimeoutMs,
   readHeartbeatConfig,
   heartbeatErrorFields,
-  missionContextHeader,
   writeHeartbeatCurrent,
   staleCodeFiles,
   type HeartbeatDigest,
@@ -42,7 +39,6 @@ import {
 import {
   DEFAULT_IDEA_STATE,
   buildIdeaReviewRequest,
-  drawCategory,
   extractIdea,
   ideaDayContext,
   ideaHash,
@@ -65,7 +61,7 @@ import { createMoodFeed } from "./lib/mood.ts"
 import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./lib/logging.ts"
 import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
-  MAX_REQUEUES,
+  DEFAULT_WORK_WEIGHTS,
   WORK_QUEUE_FILE,
   type SchedulerState,
   type WorkItem,
@@ -76,7 +72,6 @@ import {
   pruneWork,
   queueDepth,
   saveWorkQueueState,
-  stallResumeItem,
 } from "./lib/work-queue.ts"
 import { readSchedulerConfig } from "./lib/scheduler-config.ts"
 import {
@@ -84,9 +79,8 @@ import {
   collectWork,
   itemRunnable,
   itemStillDue,
-  missionIdOf,
 } from "./lib/work-producers.ts"
-import { parseMissionResult, type MissionResult } from "./lib/mission-result.ts"
+import { parseMissionResult } from "./lib/mission-result.ts"
 import {
   deterministicResumeSummary,
   renderMissionTranscript,
@@ -96,7 +90,7 @@ import {
 } from "./lib/mission-resume.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
 import { drainDue, runDrainStep } from "./lib/drain/step.ts"
-import { runSteps, type StepKind } from "./lib/step-registry.ts"
+import { runSteps } from "./lib/step-registry.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
 import { createDrainLedger } from "./lib/drain/ledger.ts"
@@ -105,6 +99,8 @@ import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
+import { handlerFor } from "./lib/work-kinds/registry.ts"
+import type { ChildOutcome, ChildRun, DispatchContext } from "./lib/work-kinds/types.ts"
 
 /** Post-abort idle confirmation budget (plan 5.2) — never the tick budget. */
 const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
@@ -607,6 +603,41 @@ export default (async ({ client, directory, ...rest }) => {
     }
   }
 
+  // Mission record in the action queue (§7, §10): `source: "heartbeat"` with
+  // the reserved result.token_cost filled, then the one-way view refresh.
+  // Best-effort — a ledger failure never fails the tick.
+  const recordBacklog = async (entry: {
+    title: string
+    detail: string
+    failed: boolean
+    summary: string
+    token_cost: number
+  }): Promise<void> => {
+    try {
+      const backlogCfg = await readBacklogConfig(dir)
+      if (!backlogCfg.enabled) return
+      const backlogFile = resolveBacklogFile(stateDir, backlogCfg)
+      const { entry: record } = await append(backlogFile, {
+        source: "heartbeat",
+        kind: "task",
+        payload: { title: entry.title, detail: entry.detail },
+      })
+      await setStatus(backlogFile, record.id, entry.failed ? "failed" : "done", {
+        result: {
+          ok: !entry.failed,
+          summary: entry.summary,
+          ts: nowIso(),
+          token_cost: entry.token_cost,
+        },
+      })
+      await refreshView(backlogFile, resolveViewFile(vaultDir, backlogCfg), {
+        maxView: backlogCfg.max_view,
+      })
+    } catch (err) {
+      void diag.error("[heartbeat-hook] backlog record failed:", err)
+    }
+  }
+
   const logIdea = async (entry: Record<string, unknown>): Promise<void> => {
     try {
       await ideaLogger.append({ ts: nowIso(), ...entry })
@@ -672,37 +703,6 @@ export default (async ({ client, directory, ...rest }) => {
     )
     await logIdea({ event: "idea-generated", title: parsed.title, category: parsed.category })
     return "stored"
-  }
-
-  type ChildOutcome = "completed" | "timeout" | "error"
-
-  type ChildRun = {
-    outcome: ChildOutcome
-    tokenCost: number
-    summary: string
-    runError?: ReturnType<typeof heartbeatErrorFields>
-    sessionId: string | null
-    result: MissionResult | null
-    /** Present only when a timeout triggered an abort attempt. */
-    aborted?: boolean
-    abortError?: string
-    /** Why the child was stopped (`stall` | `ceiling`) and the evidence. */
-    stopReason?: "stall" | "ceiling"
-    stalledForMs?: number
-    lastActivity?: string
-    /** Descendant sessions cancelled after a confirmed abort (P3a-f2). */
-    orphanAborted?: string[]
-    orphanAbortError?: string
-    /** ISO time the stall watchdog stopped the child (resume payload). */
-    stoppedAt?: string
-    /** Transcript rows sampled after the stop (summary source, P4c). */
-    transcriptRows?: unknown[]
-    /** Id of the resume item this run re-enqueued (P4c ledger). */
-    resumeItem?: string
-    /** Which summary path fed the resume item; null when capped before summarizing. */
-    summarizer?: "llm" | "fallback" | null
-    /** The resume ceiling dropped this run's item instead of re-enqueueing it. */
-    resumeAbandoned?: boolean
   }
 
   const runMissionChild = async (args: {
@@ -987,21 +987,13 @@ export default (async ({ client, directory, ...rest }) => {
         return "fired"
       }
 
-      // 6. Producers: each states intent — at most one mission and one
-      // staleness item per tick. The pool, not a model, owns the decision.
+      // 6. Producers: each handler states its own intent. The pool, not a
+      // model, owns the decision.
       phase = "queues"
       await setCurrent({ phase })
-      const drainCfgForTick = await readDrainConfig(dir).catch(() => null)
       const allMissions = await loadMissions(dir).catch(() => [])
       const schedulerCfg = await readSchedulerConfig(dir).catch(() => ({
-        weights: {
-          mission: 4,
-          "drain-pass": 3,
-          "quiet-hours": 1,
-          staleness: 1,
-          "profile-update": 1,
-          "soul-update": 1,
-        },
+        weights: { ...DEFAULT_WORK_WEIGHTS },
       }))
       const queueState = await loadWorkQueueState(workQueueFile)
       const producerCtx: ProducerCtx = {
@@ -1013,30 +1005,16 @@ export default (async ({ client, directory, ...rest }) => {
         candidates: digest.candidates,
         queuedIds: new Set(queueState.items.map((i) => i.id)),
         random: Math.random,
+        drainDue: () =>
+          drainDue({
+            directory: dir,
+            stateDir,
+            ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
+          }),
       }
-      let work = enqueueWork(queueState.items, collectWork(producerCtx))
+      let work = enqueueWork(queueState.items, await collectWork(producerCtx))
       work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
       let scheduler: SchedulerState = queueState.scheduler
-
-      // Drain is a work kind: enqueue it when the backlog triggers.
-      if (drainCfgForTick?.enabled) {
-        const due = await drainDue({
-          directory: dir,
-          stateDir,
-          ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
-        })
-        if (due.due) {
-          work = enqueueWork(work, [
-            {
-              id: "drain-pass",
-              kind: "drain-pass",
-              producer: "scheduler",
-              enqueued_ms: nowMs,
-              requeue_count: 0,
-            },
-          ])
-        }
-      }
 
       // 7. Consumer: exactly one item per tick, or skip.
       const fairPick = pickFair(
@@ -1088,70 +1066,8 @@ export default (async ({ client, directory, ...rest }) => {
       work = picked.rest
       await saveWorkQueueState(workQueueFile, work, scheduler)
 
-      // 8. Drain and background steps are one work item each.
-      if (fairPick.kind === "drain-pass") {
-        phase = "drain"
-        await setCurrent({ phase })
-        const step = await runDrainWork()
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: step.ran
-            ? step.result.outcome === "error"
-              ? "error"
-              : "completed"
-            : "silent",
-          token_cost: step.ran ? step.result.tokens ?? 0 : 0,
-          gate: "drain",
-          reason: step.ran ? `drain:${step.result.outcome}` : `drain:${step.reason}`,
-        })
-        if (step.ran) await recordExecution()
-        else await recordNoop(digest.digest_hash)
-        return "fired"
-      }
-      if (fairPick.kind !== "mission" && fairPick.kind !== "staleness") {
-        phase = fairPick.kind
-        await setCurrent({ phase })
-        const errors: string[] = []
-        await runSteps([fairPick.kind as StepKind], (kind, err) => {
-          errors.push(kind)
-          void diag.error(`[heartbeat-hook] step ${kind} failed:`, err)
-        })
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: errors.length ? "error" : "completed",
-          token_cost: 0,
-          gate: fairPick.kind,
-          reason: errors.length ? "step-error" : "step",
-        })
-        await recordExecution()
-        return "fired"
-      }
-
-      // 9. One mission child. The picked item is authoritative: no second
-      // model choice, no side lane, no reroll in the same tick.
-      const contextFor = (d: HeartbeatDigest): string =>
-        missionContextHeader(
-          {
-            tick,
-            nowMs,
-            level: d.level,
-            quiet: d.quiet,
-            signals: d.signals,
-            digestHash: d.digest_hash,
-          },
-          { tokenBudget: autonomy.mission_token_budget },
-        )
-      const resumeBlockFor = (item: WorkItem | null | undefined): string => {
-        const payload = item?.payload as Partial<ResumePayload> | undefined
-        if (!payload || payload.resume !== true || !payload.summary) return ""
-        try {
-          return resumeContextBlock(payload as ResumePayload)
-        } catch {
-          return ""
-        }
-      }
+      // 8. Dispatch through the work-kind registry. The hook supplies the
+      // transport and records the outcome; it makes no per-kind decisions.
       const summarizeResume = async (
         mission: Mission,
         run: ChildRun,
@@ -1201,190 +1117,78 @@ export default (async ({ client, directory, ...rest }) => {
           summarizer: summarized.degraded === "summarizer-fallback" ? "fallback" : "llm",
         }
       }
-      const settleItem = async (
-        item: WorkItem,
-        mission: Mission,
-        run: ChildRun,
-      ): Promise<boolean> => {
-        if (run.outcome !== "timeout") return false
-        if (item.requeue_count >= MAX_REQUEUES) {
-          run.summarizer = null
-          run.resumeAbandoned = true
-          return false
-        }
-        const resume = await summarizeResume(mission, run)
-        run.summarizer = resume.summarizer
-        const requeued = stallResumeItem(item, resume.payload, Date.now())
-        if (!requeued) {
-          run.summarizer = null
-          run.resumeAbandoned = true
-          return false
-        }
-        run.resumeItem = requeued.id
-        work = enqueueWork(work, [requeued])
-        return true
+      const setPhase = async (next: HeartbeatPhase): Promise<void> => {
+        phase = next
+        await setCurrent({ phase: next })
       }
-      const resultStatusOf = (r: ChildRun): MissionResult["status"] | "missing" =>
-        r.result?.status ?? (r.outcome === "completed" ? "missing" : "error")
-      const overBudgetOf = (tokens: number): boolean =>
-        autonomy.mission_token_budget !== "unlimited" && tokens > autonomy.mission_token_budget
-      const runEntry = (
-        mission: Mission,
-        lane: "primary",
-        r: ChildRun,
-        requeued: boolean,
-      ): Record<string, unknown> => ({
-        mission: mission.id,
-        lane,
-        outcome: r.outcome,
-        token_cost: r.tokenCost,
-        over_budget: overBudgetOf(r.tokenCost),
-        session: r.sessionId,
-        result_status: resultStatusOf(r),
-        result_missing: !r.result,
-        requeued,
-        ...(r.aborted === undefined ? {} : { aborted: r.aborted }),
-        ...(r.abortError === undefined ? {} : { abort_error: r.abortError }),
-        ...(r.stopReason === undefined ? {} : { stop_reason: r.stopReason }),
-        ...(r.stalledForMs === undefined ? {} : { stalled_for_ms: r.stalledForMs }),
-        ...(r.lastActivity === undefined ? {} : { last_activity: r.lastActivity }),
-        ...(r.orphanAborted === undefined ? {} : { orphan_abort: r.orphanAborted.length }),
-        ...(r.orphanAbortError === undefined ? {} : { orphan_abort_error: r.orphanAbortError }),
-        ...(r.outcome === "timeout" ? { timeout_stopped: true } : {}),
-        ...(r.outcome === "timeout" && r.sessionId ? { prior_session: r.sessionId } : {}),
-        ...(r.resumeItem === undefined ? {} : { resume_item: r.resumeItem }),
-        ...(r.summarizer === undefined ? {} : { summarizer: r.summarizer }),
-        ...(r.resumeAbandoned === undefined ? {} : { resume_abandoned: r.resumeAbandoned }),
-      })
 
-      const missionId = missionIdOf(picked.item)
-      const mission = missionId ? allMissions.find((m) => m.id === missionId) : undefined
-      const brief = assembleMissionBrief(
-        mission,
-        HEARTBEAT_FIXED_PROMPT,
-        contextFor(digest),
-        resumeBlockFor(picked.item),
-      )
-      if (!mission || !brief) {
+      const dispatchCtx: DispatchContext = {
+        tick,
+        nowMs,
+        level: digest.level,
+        quiet: digest.quiet,
+        signals: digest.signals,
+        digest,
+        missions: allMissions,
+        autonomy,
+        ideaCfg,
+        dir,
+        stateDir,
+        logDir,
+        vaultDir,
+        diag,
+        setPhase,
+        runChild: runMissionChild,
+        runDrain: runDrainWork,
+        summarizeResume,
+        recordDispatch: async (missionId) => {
+          const dispatchedAt = Date.now()
+          await stateStore.update((s) => ({
+            ...s,
+            last_mission: missionId,
+            last_runs: { ...(s.last_runs ?? {}), [missionId]: dispatchedAt },
+          }))
+        },
+        idea: {
+          storeGenerated: storeGeneratedIdea,
+          recordGenerated: async () => {
+            await ideaStateStore.update((s) => recordGenerated(s))
+          },
+          recordExpressed: async () => {
+            await ideaStateStore.update((s) => recordExpressed(s, Date.now()))
+          },
+        },
+      }
+
+      const handler = handlerFor(fairPick.kind)
+      if (!handler) {
         await ledger({
           verdict: "no_reply",
           mission: null,
           outcome: "silent",
           token_cost: 0,
           gate: fairPick.kind,
-          reason: "missing-mission",
+          reason: "missing-handler",
           queues: queueDepth(work),
         })
         await recordNoop(digest.digest_hash)
         return "fired"
       }
 
-      // Record the attempt before dispatch: the no-repeat suppression and
-      // the `min-gap:` store both read it back.
-      const dispatchedAt = Date.now()
-      await stateStore.update((s) => ({
-        ...s,
-        last_mission: mission.id,
-        last_runs: { ...(s.last_runs ?? {}), [mission.id]: dispatchedAt },
-      }))
-      const extra =
-        ideaCfg.enabled && mission.id === "idea-generate"
-          ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
-          : ""
-      phase = "dispatch"
-      await setCurrent({ phase })
-      const run = await runMissionChild({
-        mission,
-        prompt: brief.prompt + extra,
-        agent: brief.agent,
-      })
-      const requeued = await settleItem(picked.item, mission, run)
+      const result = await handler.run(dispatchCtx, picked.item)
+      if (result.requeue) work = enqueueWork(work, [result.requeue])
       await saveWorkQueueState(workQueueFile, work, scheduler)
 
-      const resultStatus: MissionResult["status"] | "missing" = resultStatusOf(run)
-      const resultMissing = !run.result
-      sessionId = run.sessionId
-      const outcome = run.outcome
-      const tokenCost = run.tokenCost
-      const overBudget = overBudgetOf(tokenCost)
-      const runError = run.runError
-      const declined = resultStatus === "declined"
-      const failed = outcome !== "completed" || resultStatus === "error"
-      const missionOk = !failed && !declined
-
-      phase = "post"
-      await setCurrent({ phase })
-      if (failed) {
-        await moodFeed.apply("mission_failure")
-        moodEvent = "mission_failure"
+      if (result.session_id) sessionId = result.session_id
+      if (result.mood) {
+        await moodFeed.apply(result.mood)
+        moodEvent = result.mood
       }
+      if (result.backlog) await recordBacklog(result.backlog)
 
-      // Mission record in the action queue (§7, §10): `source: "heartbeat"`
-      // with the reserved result.token_cost filled, then the one-way view
-      // refresh. Best-effort — a ledger failure never fails the tick.
-      try {
-        const backlogCfg = await readBacklogConfig(dir)
-        if (backlogCfg.enabled && !declined) {
-          const backlogFile = resolveBacklogFile(stateDir, backlogCfg)
-          const { entry } = await append(backlogFile, {
-            source: "heartbeat",
-            kind: "task",
-            payload: {
-              title: mission.title,
-              detail: run.summary || `heartbeat tick ${tick}: ${outcome}`,
-            },
-          })
-          await setStatus(backlogFile, entry.id, failed ? "failed" : "done", {
-            result: {
-              ok: !failed,
-              summary: run.summary,
-              ts: nowIso(),
-              token_cost: tokenCost,
-            },
-          })
-          await refreshView(backlogFile, resolveViewFile(vaultDir, backlogCfg), {
-            maxView: backlogCfg.max_view,
-          })
-        }
-      } catch (err) {
-        void diag.error("[heartbeat-hook] backlog record failed:", err)
-      }
-
-      // Card 7a (§17.10): the idea pipeline's post-run half.
-      let ideaNote: string | null = null
-      if (ideaCfg.enabled && missionOk) {
-        try {
-          if (mission.id === "idea-generate") {
-            ideaNote = await storeGeneratedIdea(run.summary, ideaCfg)
-            if (ideaNote === "stored") await ideaStateStore.update((s) => recordGenerated(s))
-          } else if (mission.id === "express") {
-            await ideaStateStore.update((s) => recordExpressed(s, Date.now()))
-            ideaNote = "expressed"
-          }
-        } catch (err) {
-          void diag.error("[heartbeat-hook] idea post-process failed:", err)
-          ideaNote = "error"
-        }
-      }
-
-      await ledger({
-        verdict: `mission:${mission.id}`,
-        mission: mission.id,
-        outcome,
-        token_cost: tokenCost,
-        over_budget: overBudget,
-        gate: fairPick.kind === "staleness" ? "staleness" : "mission",
-        reason: declined ? "declined" : outcome === "timeout" ? "timeout" : outcome === "completed" ? "none" : "error",
-        queues: queueDepth(work),
-        runs: [runEntry(mission, "primary", run, requeued)],
-        ...(sessionId ? { session: sessionId } : {}),
-        result_status: resultStatus,
-        result_missing: resultMissing,
-        ...(ideaNote ? { idea: ideaNote } : {}),
-        ...(runError ? { error: runError } : {}),
-      })
-      // An executed mission resets the B7 backoff streak (§17.8 reset rule).
-      await recordExecution()
+      await ledger({ ...result.ledger, queues: queueDepth(work) })
+      if (result.executed) await recordExecution()
+      else await recordNoop(digest.digest_hash)
       return "fired"
     } catch (err) {
       void diag.error("[heartbeat-hook] tick failed:", err)
