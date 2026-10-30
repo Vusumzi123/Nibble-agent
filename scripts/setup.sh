@@ -4,9 +4,9 @@
 #   0. preflight  — Arch Linux only; must not run as root
 #   1. deps       — opencode, nodejs+npm (markdown-vault MCP + tests), gettext,
 #                   python3 (openjev decision provider, stdlib-only)
+#   1c. drain      — seed .opencode/state/drain-cursor.json BEFORE any opencode
 #   2. LLM        — connect a provider (`opencode providers login`)
 #   3. config     — .opencode/sysop-config.yaml + model selection
-#   3b. drain      — seed .opencode/state/drain-cursor.json if absent
 #   4. skip       — disable LLM-dependent features when no provider connected
 #   4b. models     — optional subagent model pins (.opencode/agents/*.md)
 #   5. profiles   — Brain/Agent.md + Brain/User.md interactive Q&A
@@ -165,6 +165,47 @@ else
   fi
   [ -f "$MCP_BIN" ] || { echo "setup: markdown-vault MCP build failed ($MCP_BIN missing)." >&2; exit 1; }
   echo "  installed at $(mcp_head | cut -c1-12) -> $MCP_BIN"
+fi
+
+# ------------------------------------------------------- 1c. drain cursor
+# Seed the drain cursor before anything invokes `opencode`. Commands like
+# `opencode models` / `opencode providers login` below start the plugin
+# runtime, and a tick that finds no cursor seeds `initial_lookback_hours` of
+# history — which surfaces as a large pending backlog. Writing a non-zero
+# watermark here makes the pipe start clean. Keep this before step 2; never
+# run an `opencode` command above it.
+echo "== drain cursor =="
+STATE_DIR=".opencode/state"
+CURSOR="$STATE_DIR/drain-cursor.json"
+if [ "$DRY" -eq 1 ]; then
+  echo "  [dry-run] seed $CURSOR (watermark = now) when absent or empty"
+else
+  mkdir -p "$STATE_DIR"
+  out="$(node -e '
+const fs=require("fs"),f=process.argv[1];
+const now=Date.now();
+let keep=false;
+try{
+  const cur=JSON.parse(fs.readFileSync(f,"utf8"));
+  const v=cur&&cur.version;
+  keep=(v===1||v===2||v===3)&&Number.isInteger(cur.watermark_ts)&&cur.watermark_ts>0;
+}catch(e){}
+if(keep){process.stdout.write("kept");process.exit(0)}
+const cursor={version:3,watermark_ts:now,sessions:{},
+  blocked:{ts:now,attempts:0,blocked_until:0},failures:{},written:{},
+  updated_at:new Date(now).toISOString()};
+const tmp=f+".tmp-"+process.pid;
+fs.writeFileSync(tmp,JSON.stringify(cursor,null,2)+"\n");
+fs.renameSync(tmp,f);
+process.stdout.write("seeded");
+' "$CURSOR")"
+  if [ "$out" = seeded ]; then
+    mark "$CURSOR" created
+    echo "  seeded $CURSOR (watermark = now)"
+  else
+    mark "$CURSOR" skipped
+    echo "  $CURSOR exists (kept)"
+  fi
 fi
 
 # ---------------------------------------------------------------- 2. LLM
@@ -527,34 +568,6 @@ else
   if confirm "Configure the openjev decision provider now?" n; then
     configure_decision_gate
   fi
-fi
-
-# ------------------------------------------------------------ 3b. drain cursor
-# Seed the drain cursor so the dashboard's backlog starts at zero instead of
-# replaying the whole session history. A non-zero watermark also means the pipe
-# will NOT apply drain.initial_lookback_hours; that is deliberate.
-echo "== drain cursor =="
-STATE_DIR=".opencode/state"
-CURSOR="$STATE_DIR/drain-cursor.json"
-if [ -e "$CURSOR" ]; then
-  mark "$CURSOR" skipped
-  echo "  $CURSOR exists (kept)"
-elif [ "$DRY" -eq 1 ]; then
-  echo "  [dry-run] seed $CURSOR (watermark = now)"
-else
-  mkdir -p "$STATE_DIR"
-  node -e '
-const fs=require("fs"),f=process.argv[1];
-const now=Date.now();
-const cursor={version:3,watermark_ts:now,sessions:{},
-  blocked:{ts:now,attempts:0,blocked_until:0},failures:{},written:{},
-  updated_at:new Date(now).toISOString()};
-const tmp=f+".tmp-"+process.pid;
-fs.writeFileSync(tmp,JSON.stringify(cursor,null,2)+"\n");
-fs.renameSync(tmp,f);
-' "$CURSOR"
-  mark "$CURSOR" created
-  echo "  seeded $CURSOR (watermark = now)"
 fi
 
 # ------------------------------------------------------- 4. subagent models
