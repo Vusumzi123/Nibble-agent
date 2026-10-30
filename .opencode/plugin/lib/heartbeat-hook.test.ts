@@ -1464,6 +1464,7 @@ test("quiet hours: dream is a night mission dispatched through the same pool", a
   const prompt: string = client.calls.prompts[0].body.parts[0].text
   assert.ok(!prompt.includes(HEARTBEAT_FIXED_PROMPT), "dreams have no mission_result contract")
   assert.ok(prompt.includes("Subconscious fragments:"))
+  assert.ok(prompt.includes("[sleepState] dreaming"), "the mission brief carries the sleep state")
 
   await hooks.event({
     event: { type: "session.idle", properties: { sessionID: "ses_child" } },

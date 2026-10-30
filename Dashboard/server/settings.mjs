@@ -53,6 +53,8 @@ export const SECTIONS = [
       f('quiet.dream_chance', 'float', { min: 0, max: 1, default: 0.5 }),
       f('quiet.dream_token_budget', 'int', { min: 0, default: 8000 }),
       f('quiet.nightly_dream_cap', 'int', { min: 0, default: 3 }),
+      f('quiet.inject_state', 'bool', { default: true, label: 'inject sleep state', help: 'Inject [sleepState] into top-level prompts and mission briefs.' }),
+      f('quiet.prompts_file', 'string', { default: '.opencode/sleep-prompts.json', readOnly: true, label: 'sleep state prompts file', help: 'Edit the YAML to change the path; the JSON content is edited on disk.' }),
     ],
   },
   {
@@ -86,7 +88,6 @@ export const SECTIONS = [
       f('weights.mission', 'int', { min: 0, default: 4, help: 'Relative mission share. 0 disables the kind.' }),
       f('weights.user-task', 'int', { min: 0, default: 2, help: 'Relative queued user-task share. 0 disables the kind.' }),
       f('weights.drain-pass', 'int', { min: 0, default: 3, help: 'Relative drain share. 0 disables drain.' }),
-      f('weights.quiet-hours', 'int', { min: 0, default: 1 }),
       f('weights.staleness', 'int', { min: 0, default: 1 }),
       f('weights.profile-update', 'int', { min: 0, default: 1 }),
       f('weights.soul-update', 'int', { min: 0, default: 1 }),

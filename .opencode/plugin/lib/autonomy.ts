@@ -72,6 +72,10 @@ export type QuietConfig = {
   dream_token_budget: number
   /** Max dream missions per window (§17.3). */
   nightly_dream_cap: number
+  /** Inject the `[sleepState]` line into top-level prompts and mission briefs. */
+  inject_state: boolean
+  /** Project-relative JSON with the per-status `[sleepState]` directives. */
+  prompts_file: string
 }
 
 export type AutonomyConfig = {
@@ -162,6 +166,8 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
     dream_chance: 0.5,
     dream_token_budget: 8000,
     nightly_dream_cap: 3,
+    inject_state: true,
+    prompts_file: ".opencode/sleep-prompts.json",
   },
 }
 
@@ -393,6 +399,8 @@ const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {
     dream_chance: { t: "float", min: 0, max: 1 },
     dream_token_budget: { t: "int", min: 0 },
     nightly_dream_cap: { t: "int", min: 0 },
+    inject_state: { t: "bool" },
+    prompts_file: { t: "string" },
   },
 }
 
@@ -597,7 +605,11 @@ export async function readAutonomyConfig(
 ): Promise<AutonomyConfig> {
   const parsed = await readNestedSection(directory, "autonomy", autonomyDefaults(), AUTONOMY_OPTS)
   await reportRejects(directory, "autonomy", parsed.rejects, opts.onReject)
-  return typed(DEFAULT_AUTONOMY, parsed.scalars, parsed.blocks)
+  const cfg = typed(DEFAULT_AUTONOMY, parsed.scalars, parsed.blocks)
+  if (typeof cfg.quiet.prompts_file !== "string" || !cfg.quiet.prompts_file.trim()) {
+    cfg.quiet.prompts_file = DEFAULT_AUTONOMY.quiet.prompts_file
+  }
+  return cfg
 }
 
 export async function readMoodConfig(directory: string, opts: ReadAutonomyOpts = {}): Promise<MoodConfig> {

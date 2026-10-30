@@ -22,6 +22,15 @@
 - **Missions can opt out of the digest roll with `enqueue: item`.** The
   `user-task` consumer mission uses it so its dedicated producer is the only
   entry point.
+- **Sleep state is injected into prompts.** Top-level turns get a persistent
+  `[sleepState]` line (`awake` / `dreaming` / `woken` / quiet-window catch-up)
+  with a short directive on how it should shape the output; mission children
+  get the same line in their brief. Task and automation subagents never see it.
+  The `woken` directive tells the model the user woke it, that it is groggy, and
+  that the wake has already shifted its mood. Directive text lives in
+  `.opencode/sleep-prompts.json` (`quiet.prompts_file`, read-only in the
+  dashboard) with compiled defaults as fallback. `quiet.inject_state` is the hot
+  kill switch (Setup → Autonomy); `[wake]` still fires when it is off.
 
 ### Changed
 

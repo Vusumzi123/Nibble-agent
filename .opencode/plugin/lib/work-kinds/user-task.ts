@@ -118,10 +118,15 @@ function userTaskBrief(mission: Mission, item: WorkItem, task: UserTask, ctx: Di
       nowMs: ctx.nowMs,
       level: ctx.level,
       quiet: ctx.quiet,
+      sleepStatus: ctx.digest.sleep_status,
       signals: ctx.signals,
       digestHash: ctx.digest.digest_hash,
     },
-    { tokenBudget: ctx.autonomy.mission_token_budget },
+    {
+      tokenBudget: ctx.autonomy.mission_token_budget,
+      injectSleepState: ctx.autonomy.quiet.inject_state,
+      sleepPrompts: ctx.sleepPrompts,
+    },
   )
   const brief = assembleMissionBrief(mission, HEARTBEAT_FIXED_PROMPT, context, resumeBlockFor(item))
   if (!brief) return null

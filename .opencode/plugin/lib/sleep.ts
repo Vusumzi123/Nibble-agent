@@ -15,6 +15,7 @@
 import type { MoodEvent } from "./mood.ts"
 import { atomicRead } from "./fsx.ts"
 import { createStateStore, type StateStore } from "./state.ts"
+import { DEFAULT_SLEEP_PROMPTS, type SleepPrompts } from "./sleep-prompts.ts"
 
 export type SleepStatus = "awake" | "dreaming" | "woken"
 
@@ -202,7 +203,32 @@ export function buildWakeLine(
   nowIso: string = new Date().toISOString(),
 ): string {
   const since = Number.isFinite(Date.parse(prevSince)) ? prevSince : nowIso
-  return `[wake] You were dreaming since ${since}; your message woke you at ${nowIso}. Resume cooldown before the dream timer re-engages. ${moodLine}`.trim()
+  return `[wake] You were dreaming since ${since}; the user's message woke you at ${nowIso}. ${moodLine}`.trim()
+}
+
+/**
+ * The `[sleepState]` directive: the clock (`quiet`) wins over a stale status.
+ * The text comes from the externalized prompt file, falling back to the
+ * compiled defaults.
+ */
+export function sleepDirective(
+  status: SleepStatus,
+  quiet: boolean,
+  prompts: SleepPrompts = DEFAULT_SLEEP_PROMPTS,
+): string {
+  if (!quiet) return prompts.awake
+  if (status === "dreaming") return prompts.dreaming
+  if (status === "woken") return prompts.woken
+  return prompts.quiet_awake
+}
+
+/** The complete line injected into the system prompt / mission brief. */
+export function buildSleepLine(
+  status: SleepStatus,
+  quiet: boolean,
+  prompts: SleepPrompts = DEFAULT_SLEEP_PROMPTS,
+): string {
+  return `[sleepState] ${sleepDirective(status, quiet, prompts)}`
 }
 
 // ---------------------------------------------------------------------------

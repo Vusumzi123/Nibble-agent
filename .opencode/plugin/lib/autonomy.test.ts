@@ -80,6 +80,8 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     dream_chance: 0.25,
     dream_token_budget: 4000,
     nightly_dream_cap: 1,
+    inject_state: true,
+    prompts_file: ".opencode/sleep-prompts.json",
   })
 })
 

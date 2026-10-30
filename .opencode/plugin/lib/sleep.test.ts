@@ -6,13 +6,16 @@ import { join } from "node:path"
 import {
   applyWake,
   backoffMultiplier,
+  buildSleepLine,
   buildWakeLine,
   createSleepStore,
   defaultSleepState,
   durationToMs,
   readSleepState,
   reconcileSleep,
+  sleepDirective,
 } from "./sleep.ts"
+import { DEFAULT_SLEEP_PROMPTS } from "./sleep-prompts.ts"
 
 const MIN = 60_000
 const HOUR = 3_600_000
@@ -138,7 +141,34 @@ test("buildWakeLine: carries since + mood snapshot", () => {
   const line = buildWakeLine("2026-10-14T23:01:00.000Z", "[mood] serene (valence 0.98, arousal 0.17)", "2026-10-15T03:00:00.000Z")
   assert.ok(line.startsWith("[wake]"))
   assert.ok(line.includes("dreaming since 2026-10-14T23:01:00.000Z"))
+  assert.ok(line.includes("the user's message woke you"))
   assert.ok(line.includes("[mood] serene"))
+  assert.ok(!line.includes("dream timer"), "the dream timer no longer exists")
+})
+
+// --- [sleepState] directive (§17.7) -----------------------------------------
+
+test("buildSleepLine: clock wins over a stale status", () => {
+  assert.ok(buildSleepLine("awake", false).startsWith("[sleepState] awake"))
+  assert.ok(buildSleepLine("dreaming", false).startsWith("[sleepState] awake"))
+  assert.ok(buildSleepLine("dreaming", true).startsWith("[sleepState] dreaming"))
+  assert.ok(buildSleepLine("awake", true).startsWith("[sleepState] quiet window just opened"))
+})
+
+test("buildSleepLine: woken states the wake, the mood shift, and the guardrail", () => {
+  const line = buildSleepLine("woken", true)
+  assert.ok(line.startsWith("[sleepState] woken"))
+  assert.ok(line.includes("woken from sleep"))
+  assert.ok(line.includes("groggy"))
+  assert.ok(line.includes("mood"))
+  assert.ok(line.includes("Dreams are paused"))
+  assert.ok(line.includes("correctness"))
+})
+
+test("sleepDirective: uses the supplied prompt file values", () => {
+  const prompts = { ...DEFAULT_SLEEP_PROMPTS, woken: "SENTINEL-WOKEN" }
+  assert.equal(sleepDirective("woken", true, prompts), "SENTINEL-WOKEN")
+  assert.equal(sleepDirective("awake", false, prompts), DEFAULT_SLEEP_PROMPTS.awake)
 })
 
 // --- shared backoff ladder --------------------------------------------------

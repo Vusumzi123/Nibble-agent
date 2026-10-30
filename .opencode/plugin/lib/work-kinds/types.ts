@@ -16,6 +16,7 @@ import type { IdeaConfig } from "../idea.ts"
 import type { Mission } from "../missions.ts"
 import type { MissionResult } from "../mission-result.ts"
 import type { MoodState } from "../mood.ts"
+import type { SleepPrompts } from "../sleep-prompts.ts"
 import type { ResumePayload } from "../mission-resume.ts"
 import type { DrainStepResult } from "../drain/step.ts"
 import type { ProducerCtx } from "./shared.ts"
@@ -69,6 +70,8 @@ export type DispatchContext = {
   missions: Mission[]
   autonomy: AutonomyConfig
   ideaCfg: IdeaConfig
+  /** Externalized `[sleepState]` directives (loaded once per tick). */
+  sleepPrompts: SleepPrompts
   dir: string
   stateDir: string
   logDir: string

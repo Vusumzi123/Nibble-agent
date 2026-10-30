@@ -8,7 +8,8 @@ import { createDiagnostics, getLogger, LOG_DEFAULTS } from "./lib/logging.ts"
 import { buildMoodLine, createMoodFeed } from "./lib/mood.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
-import { applyWake, buildWakeLine, createSleepStore } from "./lib/sleep.ts"
+import { applyWake, buildSleepLine, buildWakeLine, createSleepStore } from "./lib/sleep.ts"
+import { DEFAULT_SLEEP_PROMPTS, readSleepPrompts, resolveSleepPrompts } from "./lib/sleep-prompts.ts"
 
 // User-turn wake transitions for the quiet-hours sleep system (plan §17.1,
 // §17.7 — kanban card G). sleep-hook is the SOLE writer of the user-turn
@@ -51,6 +52,8 @@ export default (async ({ client, directory }) => {
 
   // sessionID → the [wake] block for the waking turn (one-shot).
   const pendingWake = new Map<string, string>()
+  // Dedupe the sleep-prompts fallback warning across turns.
+  const warnedSleepPrompts = new Set<string>()
 
   return {
     "chat.message": async (input) => {
@@ -77,9 +80,34 @@ export default (async ({ client, directory }) => {
 
     "experimental.chat.system.transform": async (input, output) => {
       // Kept for the whole turn (retrieval-hook pattern): superseded by the
-      // next chat.message, dropped at session.idle.
-      const block = pendingWake.get(input.sessionID)
+      // next chat.message, dropped at session.idle. `[wake]` is independent of
+      // the `[sleepState]` kill switch.
+      const sid = input.sessionID
+      const block = sid ? pendingWake.get(sid) : undefined
       if (block) output.system.push(block)
+
+      // No subagent leakage: the persistent line is top-level-human only.
+      // Mission children get it through their brief instead.
+      if (!sid || automationChildSessions.has(sid)) return
+      if (await sessions.isChild(sid)) return
+      const autonomy = await readAutonomyConfig(dir)
+      if (!autonomy.quiet.inject_state) return
+
+      const state = await store.read()
+      const promptsPath = resolveSleepPrompts(dir, autonomy.quiet.prompts_file)
+      let prompts = DEFAULT_SLEEP_PROMPTS
+      const parsed = await readSleepPrompts(promptsPath)
+      if (parsed) {
+        prompts = parsed
+      } else if (!warnedSleepPrompts.has(promptsPath)) {
+        warnedSleepPrompts.add(promptsPath)
+        void diag.warn(
+          `[sleep-hook] sleep prompts missing/invalid at ${promptsPath}; using defaults`,
+        )
+      }
+      output.system.push(
+        buildSleepLine(state.status, isQuietNow(autonomy.quiet.window), prompts),
+      )
     },
 
     event: async ({ event }) => {

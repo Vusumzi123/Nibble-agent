@@ -151,10 +151,15 @@ export async function runMissionItem(ctx: DispatchContext, item: WorkItem): Prom
       nowMs: ctx.nowMs,
       level: ctx.level,
       quiet: ctx.quiet,
+      sleepStatus: ctx.digest.sleep_status,
       signals: ctx.signals,
       digestHash: ctx.digest.digest_hash,
     },
-    { tokenBudget: ctx.autonomy.mission_token_budget },
+    {
+      tokenBudget: ctx.autonomy.mission_token_budget,
+      injectSleepState: ctx.autonomy.quiet.inject_state,
+      sleepPrompts: ctx.sleepPrompts,
+    },
   )
   // The dream body is the prompt and carries its own typed-result contract.
   const context = [contextBase, seeds ? buildDreamSeeds(seeds) : ""]

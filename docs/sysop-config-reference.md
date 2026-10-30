@@ -492,11 +492,20 @@ Nested under `autonomy:`, **not** top-level.
 | `dream_chance` | pre-JEV roll for the dream candidate. |
 | `dream_token_budget` | hard per-tick cap (K tokens). |
 | `nightly_dream_cap` | max dreams per night. |
+| `inject_state` | inject the `[sleepState]` line every top-level turn and into mission briefs (default `true`). The `[wake]` block is independent. |
+| `prompts_file` | project-relative JSON with the per-status directive text (default `.opencode/sleep-prompts.json`). Read-only in the dashboard; edit the YAML to change the path. |
 
 The night menu is **per-mission `menus:` frontmatter** (`.opencode/missions/*.md`)
 only — `dream_missions` was removed with the mission loader (missions-plan §5,
 D-M4). Shipped night mission: `dream` (drain is a work kind, not a mission, and
 runs whenever its backlog is due).
+
+`prompts_file` is a strict JSON object with four non-empty string keys:
+`awake`, `dreaming`, `woken`, and `quiet_awake`. Values are the directive text;
+the code prepends the `[sleepState] ` tag. A missing, unreadable, malformed, or
+incomplete file falls back to the compiled defaults and logs once per path. The
+main session gets the line through `sleep-hook` (top-level only); mission
+children get it in their brief. Task/automation subagents never see it.
 
 ### `missions:` — restrict-only mission overlay (missions-plan §6)
 

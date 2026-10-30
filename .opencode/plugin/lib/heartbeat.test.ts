@@ -51,6 +51,7 @@ test("missionContextHeader states a soft token budget only when numeric", () => 
     nowMs: Date.now(),
     level: 3,
     quiet: false,
+    sleepStatus: "awake" as const,
     signals: {
       backlog_pending: 0,
       unconsumed_turns: 0,
@@ -64,11 +65,21 @@ test("missionContextHeader states a soft token budget only when numeric", () => 
   assert.ok(text.includes("~32000 tokens"))
   assert.ok(text.includes("soft"))
   assert.ok(text.includes("Never skip the result contract"))
+  assert.ok(text.includes("[sleepState] awake"))
   assert.ok(!missionContextHeader(ctx, { tokenBudget: "unlimited" }).includes("Token budget:"))
   assert.ok(!missionContextHeader(ctx, {}).includes("Token budget:"))
+  assert.ok(!missionContextHeader(ctx, { injectSleepState: false }).includes("[sleepState]"))
   const dream = missionContextHeader(ctx, { tokenBudget: 8000, resultContract: false })
   assert.ok(dream.includes("~8000 tokens"))
   assert.ok(!dream.includes("result contract"), "tool-free missions get no result-contract clause")
+
+  const custom = missionContextHeader(
+    { ...ctx, quiet: true, sleepStatus: "woken" },
+    {
+      sleepPrompts: { awake: "a", dreaming: "d", woken: "SENTINEL-WOKEN", quiet_awake: "q" },
+    },
+  )
+  assert.ok(custom.includes("[sleepState] SENTINEL-WOKEN"))
 })
 
 test("parseWindow parses HH:MM-HH:MM into minutes-of-day", () => {

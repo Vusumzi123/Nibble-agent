@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { createTask, readPendingTask, settleTask, taskSettled, tasksRoot } from "../user-tasks.ts"
 import { MAX_REQUEUES, type WorkItem } from "../work-queue.ts"
 import { parseMissionFile } from "../missions.ts"
+import { DEFAULT_SLEEP_PROMPTS } from "../sleep-prompts.ts"
 import {
   collectUserTasks,
   runUserTaskItem,
@@ -58,10 +59,11 @@ function dispatchCtx(
     level: 3,
     quiet: false,
     signals,
-    digest: { digest_hash: "d1" } as any,
+    digest: { digest_hash: "d1", sleep_status: "awake" } as any,
     missions: [consumer],
-    autonomy: { mission_token_budget: "unlimited" } as any,
+    autonomy: { mission_token_budget: "unlimited", quiet: { inject_state: true } } as any,
     ideaCfg: { enabled: false } as any,
+    sleepPrompts: DEFAULT_SLEEP_PROMPTS,
     dir,
     stateDir: dir,
     logDir: dir,

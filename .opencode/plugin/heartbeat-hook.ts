@@ -100,6 +100,7 @@ import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { createSleepStore, durationToMs, reconcileSleep } from "./lib/sleep.ts"
+import { DEFAULT_SLEEP_PROMPTS, readSleepPrompts, resolveSleepPrompts } from "./lib/sleep-prompts.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { handlerFor } from "./lib/work-kinds/registry.ts"
 import { QUEUE_ADD_TOOL, createQueueAddTool } from "./lib/tools/queue-add.ts"
@@ -268,6 +269,8 @@ export default (async ({ client, directory, ...rest }) => {
   const sleepStore = createSleepStore(stateDir, {
     onError: (err) => void diag.error("[heartbeat-hook] sleep state write failed:", err),
   })
+  // Dedupe the sleep-prompts fallback warning across ticks.
+  const warnedSleepPrompts = new Set<string>()
 
   const sessions = createSessionTools(client, dir)
 
@@ -1137,6 +1140,20 @@ export default (async ({ client, directory, ...rest }) => {
         await setCurrent({ phase: next })
       }
 
+      let sleepPrompts = DEFAULT_SLEEP_PROMPTS
+      if (autonomy.quiet.inject_state) {
+        const sleepPromptsPath = resolveSleepPrompts(dir, autonomy.quiet.prompts_file)
+        const parsed = await readSleepPrompts(sleepPromptsPath)
+        if (parsed) {
+          sleepPrompts = parsed
+        } else if (!warnedSleepPrompts.has(sleepPromptsPath)) {
+          warnedSleepPrompts.add(sleepPromptsPath)
+          void diag.warn(
+            `[heartbeat-hook] sleep prompts missing/invalid at ${sleepPromptsPath}; using defaults`,
+          )
+        }
+      }
+
       const dispatchCtx: DispatchContext = {
         tick,
         nowMs,
@@ -1147,6 +1164,7 @@ export default (async ({ client, directory, ...rest }) => {
         missions: allMissions,
         autonomy,
         ideaCfg,
+        sleepPrompts,
         dir,
         stateDir,
         logDir,

@@ -236,6 +236,8 @@ autonomy:
     dream_chance: 0.5          # pre-JEV roll for the dream candidate
     dream_token_budget: 8000   # hard per-tick cap (K tokens)
     nightly_dream_cap: 3
+    inject_state: true         # inject [sleepState] into top-level prompts + mission briefs
+    prompts_file: .opencode/sleep-prompts.json   # per-status directive text
     # night menu: per-mission `menus:` frontmatter only (missions-plan §5) —
     # `dream_missions` removed with the mission loader (card A)
   missions:                    # restrict-only overlay (missions-plan §6)

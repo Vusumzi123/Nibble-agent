@@ -38,7 +38,8 @@ import { loadMissions, type Mission, type MissionCandidacy } from "./missions.ts
 import { DEFAULT_BASELINE, readMoodState, type MoodState } from "./mood.ts"
 import { readResolvedPaths } from "./paths.ts"
 import { readProfileConfig, resolveProfileFile } from "./profile.ts"
-import { backoffMultiplier, readSleepState, type SleepStatus } from "./sleep.ts"
+import { backoffMultiplier, buildSleepLine, readSleepState, type SleepStatus } from "./sleep.ts"
+import { DEFAULT_SLEEP_PROMPTS, type SleepPrompts } from "./sleep-prompts.ts"
 import { errText, nowIso } from "./util.ts"
 import { DEFAULT_BRAIN_STALE_HOURS, oldestReferenceNote, type BrainNoteAge } from "./vault-stale.ts"
 import { parseReadonlyDirs, readVaultPolicy } from "./vault-policy.ts"
@@ -571,13 +572,19 @@ export type MissionContext = {
   nowMs: number
   level: number
   quiet: boolean
+  sleepStatus: SleepStatus
   signals: HeartbeatSignals
   digestHash: string
 }
 
 export function missionContextHeader(
   ctx: MissionContext,
-  opts: { resultContract?: boolean; tokenBudget?: number | "unlimited" } = {},
+  opts: {
+    resultContract?: boolean
+    tokenBudget?: number | "unlimited"
+    injectSleepState?: boolean
+    sleepPrompts?: SleepPrompts
+  } = {},
 ): string {
   const stale = Object.entries(ctx.signals.staleness)
     .map(([key, hours]) => `${key}=${Math.round(hours)}h`)
@@ -589,6 +596,9 @@ export function missionContextHeader(
     `Mission context — tick ${ctx.tick}, level ${ctx.level}, ${new Date(ctx.nowMs).toISOString()}, quiet=${ctx.signals.quiet}, digest=${ctx.digestHash}.`,
     `Signals: backlog_pending=${ctx.signals.backlog_pending}, unconsumed_turns=${ctx.signals.unconsumed_turns}, audit_failures=${ctx.signals.audit_failures}${stale ? `, staleness=${stale}` : ""}${brain}.`,
   ]
+  if (opts.injectSleepState !== false) {
+    lines.push(buildSleepLine(ctx.sleepStatus, ctx.quiet, opts.sleepPrompts ?? DEFAULT_SLEEP_PROMPTS))
+  }
   if (typeof opts.tokenBudget === "number" && Number.isFinite(opts.tokenBudget)) {
     const contract =
       opts.resultContract === false

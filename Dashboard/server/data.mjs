@@ -15,18 +15,16 @@ const WORK_PRIORITY = {
   mission: 0,
   'user-task': 1,
   'drain-pass': 2,
-  'quiet-hours': 3,
   staleness: 4,
   'profile-update': 5,
   'soul-update': 6,
 };
 
-const KIND_ORDER = ['mission', 'user-task', 'drain-pass', 'quiet-hours', 'staleness', 'profile-update', 'soul-update'];
+const KIND_ORDER = ['mission', 'user-task', 'drain-pass', 'staleness', 'profile-update', 'soul-update'];
 const DEFAULT_WEIGHTS = {
   mission: 4,
   'user-task': 2,
   'drain-pass': 3,
-  'quiet-hours': 1,
   staleness: 1,
   'profile-update': 1,
   'soul-update': 1,
@@ -616,6 +614,7 @@ export function readSleep(dir, paths, now = Date.now()) {
   const { data } = readConfig(dir);
   const sleep = safeJson(join(paths.state, 'sleep.json'));
   const window = data?.autonomy?.quiet?.window ?? '23:00-08:00';
+  const quiet = quietNow(window, now);
   if (sleep) {
     return {
       status: sleep.status ?? 'awake',
@@ -624,11 +623,10 @@ export function readSleep(dir, paths, now = Date.now()) {
       dreams_tonight: sleep.dreams_tonight ?? 0,
       last_tick: sleep.last_tick ?? null,
       window,
-      quiet: sleep.status === 'sleeping' || sleep.status === 'dreaming',
+      quiet,
       available: true,
     };
   }
-  const quiet = quietNow(window, now);
   return {
     status: quiet ? 'quiet' : 'awake',
     since: null,
