@@ -63,6 +63,7 @@ test("parseMissionFile parses a full frontmatter mission", () => {
     min_level: 3,
     approval: "per-item",
     candidacy: "min-gap:last_refresh",
+    enqueue: "producer",
     agent: "profile-writer",
     enabled: false,
     body: "Do the thing.",
@@ -88,6 +89,7 @@ test("parseMissionFile falls back to safe defaults for missing keys", () => {
   assert.equal(mission.min_level, DEFAULT_MISSION.min_level)
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
   assert.equal(mission.candidacy, DEFAULT_MISSION.candidacy)
+  assert.equal(mission.enqueue, "producer")
   assert.equal(mission.agent, DEFAULT_MISSION.agent)
   assert.equal(mission.enabled, true)
   assert.equal(mission.body, "Body here.")
@@ -363,4 +365,17 @@ test("shipped built-ins parse clean: dream/staleness/research/notify/idea-genera
   // Security prereq: built-ins must NOT be reachable without approval — the
   // gate treats their paths as self-improve (checked in autonomy-gate.test.ts).
   clearRejectWarnCache()
+})
+
+test("parseMissionFile reads enqueue: item and falls back to producer", () => {
+  const withItem = parseMissionFile(
+    "---\nid: consumer\nenqueue: item\n---\nbody",
+    "consumer",
+  )
+  assert.deepEqual(withItem.issues, [])
+  assert.equal(withItem.mission.enqueue, "item")
+
+  const fallback = parseMissionFile("---\nid: consumer\nenqueue: nonsense\n---\nbody", "consumer")
+  assert.equal(fallback.mission.enqueue, "producer")
+  assert.ok(fallback.issues.some((i) => i.key === "enqueue"))
 })

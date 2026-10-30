@@ -270,10 +270,12 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   mission_lock_refresh_ms: 60000    # live holder re-stamps this often
   mission_summary_timeout_ms: 90000 # bound for the attempt summary (under the lock)
   mission_max_resumes: 3            # resumes before a timed-out mission drops
+  user_task_retention_days: 30      # prune done/blocked/failed task files; 0 disables
 
 scheduler:                      # SWRR work-kind fairness (docs/swrr-work-scheduler-plan.md)
   weights:                      # relative shares; 0 disables a kind
     mission: 4
+    user-task: 2
     drain-pass: 3
     quiet-hours: 1
     staleness: 1

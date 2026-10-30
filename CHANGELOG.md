@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-10-30
+
+### Added
+
+- **`user-task` work kind + `queue_add` tool.** Queue work for the heartbeat
+  to run later: each task is one Markdown file under
+  `.opencode/state/user-tasks/`, written by `queue_add` and ingested by the
+  producer on the next tick (≤60 s). The tool never touches
+  `work-queue.json`, so there is one queue writer and no lock. Settling moves
+  the file to `done/`, `blocked/` (declined), or `failed/` (error/exhausted
+  timeout) with a `## Result` block. Items carry a 0–9 `priority` that orders
+  only inside the kind; SWRR still picks the kind, so a task never preempts a
+  mission. Default weight is 2 (`scheduler.weights.user-task`). See
+  [`docs/user-task-queue.md`](docs/user-task-queue.md) and the
+  `user-task-queue` skill.
+- **Settled task retention (`heartbeat.user_task_retention_days`, default 30).**
+  Files in `user-tasks/done/`, `blocked/`, and `failed/` older than the window
+  (by mtime) are pruned on the next tick; `0` disables. Pending tasks are never
+  pruned.
+- **Missions can opt out of the digest roll with `enqueue: item`.** The
+  `user-task` consumer mission uses it so its dedicated producer is the only
+  entry point.
+
 ## 2026-10-29
 
 ### Fixed

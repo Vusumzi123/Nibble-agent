@@ -100,6 +100,7 @@ import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { handlerFor } from "./lib/work-kinds/registry.ts"
+import { QUEUE_ADD_TOOL, createQueueAddTool } from "./lib/tools/queue-add.ts"
 import type { ChildOutcome, ChildRun, DispatchContext } from "./lib/work-kinds/types.ts"
 
 /** Post-abort idle confirmation budget (plan 5.2) — never the tick budget. */
@@ -998,6 +999,8 @@ export default (async ({ client, directory, ...rest }) => {
       const queueState = await loadWorkQueueState(workQueueFile)
       const producerCtx: ProducerCtx = {
         nowMs,
+        stateDir,
+        userTaskRetentionDays: hbCfg.user_task_retention_days,
         level: digest.level,
         quiet: digest.quiet,
         signals: digest.signals,
@@ -1305,10 +1308,13 @@ export default (async ({ client, directory, ...rest }) => {
     },
   })
 
+  const queueAddTool = createQueueAddTool({ stateDir })
+
   // --- Hook surface ---------------------------------------------------------
   return {
     tool: {
       mission_result: missionResultTool,
+      [QUEUE_ADD_TOOL]: queueAddTool,
     },
     event: async ({ event }) => {
       const properties = (event as any).properties ?? {}

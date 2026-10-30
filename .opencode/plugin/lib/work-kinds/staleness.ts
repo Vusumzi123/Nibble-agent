@@ -20,6 +20,7 @@ export function collectStaleness(ctx: ProducerCtx): WorkItem[] {
   const candidacy = statusCandidacy(ctx)
   for (const mission of ctx.missions) {
     if (!isStatusSide(mission.candidacy)) continue
+    if (mission.enqueue === "item") continue
     if (ctx.queuedIds?.has(missionItemId(mission.id))) continue
     if (!missionEligible(mission, ctx)) continue
     if (!candidacyPasses(mission, candidacy)) continue

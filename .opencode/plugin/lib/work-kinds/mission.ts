@@ -228,10 +228,18 @@ async function runIdeaPostProcess(
   }
 }
 
-/** Mission intent: at most one candidate per tick, chosen by frequency × mood. */
+/** Mission intent: at most one candidate per tick, chosen by frequency × mood.
+ *  Missions with `enqueue: item` are produced by their own handler and never
+ *  enter through the digest roll (the `user-task` consumer is one). */
 export function collectMissions(ctx: ProducerCtx): WorkItem[] {
+  const itemEnqueued = new Set(
+    ctx.missions.filter((m) => m.enqueue === "item").map((m) => m.id),
+  )
   const eligible = ctx.candidates.filter(
-    (c) => !isStatusSide(c.candidacy) && !ctx.queuedIds?.has(missionItemId(c.id)),
+    (c) =>
+      !isStatusSide(c.candidacy) &&
+      !itemEnqueued.has(c.id) &&
+      !ctx.queuedIds?.has(missionItemId(c.id)),
   )
   const picked = weightedPick(eligible, ctx.random ?? Math.random)
   if (!picked) return []

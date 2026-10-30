@@ -11,6 +11,8 @@ import { PRIMARY_TTL_MS, type WorkItem } from "../work-queue.ts"
 
 export type ProducerCtx = {
   nowMs: number
+  /** `<project>/.opencode/state`; absent in pure producer tests. */
+  stateDir?: string
   level: number
   quiet: boolean
   signals: HeartbeatSignals
@@ -25,6 +27,11 @@ export type ProducerCtx = {
    * kind rule without importing I/O or config. Absent → no drain intent.
    */
   drainDue?: () => Promise<{ due: boolean }>
+  /**
+   * Retention window for settled user-task files (`heartbeat.
+   * user_task_retention_days`); absent → the store default (30 days).
+   */
+  userTaskRetentionDays?: number
 }
 
 const MISSION_ID_PREFIX = "mission:"

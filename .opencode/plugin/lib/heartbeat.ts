@@ -801,6 +801,8 @@ export type HeartbeatConfig = {
   mission_summary_timeout_ms: number
   /** Resume ceiling; 0 resumes forever. */
   mission_max_resumes: number
+  /** Days before a settled user-task file is pruned; 0 disables the prune. */
+  user_task_retention_days: number
 }
 
 export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
@@ -820,6 +822,7 @@ export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
   mission_lock_refresh_ms: 60_000,
   mission_summary_timeout_ms: 90_000,
   mission_max_resumes: 3,
+  user_task_retention_days: 30,
 }
 
 const HEARTBEAT_KEYS = new Set(Object.keys(DEFAULT_HEARTBEAT_CONFIG))

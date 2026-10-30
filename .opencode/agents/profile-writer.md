@@ -13,6 +13,7 @@ permission:
   lsp: deny
   webfetch: deny
   websearch: deny
+  queue_add: deny
 ---
 
 # Profile Writer — Durable-Fact Curation

@@ -5,7 +5,8 @@
 // and schedules the next wake. Everything that used to be a second scheduler
 // or a side lane is a work kind here:
 //
-//   mission, drain-pass, quiet-hours, staleness, profile-update, soul-update
+//   mission, user-task, drain-pass, quiet-hours, staleness, profile-update,
+//   soul-update
 //
 // The picker is smooth weighted round-robin (`pickFair`).
 //
@@ -34,6 +35,7 @@ export const MAX_QUEUE_DEPTH = 50
 
 export type WorkKind =
   | "mission"
+  | "user-task"
   | "drain-pass"
   | "quiet-hours"
   | "staleness"
@@ -43,6 +45,7 @@ export type WorkKind =
 /** Deterministic kind order for ties and queue display. */
 export const KIND_ORDER: readonly WorkKind[] = [
   "mission",
+  "user-task",
   "drain-pass",
   "quiet-hours",
   "staleness",
@@ -53,11 +56,12 @@ export const KIND_ORDER: readonly WorkKind[] = [
 /** Lower runs first. Deterministic tie-break for equal SWRR credits. */
 export const WORK_PRIORITY: Readonly<Record<WorkKind, number>> = {
   mission: 0,
-  "drain-pass": 1,
-  "quiet-hours": 2,
-  staleness: 3,
-  "profile-update": 4,
-  "soul-update": 5,
+  "user-task": 1,
+  "drain-pass": 2,
+  "quiet-hours": 3,
+  staleness: 4,
+  "profile-update": 5,
+  "soul-update": 6,
 }
 
 /** Relative SWRR service weights. A weight of 0 disables a kind. */
@@ -65,6 +69,7 @@ export type WorkWeights = Record<WorkKind, number>
 
 export const DEFAULT_WORK_WEIGHTS: WorkWeights = {
   mission: 4,
+  "user-task": 2,
   "drain-pass": 3,
   "quiet-hours": 1,
   staleness: 1,
@@ -95,6 +100,8 @@ export type WorkItem = {
   /** Enqueue time; preserved across ticks — FIFO order within a kind. A
    *  timeout requeue refreshes it so the item lands at the tail. */
   enqueued_ms: number
+  /** Within-kind ordering hint (0–9, higher first). Only `user-task` sets it. */
+  priority?: number
   /** Earliest execution time. Absent = due immediately. */
   not_before_ms?: number
   /** Primary mission TTL deadline (set by the producer); absent = never expires. */
@@ -215,6 +222,9 @@ function sanitize(raw: unknown[]): WorkItem[] {
       kind,
       producer: typeof item.producer === "string" ? item.producer : "unknown",
       enqueued_ms: typeof item.enqueued_ms === "number" ? item.enqueued_ms : 0,
+      ...(typeof item.priority === "number" && Number.isInteger(item.priority) && item.priority >= 0 && item.priority <= 9
+        ? { priority: item.priority }
+        : {}),
       ...(typeof item.not_before_ms === "number" ? { not_before_ms: item.not_before_ms } : {}),
       ...(typeof item.expires_ms === "number" ? { expires_ms: item.expires_ms } : {}),
       requeue_count: typeof item.requeue_count === "number" ? item.requeue_count : 0,
@@ -230,6 +240,7 @@ function normalizeKind(kind: unknown): WorkKind | null {
   if (kind === "dream") return "quiet-hours"
   if (
     kind === "mission" ||
+    kind === "user-task" ||
     kind === "drain-pass" ||
     kind === "quiet-hours" ||
     kind === "staleness" ||
@@ -326,7 +337,12 @@ export function pickFair(
   credits[kind] = creditBefore - totalWeight
   const item = queue
     .filter((entry) => entry.kind === kind && isDue(entry, nowMs) && isRunnable(entry))
-    .sort((a, b) => a.enqueued_ms - b.enqueued_ms || a.id.localeCompare(b.id))[0]
+    .sort(
+      (a, b) =>
+        (b.priority ?? 0) - (a.priority ?? 0) ||
+        a.enqueued_ms - b.enqueued_ms ||
+        a.id.localeCompare(b.id),
+    )[0]
   if (!item) return null
 
   return {

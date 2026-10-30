@@ -532,6 +532,7 @@ anchors at column 0, so the two never collide.
 | `mission_lock_refresh_ms` | cadence at which a live lock holder re-stamps the lock, so a long mission never loses its own lock. |
 | `mission_summary_timeout_ms` | bound for the LLM attempt summary spawned under the lock after a timeout; on expiry the summarizer child is aborted and the deterministic fallback is used. |
 | `mission_max_resumes` | resume ceiling for a timed-out mission. Past the ceiling the item drops and the ledger journals `resume_abandoned` (no summarizer is spawned). **Not wired yet**: the shipped cap is the queue's `MAX_REQUEUES` (3), so changing this dial does not move the ceiling today. |
+| `user_task_retention_days` | days before a settled user-task file in `user-tasks/done/`, `blocked/`, or `failed/` is pruned by mtime (default `30`). `0` disables the prune; pending files are never touched. Hot-read at tick start. |
 | `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, pid, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
 | `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
@@ -562,6 +563,7 @@ item runs. Hot-read at tick start.
 | Key | Meaning |
 | --- | ------- |
 | `weights.mission` | relative mission share (default `4`). |
+| `weights.user-task` | relative queued user-task share (default `2`). |
 | `weights.drain-pass` | relative drain share (default `3`). |
 | `weights.quiet-hours` | relative quiet-hours step share (default `1`). |
 | `weights.staleness` | relative staleness share (default `1`). |

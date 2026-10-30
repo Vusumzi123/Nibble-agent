@@ -196,7 +196,8 @@ Env: `KAEL_DIR` (default repo root), `DASHBOARD_PORT` (4097), `DASHBOARD_HOST`
   `/api/drain` reports `pending: 0` and `cursor_present: false` without querying
   the session DB. `setup.sh` seeds a v3 cursor at setup time; the drain pipe
   writes and advances it on its next pass.
-- SWRR currently covers queued work (`mission`, `drain-pass`, `staleness`).
+- SWRR currently covers queued work (`mission`, `user-task`, `drain-pass`,
+  `staleness`).
   `quiet-hours`, `profile-update` and `soul-update` are still self-gating
   maintenance steps after the tick; their weights are reserved until their
   producer lands. Mission-definition fairness remains bounded-candidacy work.

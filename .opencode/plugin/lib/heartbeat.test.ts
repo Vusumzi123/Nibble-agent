@@ -1049,3 +1049,16 @@ test("staleCodeFiles ignores a project without plugin files", async () => {
   assert.deepEqual(await staleCodeFiles(dir, Date.now()), [])
   await rm(dir, { recursive: true, force: true })
 })
+
+test("parseHeartbeatConfig: user_task_retention_days defaults to 30 and parses", () => {
+  assert.equal(DEFAULT_HEARTBEAT_CONFIG.user_task_retention_days, 30)
+  assert.equal(parseHeartbeatConfig("").user_task_retention_days, undefined)
+  assert.equal(
+    parseHeartbeatConfig("heartbeat:\n  user_task_retention_days: 7\n").user_task_retention_days,
+    7,
+  )
+  assert.equal(
+    parseHeartbeatConfig("heartbeat:\n  user_task_retention_days: 0\n").user_task_retention_days,
+    0,
+  )
+})

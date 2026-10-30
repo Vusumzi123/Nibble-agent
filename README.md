@@ -109,15 +109,17 @@ its gate still passes.
 
 Work reaches missions through **one persistent work pool**. Producers decide at
 enqueue time (weighted draw for missions, status for staleness, `drainDue` for
-`drain-pass`) and emit at most one item each per tick; the heartbeat executes
-exactly
-one unit per tick. A **smooth weighted round-robin (SWRR)** scheduler picks the
-work *kind* (default mission 4 / drain 3 / maintenance 1), then JEV chooses the
-mission inside a mission slot. This makes starvation structural: a perpetual
+`drain-pass`, pending task files for `user-task`) and emit their items each
+tick; the heartbeat executes exactly one unit per tick. A **smooth weighted
+round-robin (SWRR)** scheduler picks the work *kind* (default mission 4 /
+user-task 2 / drain 3 / maintenance 1). This makes starvation structural: a
+perpetual
 mission candidate cannot lock drain out. Weights and the one-release
 `fair: false` rollback live under `scheduler:` in sysop-config; see
 [`docs/swrr-work-scheduler-plan.md`](docs/swrr-work-scheduler-plan.md). The
-old lane-queue and drain-consumer pages are retained as history. Empty queues
+old lane-queue and drain-consumer pages are retained as history. Queue work for
+later with the `queue_add` tool (`user-task-queue` skill); the task file is the
+brief and is archived under `done/`, `blocked/`, or `failed/`. Empty queues
 make a tick a silent no-action tick with zero LLM calls. See
 [`AGENTS.md`](AGENTS.md) and the
 [SWRR plan](docs/swrr-work-scheduler-plan.md).

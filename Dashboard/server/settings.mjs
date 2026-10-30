@@ -73,6 +73,7 @@ export const SECTIONS = [
       f('mission_lock_refresh_ms', 'int', { min: 0, default: 60000 }),
       f('mission_summary_timeout_ms', 'int', { min: 0, default: 90000 }),
       f('mission_max_resumes', 'int', { min: 0, default: 3 }),
+      f('user_task_retention_days', 'int', { min: 0, default: 30, help: 'Days before a settled user-task file (done/, blocked/, failed/) is pruned. 0 disables.' }),
       ...rotation(),
     ],
   },
@@ -85,6 +86,7 @@ export const SECTIONS = [
     fields: [
       f('fair', 'bool', { default: true, help: 'true = smooth weighted round-robin; false = legacy static priority.' }),
       f('weights.mission', 'int', { min: 0, default: 4, help: 'Relative mission share. 0 disables the kind.' }),
+      f('weights.user-task', 'int', { min: 0, default: 2, help: 'Relative queued user-task share. 0 disables the kind.' }),
       f('weights.drain-pass', 'int', { min: 0, default: 3, help: 'Relative drain share. 0 disables drain.' }),
       f('weights.quiet-hours', 'int', { min: 0, default: 1 }),
       f('weights.staleness', 'int', { min: 0, default: 1 }),

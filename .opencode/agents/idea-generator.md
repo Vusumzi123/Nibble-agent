@@ -12,6 +12,7 @@ permission:
   grep: "deny"
   webfetch: "deny"
   websearch: "deny"
+  queue_add: "deny"
 ---
 
 # Idea Generator — One Original Idea

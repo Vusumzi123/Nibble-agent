@@ -39,6 +39,12 @@ import {
 /** Where mission files live, relative to the project root. */
 export const MISSIONS_DIR = ".opencode/missions"
 
+/** How this mission enters the work queue. `producer` = the digest candidacy
+ *  roll decides; `item` = a dedicated handler produces its own items (e.g. the
+ *  `user-task` consumer), so the mission roll must never enqueue it. */
+export type MissionEnqueue = "producer" | "item"
+export const MISSION_ENQUEUE = ["producer", "item"] as const
+
 export type MissionApproval = "n/a" | "per-item" | "writes-follow-dial" | "always"
 export const MISSION_APPROVALS = ["n/a", "per-item", "writes-follow-dial", "always"] as const
 
@@ -66,6 +72,8 @@ export type Mission = {
   min_level: number
   approval: MissionApproval
   candidacy: MissionCandidacy
+  /** Queue entry point: digest roll (`producer`) or a dedicated producer (`item`). */
+  enqueue: MissionEnqueue
   /** opencode agent name; "" = the heartbeat agent (D-M7). */
   agent: string
   enabled: boolean
@@ -83,6 +91,7 @@ export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
   min_level: 2,
   approval: "writes-follow-dial",
   candidacy: "always",
+  enqueue: "producer",
   agent: "",
   enabled: true,
 }
@@ -149,6 +158,10 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
       if (/^roll:\d+(?:\.\d+)?$/.test(v)) return v
       return undefined
     }
+    case "enqueue": {
+      const v = stripPairQuotes(raw)
+      return (MISSION_ENQUEUE as readonly string[]).includes(v) ? v : undefined
+    }
     case "enabled": {
       const v = stripPairQuotes(raw)
       if (v === "true") return true
@@ -168,6 +181,7 @@ const MISSION_KEYS = new Set([
   "min_level",
   "approval",
   "candidacy",
+  "enqueue",
   "agent",
   "enabled",
 ])
@@ -221,6 +235,7 @@ export function parseMissionFile(
     min_level: typeof parsed.min_level === "number" ? parsed.min_level : DEFAULT_MISSION.min_level,
     approval: (parsed.approval as MissionApproval) ?? DEFAULT_MISSION.approval,
     candidacy: (parsed.candidacy as MissionCandidacy) ?? DEFAULT_MISSION.candidacy,
+    enqueue: (parsed.enqueue as MissionEnqueue) ?? DEFAULT_MISSION.enqueue,
     agent: typeof parsed.agent === "string" ? parsed.agent : DEFAULT_MISSION.agent,
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_MISSION.enabled,
     body: body.trim(),

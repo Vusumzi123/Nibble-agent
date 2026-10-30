@@ -1243,3 +1243,115 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
   const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
   assert.equal(missionsIn(lanes).length, 0, "the item drops at the ceiling")
 })
+
+// ---------------------------------------------------------------------------
+// user-task queue (Phase 1): the tool writes a file, the next tick dispatches.
+
+function userTaskClient() {
+  const calls = { create: 0, prompts: [] as any[] }
+  return {
+    calls,
+    session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 15, output: 5 } },
+            parts: [
+              {
+                type: "tool",
+                tool: "mission_result",
+                state: { input: { status: "completed", summary: "queue archived" } },
+              },
+              { type: "text", text: "queue archived" },
+            ],
+          },
+        ],
+      }),
+      create: async () => {
+        calls.create++
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+    },
+  }
+}
+
+test("user-task: queue_add writes a file, the next tick dispatches it, and done/ gets the result", async () => {
+  const dir = await project(["autonomy:", "  level: 3", "  heartbeat:", "    frequency: 1h"])
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "user-task.md"),
+    [
+      "---",
+      "id: user-task",
+      "title: Execute one queued user task",
+      "frequency: low",
+      "menus: [both]",
+      "min_level: 2",
+      "candidacy: always",
+      "enqueue: item",
+      'agent: ""',
+      "enabled: true",
+      "---",
+      "",
+      "Execute the queued task.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+  const client = userTaskClient()
+  const hooks = await createHook({ client, directory: dir, wakeCapMs: 25 } as any)
+
+  // Tick 1 has an empty queue; the tool then writes the task file only.
+  await waitFor(async () => (await readTickLog(dir)).length >= 1)
+  const added = JSON.parse(
+    String(
+      await (hooks as any).tool.queue_add.execute({
+        title: "Archive the queue",
+        prompt: "Archive the queue and stop.",
+        context: "The store is .opencode/state/user-tasks.",
+        priority: 7,
+      }),
+    ),
+  )
+  assert.equal(added.ok, true)
+  assert.match(added.id, /^user-/)
+  const pendingFile = join(dir, ".opencode", "state", "user-tasks", `${added.id}.md`)
+  const pending = await readFile(pendingFile, "utf8")
+  assert.match(pending, /^status: pending$/m)
+  assert.match(pending, /^priority: 7$/m)
+
+  // Force the next wake due; the producer ingests the file.
+  const stateFile = join(dir, ".opencode", "state", "heartbeat.json")
+  const cur = JSON.parse(await readFile(stateFile, "utf8"))
+  await writeFile(stateFile, JSON.stringify({ ...cur, last_tick: Date.now() - 100 * HOUR }), "utf8")
+
+  await waitFor(() => client.calls.prompts.length > 0, 8000)
+  const promptText: string = client.calls.prompts[0].body.parts[0].text
+  assert.ok(promptText.includes("=== QUEUED USER TASK ==="))
+  assert.ok(promptText.includes("Archive the queue and stop."))
+  assert.ok(promptText.includes("The store is .opencode/state/user-tasks."))
+
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).some((t) => t.gate === "user-task"), 8000)
+
+  const line = (await readTickLog(dir)).find((t) => t.gate === "user-task")!
+  assert.equal(line.verdict, `user-task:${added.id}`)
+  assert.equal(line.reason, "done")
+  assert.equal(line.task_id, added.id)
+
+  const archived = await readFile(
+    join(dir, ".opencode", "state", "user-tasks", "done", `${added.id}.md`),
+    "utf8",
+  )
+  assert.match(archived, /^status: done$/m)
+  assert.match(archived, /## Result/)
+  assert.match(archived, /- summary: queue archived/)
+  assert.match(archived, /- session: ses_child/)
+})

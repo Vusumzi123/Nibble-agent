@@ -85,6 +85,7 @@ export interface Idea {
 
 export type WorkKind =
   | 'mission'
+  | 'user-task'
   | 'drain-pass'
   | 'quiet-hours'
   | 'staleness'
@@ -98,7 +99,9 @@ export interface WorkItem {
   mission: string | null;
   title: string;
   producer: string;
+  /** Item priority inside its kind (0–9, user tasks only) or the kind default. */
   priority: number;
+  kind_priority: number;
   enqueued_ms: number | null;
   age_ms: number | null;
   not_before_ms: number | null;

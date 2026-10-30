@@ -13,6 +13,7 @@ permission:
   lsp: deny
   webfetch: deny
   websearch: deny
+  queue_add: deny
 ---
 
 # Self-Writer — First-Person Self Curation

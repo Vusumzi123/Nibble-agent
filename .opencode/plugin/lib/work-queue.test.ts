@@ -6,6 +6,7 @@ import { join } from "node:path"
 
 import {
   DEFAULT_WORK_WEIGHTS,
+  KIND_ORDER,
   dequeueById,
   emptyQueue,
   emptyScheduler,
@@ -174,4 +175,61 @@ test("SWRR state persists beside the queue and keeps items on corrupt scheduler"
   const recovered = await loadWorkQueueState(file)
   assert.equal(recovered.items.length, 1)
   assert.deepEqual(recovered.scheduler.credits, {})
+})
+
+test("priority orders items inside a kind: higher first, then FIFO", () => {
+  const queue = [
+    item({ id: "user-task:low", kind: "user-task", enqueued_ms: 1, priority: 1 }),
+    item({ id: "user-task:mid", kind: "user-task", enqueued_ms: 2, priority: 5 }),
+    item({ id: "user-task:high", kind: "user-task", enqueued_ms: 3, priority: 9 }),
+  ]
+  const scheduler = emptyScheduler({ ...DEFAULT_WORK_WEIGHTS, mission: 0 })
+  const picked: string[] = []
+  let state = scheduler
+  let rest = queue
+  while (rest.length > 0) {
+    const pick = pickFair(rest, state, 1_000)
+    assert.ok(pick)
+    picked.push(pick!.item.id)
+    state = pick!.scheduler
+    rest = dequeueById(rest, pick!.item.id)!.rest
+  }
+  assert.deepEqual(picked, ["user-task:high", "user-task:mid", "user-task:low"])
+})
+
+test("a mission still wins over a priority-9 user task (no cross-kind preemption)", () => {
+  const pick = pickFair(
+    [
+      item({ id: "mission:a", kind: "mission", enqueued_ms: 1 }),
+      item({ id: "user-task:x", kind: "user-task", enqueued_ms: 0, priority: 9 }),
+    ],
+    emptyScheduler(),
+    1_000,
+  )
+  assert.ok(pick)
+  assert.equal(pick!.kind, "mission", "SWRR is the kind-level decision")
+})
+
+test("user-task joins KIND_ORDER, the weights, and the sanitizer", async () => {
+  assert.ok(KIND_ORDER.includes("user-task"))
+  assert.equal(DEFAULT_WORK_WEIGHTS["user-task"], 2)
+  const dir = await mkdtemp(join(tmpdir(), "work-queue-user-task-"))
+  const file = join(dir, "work-queue.json")
+  await saveWorkQueueState(
+    file,
+    [
+      item({ id: "user-task:a", kind: "user-task", priority: 7 }),
+      item({ id: "user-task:b", kind: "user-task", priority: 42 }),
+      item({ id: "bogus", kind: "nonsense" as WorkItem["kind"] }),
+    ],
+    emptyScheduler(),
+  )
+  const loaded = await loadWorkQueueState(file)
+  assert.deepEqual(loaded.items.map((i) => i.id).sort(), ["user-task:a", "user-task:b"])
+  assert.equal(loaded.items.find((i) => i.id === "user-task:a")!.priority, 7)
+  assert.equal(
+    loaded.items.find((i) => i.id === "user-task:b")!.priority,
+    undefined,
+    "out-of-range priority is dropped",
+  )
 })

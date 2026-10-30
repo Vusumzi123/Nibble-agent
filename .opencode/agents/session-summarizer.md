@@ -12,6 +12,7 @@ permission:
   grep: "deny"
   webfetch: "deny"
   websearch: "deny"
+  queue_add: "deny"
 ---
 
 # Session Summarizer

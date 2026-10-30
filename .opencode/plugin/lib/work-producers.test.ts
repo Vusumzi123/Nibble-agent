@@ -153,3 +153,18 @@ test("itemStillDue drops a staleness item only when its status is gone", () => {
   assert.equal(itemStillDue(ctx({ missions: [stale] }), item), false)
   assert.equal(itemStillDue(ctx({ missions: [stale] }), { ...item, kind: "mission" }), true, "missions are TTL-only")
 })
+
+test("collectMissions skips enqueue: item missions and their candidates", () => {
+  const consumer = mission({ id: "user-task", enqueue: "item" })
+  const normal = mission({ id: "free" })
+  const c = ctx({
+    missions: [consumer, normal],
+    candidates: [candidate("user-task", { weight: 99 }), candidate("free", { weight: 1 })],
+  })
+  assert.deepEqual(collectMissions(c).map((i) => i.id), ["mission:free"])
+  assert.deepEqual(
+    collectMissions({ ...c, candidates: [candidate("user-task", { weight: 99 })] }),
+    [],
+    "the item-enqueued mission never enters through the digest roll",
+  )
+})

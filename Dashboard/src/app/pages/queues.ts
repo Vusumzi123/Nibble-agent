@@ -180,6 +180,8 @@ export class QueuesPage {
     switch (kind) {
       case 'mission':
         return 'primary';
+      case 'user-task':
+        return 'success';
       case 'drain-pass':
         return 'info';
       case 'staleness':

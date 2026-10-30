@@ -26,6 +26,11 @@ export {
 } from "./work-kinds/shared.ts"
 export { collectMissions, missionRunnable, missionStillDue } from "./work-kinds/mission.ts"
 export { collectStaleness, stalenessRunnable, stalenessStillDue } from "./work-kinds/staleness.ts"
+export {
+  collectUserTasks,
+  userTaskRunnable,
+  userTaskStillDue,
+} from "./work-kinds/user-task.ts"
 
 /** Run every handler's producer; one broken producer never blocks the others. */
 export async function collectWork(ctx: ProducerCtx): Promise<WorkItem[]> {

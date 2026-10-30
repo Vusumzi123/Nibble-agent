@@ -41,7 +41,7 @@ Deferred, explicitly:
 Before this change, the single heartbeat loop used a **strict priority gate**:
 
 ```text
-mission > drain-pass > quiet-hours > staleness > profile-update > soul-update
+mission > user-task > drain-pass > quiet-hours > staleness > profile-update > soul-update
 ```
 
 `pickNext()` always takes the lowest-priority number. Missions are re-collected
@@ -129,6 +129,7 @@ Initial proposal (tunable; see §11):
 scheduler:
   weights:
     mission: 4
+    user-task: 2
     drain-pass: 3
     staleness: 1
     quiet-hours: 1

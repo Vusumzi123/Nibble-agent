@@ -45,6 +45,7 @@ Defaults when a key is missing or invalid (`lib/missions.ts`
 | `min_level` | integer 0–4 | `2` | Lowest `autonomy.level` that may run it. |
 | `approval` | `n/a` / `per-item` / `writes-follow-dial` / `always` | `writes-follow-dial` | Label only — surfaced in the UI. It does **not** enforce anything; the autonomy matrix gates execution. |
 | `candidacy` | see below | `always` | Producer-side eligibility gate, evaluated when the item is enqueued. |
+| `enqueue` | `producer` / `item` | `producer` | `item` keeps the mission out of the digest roll: a dedicated producer enqueues its items (the `user-task` consumer is the one in-tree example). |
 | `agent` | opencode agent name | `""` | `""` = the default heartbeat agent. A name pins the child session to that agent (and its permissions). |
 | `enabled` | `true` / `false` | `true` | A config overlay may only turn this off. |
 

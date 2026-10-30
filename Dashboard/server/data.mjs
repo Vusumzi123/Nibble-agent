@@ -13,16 +13,18 @@ import { readConfig, readMissions, getPath } from './settings.mjs';
 
 const WORK_PRIORITY = {
   mission: 0,
-  'drain-pass': 1,
-  'quiet-hours': 2,
-  staleness: 3,
-  'profile-update': 4,
-  'soul-update': 5,
+  'user-task': 1,
+  'drain-pass': 2,
+  'quiet-hours': 3,
+  staleness: 4,
+  'profile-update': 5,
+  'soul-update': 6,
 };
 
-const KIND_ORDER = ['mission', 'drain-pass', 'quiet-hours', 'staleness', 'profile-update', 'soul-update'];
+const KIND_ORDER = ['mission', 'user-task', 'drain-pass', 'quiet-hours', 'staleness', 'profile-update', 'soul-update'];
 const DEFAULT_WEIGHTS = {
   mission: 4,
+  'user-task': 2,
   'drain-pass': 3,
   'quiet-hours': 1,
   staleness: 1,
@@ -419,7 +421,8 @@ export function readQueue(paths, missions) {
         mission: missionId,
         title: mission?.title ?? (typeof item.payload?.title === 'string' ? item.payload.title : item.id),
         producer: item.producer ?? 'unknown',
-        priority: WORK_PRIORITY[kind] ?? 99,
+        priority: Number.isInteger(item.priority) ? item.priority : WORK_PRIORITY[kind] ?? 99,
+        kind_priority: WORK_PRIORITY[kind] ?? 99,
         enqueued_ms: enqueued,
         age_ms: enqueued === null ? null : Math.max(0, now - enqueued),
         not_before_ms: notBefore,
@@ -431,7 +434,12 @@ export function readQueue(paths, missions) {
         payload: item.payload ?? null,
       };
     })
-    .sort((a, b) => a.priority - b.priority || (a.enqueued_ms ?? 0) - (b.enqueued_ms ?? 0));
+    .sort(
+      (a, b) =>
+        a.kind_priority - b.kind_priority ||
+        b.priority - a.priority ||
+        (a.enqueued_ms ?? 0) - (b.enqueued_ms ?? 0),
+    );
 
   const counts = {};
   for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
