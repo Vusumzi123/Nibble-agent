@@ -74,7 +74,7 @@ function transform(hooks: Hook, sid: string): string[] {
 // the `woken` mood event, and the same turn's system prompt carries [wake].
 test("a user turn during the window wakes: status flip + woken mood + [wake] block", async () => {
   const dir = await project("00:00-23:59") // wall-clock-independent open window
-  await writeSleep(dir, { status: "dreaming", noop_streak: 3, window_opened_at: DREAMING_SINCE })
+  await writeSleep(dir, { status: "dreaming", window_opened_at: DREAMING_SINCE })
   const client = mockClient()
   const hooks = await createHook({ client, directory: dir } as any)
 
@@ -86,8 +86,7 @@ test("a user turn during the window wakes: status flip + woken mood + [wake] blo
   const sleep = await readSleep(dir)
   assert.equal(sleep.status, "woken")
   assert.ok(sleep.woken_at, "woken_at stamped once per wake")
-  assert.equal(sleep.noop_streak, 0, "a wake resets the backoff streak (§17.8)")
-  assert.equal(sleep.window_opened_at, DREAMING_SINCE, "window ownership stays with dream-hook")
+  assert.equal(sleep.window_opened_at, DREAMING_SINCE, "window ownership stays with the heartbeat")
 
   // `woken` mood event landed (arousal +0.4, valence −0.1 from baseline).
   const mood = await readMood(dir)

@@ -15,7 +15,7 @@ import { applyWake, buildWakeLine, createSleepStore } from "./lib/sleep.ts"
 // transition class: dreaming → woken (+ the `woken` mood event and the `[wake]`
 // block) and woken → woken activity refresh (so `resume_cooldown` measures
 // from the LAST user message). Window and cooldown transitions belong to
-// dream-hook — the writer classes are disjoint by design (§17.1).
+// heartbeat-hook — the writer classes are disjoint by design (§17.1).
 //
 // Non-wake events (audit failures, mail, timer ticks) never wake the agent —
 // only a top-level human chat.message does; child and automation sessions are

@@ -1,4 +1,4 @@
-// Background step work kinds: `quiet-hours`, `profile-update`, `soul-update`.
+// Background step work kinds: `profile-update`, `soul-update`.
 // The runners are registered in `step-registry.ts` by their own hooks; this
 // handler only invokes the one the picker selected.
 //
@@ -31,6 +31,5 @@ function stepHandler(kind: StepKind): WorkKindHandler {
   }
 }
 
-export const quietHoursHandler = stepHandler("quiet-hours")
 export const profileUpdateHandler = stepHandler("profile-update")
 export const soulUpdateHandler = stepHandler("soul-update")

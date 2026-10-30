@@ -10,10 +10,21 @@ import {
   assembleMissionBrief,
   missionContextHeader,
 } from "../heartbeat.ts"
+import {
+  DREAM_TONE_EVENT,
+  appendDream,
+  buildDreamSeeds,
+  dreamHash,
+  formatDreamEntry,
+  newDreamId,
+  parseDreamOutcome,
+} from "../dream.ts"
+import { pickDreamSeeds } from "../dream-seeds.ts"
 import { drawCategory } from "../idea.ts"
 import { resumeContextBlock, type ResumePayload } from "../mission-resume.ts"
 import type { MissionResult } from "../mission-result.ts"
 import type { Mission } from "../missions.ts"
+import { nowIso } from "../util.ts"
 import { MAX_REQUEUES, stallResumeItem, type WorkItem } from "../work-queue.ts"
 import {
   isStatusSide,
@@ -54,6 +65,7 @@ function runEntry(
   mission: Mission,
   run: ChildRun,
   requeued: boolean,
+  override?: { resultStatus?: string; resultMissing?: boolean },
 ): Record<string, unknown> {
   return {
     mission: mission.id,
@@ -62,8 +74,8 @@ function runEntry(
     token_cost: run.tokenCost,
     over_budget: overBudgetOf(ctx, run.tokenCost),
     session: run.sessionId,
-    result_status: resultStatusOf(run),
-    result_missing: !run.result,
+    result_status: override?.resultStatus ?? resultStatusOf(run),
+    result_missing: override?.resultMissing ?? !run.result,
     requeued,
     ...(run.aborted === undefined ? {} : { aborted: run.aborted }),
     ...(run.abortError === undefined ? {} : { abort_error: run.abortError }),
@@ -123,7 +135,17 @@ export async function runMissionItem(ctx: DispatchContext, item: WorkItem): Prom
   const mission = missionId ? ctx.missions.find((m) => m.id === missionId) : undefined
   if (!mission) return missingMission(item)
 
-  const context = missionContextHeader(
+  const isDream = mission.candidacy === "dream-gate"
+  const seeds = isDream
+    ? await pickDreamSeeds({
+        directory: ctx.dir,
+        stateDir: ctx.stateDir,
+        vaultDir: ctx.vaultDir,
+        ...(ctx.dbFile === undefined ? {} : { dbFile: ctx.dbFile }),
+        moodLine: ctx.viewMood().label,
+      }).catch(() => null)
+    : null
+  const contextBase = missionContextHeader(
     {
       tick: ctx.tick,
       nowMs: ctx.nowMs,
@@ -134,9 +156,13 @@ export async function runMissionItem(ctx: DispatchContext, item: WorkItem): Prom
     },
     { tokenBudget: ctx.autonomy.mission_token_budget },
   )
+  // The dream body is the prompt and carries its own typed-result contract.
+  const context = [contextBase, seeds ? buildDreamSeeds(seeds) : ""]
+    .filter((s) => s.trim() !== "")
+    .join("\n\n")
   const brief = assembleMissionBrief(
     mission,
-    HEARTBEAT_FIXED_PROMPT,
+    isDream ? "" : HEARTBEAT_FIXED_PROMPT,
     context,
     resumeBlockFor(item),
   )
@@ -147,20 +173,23 @@ export async function runMissionItem(ctx: DispatchContext, item: WorkItem): Prom
   await ctx.recordDispatch(mission.id)
 
   const extra =
-    ctx.ideaCfg.enabled && mission.id === "idea-generate"
+    !isDream && ctx.ideaCfg.enabled && mission.id === "idea-generate"
       ? `\n\n=== REQUESTED CATEGORY ===\n${drawCategory(ctx.ideaCfg.category_weights, Math.random)}\n=== END REQUESTED CATEGORY ===`
       : ""
 
   await ctx.setPhase("dispatch")
   const run = await ctx.runChild({ mission, prompt: brief.prompt + extra, agent: brief.agent })
-  const requeue = await settleItem(ctx, item, mission, run)
+  // Dreams are tool-free attempts; a timeout has no resumable contract.
+  const requeue = isDream ? null : await settleItem(ctx, item, mission, run)
+
+  await ctx.setPhase("post")
+  if (isDream) return runDreamItem(ctx, mission, run, requeue)
 
   const resultStatus = resultStatusOf(run)
   const declined = resultStatus === "declined"
   const failed = run.outcome !== "completed" || resultStatus === "error"
   const missionOk = !failed && !declined
 
-  await ctx.setPhase("post")
   const ideaNote = await runIdeaPostProcess(ctx, mission, run, missionOk)
 
   return {
@@ -198,6 +227,86 @@ export async function runMissionItem(ctx: DispatchContext, item: WorkItem): Prom
       result_status: resultStatus,
       result_missing: !run.result,
       ...(ideaNote ? { idea: ideaNote } : {}),
+      ...(run.runError ? { error: run.runError } : {}),
+    },
+  }
+}
+
+/**
+ * Dream disposal (§17.5): parse the typed outcome, apply the tone delta through
+ * the shared mood feed, append the fictional bucket entry, and count against
+ * the nightly cap. A malformed/missing outcome costs a `mission_failure` wobble
+ * and writes nothing.
+ */
+async function runDreamItem(
+  ctx: DispatchContext,
+  mission: Mission,
+  run: ChildRun,
+  requeue: WorkItem | null,
+): Promise<DispatchResult> {
+  let resultStatus: string = run.outcome === "completed" ? "missing" : "error"
+  let resultMissing = true
+  let mood: string | undefined
+
+  if (run.outcome === "completed") {
+    const parsed = parseDreamOutcome(run.summary)
+    if (!parsed) {
+      resultStatus = "error"
+      mood = "mission_failure"
+    } else {
+      try {
+        const before = ctx.viewMood()
+        await ctx.applyMood(DREAM_TONE_EVENT[parsed.tone])
+        const after = ctx.viewMood()
+        await appendDream(
+          ctx.vaultDir,
+          formatDreamEntry(parsed, {
+            id: newDreamId(ctx.nowMs),
+            created: nowIso(),
+            tone: parsed.tone,
+            mood_before: { valence: before.valence, arousal: before.arousal },
+            mood_after: { valence: after.valence, arousal: after.arousal },
+            seeds: parsed.seeds,
+            hash: dreamHash(parsed.narrative),
+          }),
+        )
+        await ctx.bumpDreamsTonight()
+        resultStatus = "completed"
+        resultMissing = false
+      } catch (err) {
+        ctx.diag.error("[heartbeat-hook] dream bucket append failed:", err)
+        resultStatus = "error"
+        mood = "mission_failure"
+      }
+    }
+  } else {
+    mood = "mission_failure"
+  }
+
+  return {
+    executed: true,
+    session_id: run.sessionId,
+    ...(requeue ? { requeue } : {}),
+    ...(mood ? { mood } : {}),
+    ledger: {
+      verdict: `mission:${mission.id}`,
+      mission: mission.id,
+      outcome: run.outcome,
+      token_cost: run.tokenCost,
+      over_budget: overBudgetOf(ctx, run.tokenCost),
+      gate: "dream",
+      reason:
+        run.outcome === "timeout"
+          ? "timeout"
+          : run.outcome === "completed"
+            ? resultStatus === "completed"
+              ? "none"
+              : "malformed"
+            : "error",
+      runs: [runEntry(ctx, mission, run, requeue !== null, { resultStatus, resultMissing })],
+      ...(run.sessionId ? { session: run.sessionId } : {}),
+      result_status: resultStatus,
+      result_missing: resultMissing,
       ...(run.runError ? { error: run.runError } : {}),
     },
   }
@@ -243,12 +352,14 @@ export function collectMissions(ctx: ProducerCtx): WorkItem[] {
   )
   const picked = weightedPick(eligible, ctx.random ?? Math.random)
   if (!picked) return []
+  const mission = ctx.missions.find((m) => m.id === picked.id)
   return [
     {
       id: missionItemId(picked.id),
       kind: "mission",
       producer: "tick",
       enqueued_ms: ctx.nowMs,
+      priority: mission?.priority ?? 3,
       expires_ms: missionExpiry(ctx.nowMs),
       requeue_count: 0,
     },

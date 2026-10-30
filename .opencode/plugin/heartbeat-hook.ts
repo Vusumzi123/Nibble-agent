@@ -26,6 +26,7 @@ import {
   effectiveFrequencyMs,
   frequencyToMs,
   idleHeartbeatCurrent,
+  isQuietNow,
   missionStallMs,
   missionTimeoutMs,
   readHeartbeatConfig,
@@ -98,6 +99,7 @@ import type { DrainPipeClient } from "./lib/drain/pipe.ts"
 import { readResolvedPaths } from "./lib/paths.ts"
 import { createSessionTools } from "./lib/sessions.ts"
 import { createStateStore } from "./lib/state.ts"
+import { createSleepStore, durationToMs, reconcileSleep } from "./lib/sleep.ts"
 import { nowIso, sleep } from "./lib/util.ts"
 import { handlerFor } from "./lib/work-kinds/registry.ts"
 import { QUEUE_ADD_TOOL, createQueueAddTool } from "./lib/tools/queue-add.ts"
@@ -259,6 +261,12 @@ export default (async ({ client, directory, ...rest }) => {
       channel: "heartbeat-hook",
     }),
     onError: (err) => void diag.error("[heartbeat-hook] mood feed failed:", err),
+  })
+
+  // Sleep state: this hook is the sole writer of window/cooldown transitions
+  // (sleep-hook owns user-turn wakes). The dream is an ordinary night mission.
+  const sleepStore = createSleepStore(stateDir, {
+    onError: (err) => void diag.error("[heartbeat-hook] sleep state write failed:", err),
   })
 
   const sessions = createSessionTools(client, dir)
@@ -729,7 +737,9 @@ export default (async ({ client, directory, ...rest }) => {
 
     try {
       const created = await (client as any).session.create({
-        body: { title: `heartbeat:${args.mission.id}` },
+        body: {
+          title: `${args.mission.candidacy === "dream-gate" ? "dream" : "heartbeat"}:${args.mission.id}`,
+        },
         query: { directory: dir },
       })
       const childID: string = created?.data?.id
@@ -893,6 +903,20 @@ export default (async ({ client, directory, ...rest }) => {
         ticks: s.ticks + 1,
       }))
       const tick = nextState.ticks
+      // Sleep window/cooldown transitions (§17.1 table). Runs before the
+      // digest so `sleep_status` and the night menu reflect this tick.
+      if (autonomy.level > 0) {
+        const before = await sleepStore.read()
+        const rec = reconcileSleep(before, {
+          nowMs,
+          quiet: isQuietNow(autonomy.quiet.window),
+          resumeCooldownMs: durationToMs(autonomy.quiet.resume_cooldown, 60 * 60_000),
+        })
+        if (rec.changed) {
+          await sleepStore.write(rec.state)
+          for (const event of rec.mood_events) await moodFeed.apply(event)
+        }
+      }
       await setCurrent({
         state: "in-flight",
         tick,
@@ -971,22 +995,10 @@ export default (async ({ client, directory, ...rest }) => {
         })()
       ledgerForTick = ledger
 
-      // 5. Sleep-system pre-gate (§17.2): inside the quiet window the dream
-      // timer owns sleeping time — status dreaming ends the heartbeat tick as
-      // NO_REPLY with zero LLM calls. The pre-gates are the window
-      // transitions' READ side; dream-hook is the sole writer (§17.1).
-      if (digest.quiet && digest.sleep_status === "dreaming") {
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "sleep",
-          reason: "dreaming",
-        })
-        await recordNoop(digest.digest_hash)
-        return "fired"
-      }
+      // 5. Quiet hours are a producer filter, not a gate: while `digest.quiet`
+      // `buildCandidates` only offers night-menu missions, and the drain
+      // producer enqueues whenever the backlog is due. Missions, drain, and the
+      // overnight maintenance steps all share this one pool.
 
       // 6. Producers: each handler states its own intent. The pool, not a
       // model, owns the decision.
@@ -1152,6 +1164,14 @@ export default (async ({ client, directory, ...rest }) => {
             last_runs: { ...(s.last_runs ?? {}), [missionId]: dispatchedAt },
           }))
         },
+        applyMood: async (event) => {
+          await moodFeed.apply(event)
+        },
+        viewMood: () => moodFeed.view(),
+        bumpDreamsTonight: async () => {
+          await sleepStore.update((s) => ({ ...s, dreams_tonight: s.dreams_tonight + 1 }))
+        },
+        ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
         idea: {
           storeGenerated: storeGeneratedIdea,
           recordGenerated: async () => {

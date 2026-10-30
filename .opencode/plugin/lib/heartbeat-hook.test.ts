@@ -1355,3 +1355,131 @@ test("user-task: queue_add writes a file, the next tick dispatches it, and done/
   assert.match(archived, /- summary: queue archived/)
   assert.match(archived, /- session: ses_child/)
 })
+
+// --- quiet-hours single-pool regression -------------------------------------
+
+async function writeDreamMission(dir: string): Promise<void> {
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", "dream.md"),
+    [
+      "---",
+      "id: dream",
+      "title: Unconscious dream simulation",
+      "frequency: low",
+      "menus: [night]",
+      "min_level: 2",
+      "priority: 0",
+      "approval: n/a",
+      "candidacy: dream-gate",
+      "agent: dreamer",
+      "enabled: true",
+      "---",
+      "",
+      "Narrate one dream from the fragments.",
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+}
+
+function dreamClient(text: string) {
+  const calls = { create: 0, prompts: [] as any[], titles: [] as string[] }
+  return {
+    calls,
+    session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 10, output: 20 } },
+            parts: [{ type: "text", text }],
+          },
+        ],
+      }),
+      create: async (args: any) => {
+        calls.create++
+        calls.titles.push(args?.body?.title)
+        return { data: { id: "ses_child" } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+    },
+  }
+}
+
+// Quiet hours are a producer filter now: a due drain backlog must reach the
+// single work pool instead of being slept through.
+test("quiet hours: a due drain backlog runs through the single pool", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "  quiet:",
+    '    window: "00:00-23:59"',
+    "drain:",
+    "  enabled: true",
+    "  trigger_pending: 1",
+    "memory:",
+    "  provider: none",
+  ])
+  await seedTurns(dir, "quietdrain")
+  const client = mockClient()
+  const hooks = await createHook({ client, directory: dir } as any)
+
+  await waitFor(async () => (await readTickLog(dir)).length > 0, 8000)
+  const [t] = await readTickLog(dir)
+  assert.equal(t.quiet, true)
+  assert.equal(t.gate, "drain", "a due backlog must not be slept through")
+  assert.ok(String(t.reason).startsWith("drain:"), String(t.reason))
+  assert.equal(client.calls.create, 0, "drain without a provider never spawns a child")
+  void hooks
+})
+
+// The dream is an ordinary `mission` on the night menu: it dispatches through
+// the same pool, keeps its `dream:` child title, and disposes its typed outcome.
+test("quiet hours: dream is a night mission dispatched through the same pool", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "  quiet:",
+    '    window: "00:00-23:59"',
+    "    dream_chance: 1",
+    "    nightly_dream_cap: 3",
+    "drain:",
+    "  enabled: false",
+    "memory:",
+    "  provider: none",
+  ])
+  await writeDreamMission(dir)
+  const client = dreamClient(
+    '{"title":"Tide","narrative":"A grey tide rolls under a paper moon.","tone":"pleasant","seeds":["mood"]}',
+  )
+  const hooks = await createHook({ client, directory: dir } as any)
+
+  await waitFor(() => client.calls.prompts.length > 0, 8000)
+  assert.equal(client.calls.create, 1)
+  assert.equal(client.calls.titles[0], "dream:dream", "dream keeps its own child title")
+  const prompt: string = client.calls.prompts[0].body.parts[0].text
+  assert.ok(!prompt.includes(HEARTBEAT_FIXED_PROMPT), "dreams have no mission_result contract")
+  assert.ok(prompt.includes("Subconscious fragments:"))
+
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
+  } as any)
+  await waitFor(async () => (await readTickLog(dir)).some((t) => t.gate === "dream"), 8000)
+
+  const line = (await readTickLog(dir)).find((t) => t.gate === "dream")!
+  assert.equal(line.verdict, "mission:dream")
+  assert.equal(line.mission, "dream")
+  assert.equal(line.outcome, "completed")
+  assert.equal(line.result_status, "completed")
+  assert.equal(line.result_missing, false)
+
+  const sleep = JSON.parse(await readFile(join(dir, ".opencode", "state", "sleep.json"), "utf8"))
+  assert.equal(sleep.dreams_tonight, 1, "the nightly cap counts the dispatched dream")
+  const note = await readFile(join(dir, "Brain", "Dreams", "Kael Dreams.md"), "utf8")
+  assert.ok(note.includes("A grey tide rolls under a paper moon."))
+  void hooks
+})

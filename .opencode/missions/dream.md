@@ -4,6 +4,7 @@ title: Unconscious dream simulation
 frequency: low
 menus: [night]
 min_level: 1
+priority: 0
 approval: n/a
 candidacy: dream-gate
 agent: dreamer

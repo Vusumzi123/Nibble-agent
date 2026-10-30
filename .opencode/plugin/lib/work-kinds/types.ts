@@ -15,6 +15,7 @@ import type { HeartbeatDigest, HeartbeatError, HeartbeatPhase, HeartbeatSignals 
 import type { IdeaConfig } from "../idea.ts"
 import type { Mission } from "../missions.ts"
 import type { MissionResult } from "../mission-result.ts"
+import type { MoodState } from "../mood.ts"
 import type { ResumePayload } from "../mission-resume.ts"
 import type { DrainStepResult } from "../drain/step.ts"
 import type { ProducerCtx } from "./shared.ts"
@@ -80,6 +81,14 @@ export type DispatchContext = {
   summarizeResume(mission: Mission, run: ChildRun): Promise<ResumeSummary>
   /** Record the mission attempt before dispatch (`min-gap:` + no-repeat). */
   recordDispatch(missionId: string): Promise<void>
+  /** Shared mood feed: dreams apply their tone delta inside the handler so the
+   *  bucket metadata carries the real before/after snapshot. */
+  applyMood(event: string): Promise<void>
+  viewMood(): MoodState
+  /** Count one dispatched dream toward `nightly_dream_cap`. */
+  bumpDreamsTonight(): Promise<void>
+  /** Explicit opencode DB path (tests/E2E); defaults to the data dir. */
+  dbFile?: string
   idea: {
     storeGenerated(summary: string, cfg: IdeaConfig): Promise<string>
     recordGenerated(): Promise<void>

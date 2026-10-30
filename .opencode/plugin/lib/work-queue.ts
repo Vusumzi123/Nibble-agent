@@ -5,14 +5,12 @@
 // and schedules the next wake. Everything that used to be a second scheduler
 // or a side lane is a work kind here:
 //
-//   mission, user-task, drain-pass, quiet-hours, staleness, profile-update,
-//   soul-update
+//   mission, user-task, drain-pass, staleness, profile-update, soul-update
 //
 // The picker is smooth weighted round-robin (`pickFair`).
 //
 // The dream *mission* is an ordinary `mission` item, night-gated by its
-// `menus: [night]` frontmatter; `quiet-hours` is the sleep/dream orchestration
-// step, not the mission itself.
+// `menus: [night]` frontmatter and the `dream-gate` candidacy.
 //
 // `not_before_ms` is how a kind that is not due yet stays in the queue without
 // spinning: the picker skips it and the loop's wake math (computeWakeDelayMs)
@@ -37,7 +35,6 @@ export type WorkKind =
   | "mission"
   | "user-task"
   | "drain-pass"
-  | "quiet-hours"
   | "staleness"
   | "profile-update"
   | "soul-update"
@@ -47,7 +44,6 @@ export const KIND_ORDER: readonly WorkKind[] = [
   "mission",
   "user-task",
   "drain-pass",
-  "quiet-hours",
   "staleness",
   "profile-update",
   "soul-update",
@@ -58,7 +54,6 @@ export const WORK_PRIORITY: Readonly<Record<WorkKind, number>> = {
   mission: 0,
   "user-task": 1,
   "drain-pass": 2,
-  "quiet-hours": 3,
   staleness: 4,
   "profile-update": 5,
   "soul-update": 6,
@@ -71,7 +66,6 @@ export const DEFAULT_WORK_WEIGHTS: WorkWeights = {
   mission: 4,
   "user-task": 2,
   "drain-pass": 3,
-  "quiet-hours": 1,
   staleness: 1,
   "profile-update": 1,
   "soul-update": 1,
@@ -92,7 +86,7 @@ export type WorkQueueState = {
 }
 
 export type WorkItem = {
-  /** Stable dedupe key: `mission:<id>`, `drain-pass`, `quiet-hours`, `<source>:<key>`. */
+  /** Stable dedupe key: `mission:<id>`, `drain-pass`, `<source>:<key>`. */
   id: string
   kind: WorkKind
   /** Which producer enqueued it (`tick`, `brain-stale`, `scheduler`, …). */
@@ -236,13 +230,10 @@ function sanitize(raw: unknown[]): WorkItem[] {
 }
 
 function normalizeKind(kind: unknown): WorkKind | null {
-  // Legacy value from the first Phase 1 cut: the step was called "dream".
-  if (kind === "dream") return "quiet-hours"
   if (
     kind === "mission" ||
     kind === "user-task" ||
     kind === "drain-pass" ||
-    kind === "quiet-hours" ||
     kind === "staleness" ||
     kind === "profile-update" ||
     kind === "soul-update"

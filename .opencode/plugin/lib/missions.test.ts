@@ -61,6 +61,7 @@ test("parseMissionFile parses a full frontmatter mission", () => {
     frequency: "mid",
     menus: ["day"],
     min_level: 3,
+    priority: 3,
     approval: "per-item",
     candidacy: "min-gap:last_refresh",
     enqueue: "producer",
@@ -353,14 +354,18 @@ test("shipped built-ins parse clean: dream/staleness/research/notify/idea-genera
   assert.equal(freeRun.min_level, 3)
   assert.ok(freeRun.body.length > 0)
 
-  for (const id of ["staleness", "research"]) {
-    const m = byId.get(id)!
-    assert.equal(m.enabled, true)
-    assert.deepEqual(m.menus, ["day"], `${id} day-only`)
-    assert.ok(m.body.length > 0, `${id} has a body`)
-  }
+  const staleness = byId.get("staleness")!
+  assert.equal(staleness.enabled, true)
+  assert.deepEqual(staleness.menus, ["day", "night"], "staleness runs day and night")
+  assert.ok(staleness.body.length > 0, "staleness has a body")
+
+  const research = byId.get("research")!
+  assert.equal(research.enabled, true)
+  assert.deepEqual(research.menus, ["day"], "research day-only")
+  assert.ok(research.body.length > 0, "research has a body")
   assert.equal(byId.get("staleness")!.candidacy, "brain-stale:720")
   assert.equal(byId.get("research")!.candidacy, "min-gap:research")
+  assert.equal(byId.get("dream")!.priority, 0, "dream is the lowest-priority mission")
 
   // Security prereq: built-ins must NOT be reachable without approval — the
   // gate treats their paths as self-improve (checked in autonomy-gate.test.ts).

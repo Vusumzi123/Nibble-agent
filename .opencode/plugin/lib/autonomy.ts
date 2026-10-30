@@ -64,8 +64,6 @@ export type ChatterConfig = {
 export type QuietConfig = {
   /** `"HH:MM-HH:MM"` — isQuietNow() predicate source (§17.1). */
   window: string
-  /** Duration — dream timer base interval (§17.2). */
-  dream_cadence: string
   /** Duration — woken -> dreaming after this much silence (§17.7). */
   resume_cooldown: string
   /** 0..1 — pre-JEV roll for the dream candidate (§17.3). */
@@ -74,8 +72,6 @@ export type QuietConfig = {
   dream_token_budget: number
   /** Max dream missions per window (§17.3). */
   nightly_dream_cap: number
-  /** 30->60->120m on consecutive no-ops (§17.8). */
-  backoff: boolean
 }
 
 export type AutonomyConfig = {
@@ -162,12 +158,10 @@ export const DEFAULT_AUTONOMY: AutonomyConfig = {
   },
   quiet: {
     window: "23:00-08:00",
-    dream_cadence: "30m",
     resume_cooldown: "60m",
     dream_chance: 0.5,
     dream_token_budget: 8000,
     nightly_dream_cap: 3,
-    backoff: true,
   },
 }
 
@@ -395,12 +389,10 @@ const AUTONOMY_BLOCK_RULES: Record<string, Record<string, Rule>> = {
   },
   quiet: {
     window: { t: "window" },
-    dream_cadence: { t: "duration" },
     resume_cooldown: { t: "duration" },
     dream_chance: { t: "float", min: 0, max: 1 },
     dream_token_budget: { t: "int", min: 0 },
     nightly_dream_cap: { t: "int", min: 0 },
-    backoff: { t: "bool" },
   },
 }
 

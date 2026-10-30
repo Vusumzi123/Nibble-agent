@@ -53,14 +53,12 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
     "    daily_budget: 1",
     "    cooldown: 4h",
     "    reply_window: 12h",
-    "  quiet:",
-    '    window: "07:00-09:00"',
-    "    dream_cadence: 45m",
-    "    resume_cooldown: 30m",
-    "    dream_chance: 0.25",
-    "    dream_token_budget: 4000",
-    "    nightly_dream_cap: 1",
-    "    backoff: false",
+  "  quiet:",
+  '    window: "07:00-09:00"',
+  "    resume_cooldown: 30m",
+  "    dream_chance: 0.25",
+  "    dream_token_budget: 4000",
+  "    nightly_dream_cap: 1",
   ])
   const cfg = await readAutonomyConfig(dir, { onReject: () => assert.fail("unexpected reject") })
   assert.equal(cfg.level, 3)
@@ -78,12 +76,10 @@ test("readAutonomyConfig parses the full plan-§11 block", async () => {
   })
   assert.deepEqual(cfg.quiet, {
     window: "07:00-09:00",
-    dream_cadence: "45m",
     resume_cooldown: "30m",
     dream_chance: 0.25,
     dream_token_budget: 4000,
     nightly_dream_cap: 1,
-    backoff: false,
   })
 })
 

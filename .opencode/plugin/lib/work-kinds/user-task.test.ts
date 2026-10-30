@@ -80,6 +80,9 @@ function dispatchCtx(
       summarizer: "fallback" as const,
     }),
     recordDispatch: async () => {},
+    applyMood: async () => {},
+    viewMood: () => ({ valence: 0, arousal: 0, label: "neutral" }) as any,
+    bumpDreamsTonight: async () => {},
     idea: {
       storeGenerated: async () => "none",
       recordGenerated: async () => {},

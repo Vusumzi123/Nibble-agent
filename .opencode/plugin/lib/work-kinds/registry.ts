@@ -8,14 +8,13 @@ import { missionHandler } from "./mission.ts"
 import { userTaskHandler } from "./user-task.ts"
 import { stalenessHandler } from "./staleness.ts"
 import { drainHandler } from "./drain.ts"
-import { profileUpdateHandler, quietHoursHandler, soulUpdateHandler } from "./steps.ts"
+import { profileUpdateHandler, soulUpdateHandler } from "./steps.ts"
 
 export const HANDLERS: readonly WorkKindHandler[] = [
   missionHandler,
   userTaskHandler,
   stalenessHandler,
   drainHandler,
-  quietHoursHandler,
   profileUpdateHandler,
   soulUpdateHandler,
 ]

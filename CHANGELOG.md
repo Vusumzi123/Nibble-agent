@@ -23,6 +23,26 @@
   `user-task` consumer mission uses it so its dedicated producer is the only
   entry point.
 
+### Changed
+
+- **Quiet hours are a producer filter, not a sleep gate.** The heartbeat no
+  longer returns before the pool while `quiet && sleep_status === "dreaming"`.
+  `buildCandidates` already restricts the menu to `night`, so day missions are
+  not produced overnight, while `drain-pass` is enqueued whenever its backlog is
+  due and the overnight maintenance steps keep running. Fixes drains that never
+  ran during quiet hours.
+- **The dream is an ordinary `mission`.** `dream-hook.ts` (its `setTimeout`
+  loop, cadence, backoff, and separate dispatch) is deleted. The heartbeat
+  reconciles `sleep.json` window/cooldown transitions, the `drain-gate`
+  candidacy (`dream_chance` + `nightly_dream_cap`) still applies, and
+  `runMissionItem` disposes the typed dream outcome (mood tone, `Dreams/` entry,
+  nightly counter). Dream children keep the `dream:<id>` title.
+- **Per-mission `priority` (0–9, default 3).** Mission items carry it into the
+  queue; `dream.md` ships `priority: 0`. `staleness.md` moves to
+  `menus: [both]` so status maintenance may run overnight.
+- **Removed** `quiet.dream_cadence`, `quiet.backoff`, the `quiet-hours` work
+  kind, and the sleep-state `noop_streak`.
+
 ## 2026-10-29
 
 ### Fixed

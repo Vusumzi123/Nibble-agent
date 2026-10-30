@@ -232,12 +232,10 @@ autonomy:
     reply_window: 24h          # await window before JEV poke/close triage
   quiet:                       # quiet-hours dream system (§17.9) — nested, NOT top-level
     window: "23:00-08:00"      # isQuietNow() predicate source
-    dream_cadence: 30m
     resume_cooldown: 60m       # woken -> dreaming after this much silence
     dream_chance: 0.5          # pre-JEV roll for the dream candidate
     dream_token_budget: 8000   # hard per-tick cap (K tokens)
     nightly_dream_cap: 3
-    backoff: true              # 30->60->120m on consecutive no-ops
     # night menu: per-mission `menus:` frontmatter only (missions-plan §5) —
     # `dream_missions` removed with the mission loader (card A)
   missions:                    # restrict-only overlay (missions-plan §6)
@@ -277,7 +275,6 @@ scheduler:                      # SWRR work-kind fairness (docs/swrr-work-schedu
     mission: 4
     user-task: 2
     drain-pass: 3
-    quiet-hours: 1
     staleness: 1
     profile-update: 1
     soul-update: 1

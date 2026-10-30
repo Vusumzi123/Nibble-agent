@@ -2,7 +2,7 @@
 id: staleness
 title: Refresh the oldest reference note
 frequency: mid
-menus: [day]
+menus: [both]
 min_level: 2
 approval: writes-follow-dial
 candidacy: brain-stale:720

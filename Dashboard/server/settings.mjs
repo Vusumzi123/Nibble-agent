@@ -49,12 +49,10 @@ export const SECTIONS = [
       f('chatter.cooldown', 'duration', { default: '12h' }),
       f('chatter.reply_window', 'duration', { default: '24h' }),
       f('quiet.window', 'string', { default: '23:00-08:00', help: 'HH:MM-HH:MM' }),
-      f('quiet.dream_cadence', 'duration', { default: '30m' }),
       f('quiet.resume_cooldown', 'duration', { default: '60m' }),
       f('quiet.dream_chance', 'float', { min: 0, max: 1, default: 0.5 }),
       f('quiet.dream_token_budget', 'int', { min: 0, default: 8000 }),
       f('quiet.nightly_dream_cap', 'int', { min: 0, default: 3 }),
-      f('quiet.backoff', 'bool', { default: true }),
     ],
   },
   {

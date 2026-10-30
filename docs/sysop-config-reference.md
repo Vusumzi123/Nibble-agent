@@ -488,16 +488,15 @@ Nested under `autonomy:`, **not** top-level.
 | Key | Meaning |
 | --- | ------- |
 | `window` | the `isQuietNow()` predicate source. |
-| `dream_cadence` | how often a dream tick is considered. |
 | `resume_cooldown` | woken → dreaming after this much silence. |
 | `dream_chance` | pre-JEV roll for the dream candidate. |
 | `dream_token_budget` | hard per-tick cap (K tokens). |
 | `nightly_dream_cap` | max dreams per night. |
-| `backoff` | 30 → 60 → 120 m on consecutive no-ops. |
 
 The night menu is **per-mission `menus:` frontmatter** (`.opencode/missions/*.md`)
 only — `dream_missions` was removed with the mission loader (missions-plan §5,
-D-M4). Shipped set after dark: `drain` + `dream` (card 6).
+D-M4). Shipped night mission: `dream` (drain is a work kind, not a mission, and
+runs whenever its backlog is due).
 
 ### `missions:` — restrict-only mission overlay (missions-plan §6)
 
@@ -548,7 +547,7 @@ with `result.token_cost` filled and refreshes the derived view one-way.
 B7 day-side backoff (missions-plan §7): consecutive `no_reply` ticks on an
 identical `digest_hash` stretch the day cadence ×2 at streak 2 and ×4 at 3+
 (`noop_hash`/`noop_streak` in `<state>/heartbeat.json`); a mission execution or
-a changed digest resets it — the day twin of the `quiet.backoff` ladder.
+a changed digest resets it.
 
 ---
 

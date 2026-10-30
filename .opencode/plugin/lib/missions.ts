@@ -70,6 +70,8 @@ export type Mission = {
   menus: string[]
   /** Lowest autonomy.level that may run this mission. */
   min_level: number
+  /** Within-kind queue priority (0–9, higher first). Default 3. */
+  priority: number
   approval: MissionApproval
   candidacy: MissionCandidacy
   /** Queue entry point: digest roll (`producer`) or a dedicated producer (`item`). */
@@ -89,6 +91,7 @@ export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
   frequency: "mid",
   menus: ["day"],
   min_level: 2,
+  priority: 3,
   approval: "writes-follow-dial",
   candidacy: "always",
   enqueue: "producer",
@@ -146,6 +149,12 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
       const n = parseInt(v, 10)
       return n >= 0 && n <= 4 ? n : undefined
     }
+    case "priority": {
+      const v = stripPairQuotes(raw)
+      if (!/^\d+$/.test(v)) return undefined
+      const n = parseInt(v, 10)
+      return n >= 0 && n <= 9 ? n : undefined
+    }
     case "approval": {
       const v = stripPairQuotes(raw)
       return (MISSION_APPROVALS as readonly string[]).includes(v) ? v : undefined
@@ -179,6 +188,7 @@ const MISSION_KEYS = new Set([
   "frequency",
   "menus",
   "min_level",
+  "priority",
   "approval",
   "candidacy",
   "enqueue",
@@ -233,6 +243,7 @@ export function parseMissionFile(
     frequency: (parsed.frequency as MissionFrequency) ?? DEFAULT_MISSION.frequency,
     menus: (parsed.menus as string[]) ?? DEFAULT_MISSION.menus,
     min_level: typeof parsed.min_level === "number" ? parsed.min_level : DEFAULT_MISSION.min_level,
+    priority: typeof parsed.priority === "number" ? parsed.priority : DEFAULT_MISSION.priority,
     approval: (parsed.approval as MissionApproval) ?? DEFAULT_MISSION.approval,
     candidacy: (parsed.candidacy as MissionCandidacy) ?? DEFAULT_MISSION.candidacy,
     enqueue: (parsed.enqueue as MissionEnqueue) ?? DEFAULT_MISSION.enqueue,

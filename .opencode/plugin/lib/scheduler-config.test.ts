@@ -14,7 +14,6 @@ scheduler:
   assert.equal(cfg.weights.mission, 7)
   assert.equal(cfg.weights["drain-pass"], 2)
   assert.equal(cfg.weights.staleness, 0)
-  assert.equal(cfg.weights["quiet-hours"], 1)
 })
 
 test("scheduler config ignores malformed weights", () => {

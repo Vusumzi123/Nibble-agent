@@ -5,13 +5,9 @@
 //   awake ↔ dreaming → woken → (resume_cooldown silence) → dreaming
 //
 // Writers are disjoint by transition class (§17.1): sleep-hook.ts owns
-// user-turn transitions only (applyWake); dream-hook.ts owns window and
-// cooldown transitions (reconcileSleep) plus the tick/noop counters. A lost
+// user-turn transitions only (applyWake); heartbeat-hook.ts owns window and
+// cooldown transitions (reconcileSleep) plus the nightly dream counter. A lost
 // update surfaces as a skipped tick (fail-safe: never a double mission).
-//
-// Also home to the dream timer's due math and the §17.8 backoff brake
-// (30m → 60m → 120m on consecutive no-ops, reset by any executed mission, a
-// wake, or window start).
 //
 // Loaded via relative import only. The plugin auto-discovery glob
 // "{plugin,plugins}/*.{ts,js}" is non-recursive, so this subdirectory file is
@@ -33,12 +29,10 @@ export type SleepState = {
   window_opened_at: string | null
   /** Dream missions dispatched since window start (§17.3 nightly cap). */
   dreams_tonight: number
-  /** Epoch ms of the last dream tick (due math; 0 = never). */
+  /** Epoch ms of the last dream tick (diagnostics; 0 = never). */
   last_tick: number
   /** Dream tick counter (the ledger's `tick` field). */
   ticks: number
-  /** Consecutive ticks with no mission execution (§17.8 backoff). */
-  noop_streak: number
 }
 
 export const SLEEP_VERSION = 1
@@ -53,7 +47,6 @@ export function defaultSleepState(nowIso: string = new Date().toISOString()): Sl
     dreams_tonight: 0,
     last_tick: 0,
     ticks: 0,
-    noop_streak: 0,
   }
 }
 
@@ -82,7 +75,6 @@ export async function readSleepState(file: string): Promise<SleepState> {
     }
     if (!Number.isFinite(merged.last_tick)) merged.last_tick = 0
     merged.dreams_tonight = Number.isFinite(merged.dreams_tonight) ? Math.max(0, merged.dreams_tonight) : 0
-    merged.noop_streak = Number.isFinite(merged.noop_streak) ? Math.max(0, merged.noop_streak) : 0
     merged.ticks = Number.isFinite(merged.ticks) ? Math.max(0, merged.ticks) : 0
     return merged
   } catch {
@@ -107,10 +99,10 @@ function parseMs(value: string): number {
 }
 
 /**
- * Window + cooldown transitions (§17.1 table) — dream-hook's writer class:
+ * Window + cooldown transitions (§17.1 table) — heartbeat-hook's writer class:
  *
  *   window start:  awake → dreaming   (+ fell_asleep; window_opened_at set,
- *                                      dreams_tonight and noop_streak reset)
+ *                                      dreams_tonight reset)
  *   window end:    dreaming → awake   (+ well_rested — ONLY from dreaming)
  *                  woken → awake      (no well_rested: a night chatting is not
  *                                      a night slept)
@@ -134,7 +126,6 @@ export function reconcileSleep(
           since: nowIso,
           window_opened_at: nowIso,
           dreams_tonight: 0,
-          noop_streak: 0,
         },
         mood_events: ["fell_asleep"],
       }
@@ -189,7 +180,7 @@ export function applyWake(state: SleepState, nowMs: number): SleepTransition {
   if (state.status === "dreaming") {
     return {
       changed: true,
-      state: { ...state, status: "woken", since: nowIso, woken_at: nowIso, noop_streak: 0 },
+      state: { ...state, status: "woken", since: nowIso, woken_at: nowIso },
       mood_events: ["woken"],
     }
   }
@@ -215,28 +206,16 @@ export function buildWakeLine(
 }
 
 // ---------------------------------------------------------------------------
-// §17.8 brake: adaptive backoff — 30m → 60m → 120m on consecutive no-ops.
-
-/** The cadence ceiling no backoff step may exceed (§17.8 "capped"). */
-export const DREAM_BACKOFF_CAP_MS = 120 * 60_000
+// Shared cadence helpers.
 
 /**
- * The shared backoff ladder (§17.8): steps at streak 2 (×2) and streak 3+
- * (×4). The heartbeat's day-side B7 twin (missions-plan §7) reuses it on the
- * day cadence; "steps the cadence after 2 no-ops" is the acceptance shape.
+ * The B7 backoff ladder (missions-plan §7): steps at streak 2 (×2) and streak
+ * 3+ (×4). The heartbeat's day cadence reuses it; "steps the cadence after 2
+ * no-ops" is the acceptance shape.
  */
 export function backoffMultiplier(noopStreak: number): 1 | 2 | 4 {
   if (noopStreak < 2) return 1
   return noopStreak === 2 ? 2 : 4
-}
-
-/**
- * Effective dream cadence after backoff, capped at 120m (§17.8). `backoff:
- * false` pins the base cadence.
- */
-export function dreamTickDelayMs(cadenceMs: number, noopStreak: number, backoff: boolean): number {
-  if (!backoff || noopStreak < 2) return cadenceMs
-  return Math.min(cadenceMs * backoffMultiplier(noopStreak), DREAM_BACKOFF_CAP_MS)
 }
 
 /** `30m`/`1h` → ms; malformed/zero → the supplied default (never throws). */
@@ -246,41 +225,4 @@ export function durationToMs(value: string, fallbackMs: number): number {
   const n = parseInt(m[1], 10)
   if (!Number.isFinite(n) || n <= 0) return fallbackMs
   return n * (m[2] === "h" ? 3_600_000 : 60_000)
-}
-
-/** The self-rescheduling wake is capped here (hot config, like heartbeat). */
-export const DREAM_WAKE_CAP_MS = 60_000
-
-export type DreamWakeInput = {
-  /** autonomy.level hot-read; L0 sleeps the timer entirely. */
-  level: number
-  /** isQuietNow() over autonomy.quiet.window. */
-  quiet: boolean
-  /** sleep.json status after reconcile. */
-  status: SleepStatus
-  /** autonomy.quiet.dream_cadence in ms. */
-  cadenceMs: number
-  /** sleep.json last_tick epoch ms; 0 = never ticked. */
-  lastTickMs: number
-  nowMs: number
-  noopStreak: number
-  backoff: boolean
-}
-
-/**
- * Pure due math for one dream wake:
- *
- *   L0 / outside window / not dreaming → the 60s cap (poll for window start,
- *     cooldown end, or a hot dial flip — zero cost between wakes)
- *   dreaming, not yet due              → min(remaining, cap)
- *   due or never ticked                → 0 (missed ticks coalesce, never replay)
- */
-export function computeDreamWakeDelayMs(input: DreamWakeInput): number {
-  if (input.level <= 0) return DREAM_WAKE_CAP_MS
-  if (!input.quiet || input.status !== "dreaming") return DREAM_WAKE_CAP_MS
-  if (input.lastTickMs <= 0) return 0
-  const delay = dreamTickDelayMs(input.cadenceMs, input.noopStreak, input.backoff)
-  const remaining = input.lastTickMs + delay - input.nowMs
-  if (remaining <= 0) return 0
-  return Math.min(remaining, DREAM_WAKE_CAP_MS)
 }

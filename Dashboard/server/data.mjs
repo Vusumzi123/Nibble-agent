@@ -405,7 +405,7 @@ export function readQueue(paths, missions) {
   const items = list
     .filter((item) => item && typeof item.id === 'string')
     .map((item) => {
-      const kind = item.kind === 'dream' ? 'quiet-hours' : item.kind ?? 'mission';
+      const kind = item.kind ?? 'mission';
       const missionId = typeof item.payload?.mission === 'string'
         ? item.payload.mission
         : item.id.startsWith('mission:')
