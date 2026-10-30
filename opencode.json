@@ -3,15 +3,20 @@
   "instructions": ["AGENTS.md", "SETUP.md"],
   "subagent_depth": 2,
   "permission": {
-    "edit": "ask",
+    "edit": {
+      "*": "ask",
+      "**/Projects/**": "allow",
+      "**/projects/**": "allow"
+    },
     "bash": {
       "*": "allow"
     },
     "external_directory": {
+      "*": "ask",
+      "~/Projects/**": "allow",
       "~/.ssh/**": "deny",
       "~/.gnupg/**": "deny",
-      "~/.password-store/**": "deny",
-      "*": "allow"
+      "~/.password-store/**": "deny"
     },
     "websearch": "deny",
     "webfetch": "deny",
