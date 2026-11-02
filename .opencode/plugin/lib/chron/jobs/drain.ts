@@ -6,12 +6,13 @@
 // stays deterministic — the consumer session does the LLM work.
 //
 // Loaded via relative import only.
+import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { atomicRead, atomicWrite } from "../../fsx.ts"
 import { loadWorkQueueState, WORK_QUEUE_FILE } from "../../work-queue.ts"
 import { drainDue } from "../../drain/step.ts"
-import { DEFAULT_DRAIN, readDrainConfig } from "../../drain/config.ts"
-import { writeIntent } from "../../production/intents.ts"
+import { DEFAULT_DRAIN, readDrainConfig, type DrainConfig } from "../../drain/config.ts"
+import { intentPath, writeIntent } from "../../production/intents.ts"
 import type { ChronLog } from "../types.ts"
 
 export type DrainReason =
@@ -132,64 +133,147 @@ export type DrainScanDeps = {
   inboxDir?: string
   now?: () => number
   /** Test seam: replace the due check. */
-  due?: () => Promise<{ due: boolean }>
+  due?: () => Promise<{ due: boolean; pending: number | null; oldestAgeMs: number | null }>
+  /** Test seams; production closes over `directory`/`stateDir`/`inboxDir`. */
+  readConfig?: () => Promise<DrainConfig>
+  readQueue?: () => Promise<{ items: Array<{ id: string }> }>
+  intentExists?: () => boolean
+  readState?: () => Promise<DrainProducerState>
+  saveState?: (state: DrainProducerState) => Promise<boolean>
 }
 
 export type DrainScanReport = {
   emitted: boolean
-  reason: string
+  reason: DrainReason
+  pending: number | null
+  oldest_age_ms: number | null
 }
 
 export async function runDrainScan(deps: DrainScanDeps): Promise<DrainScanReport> {
   const nowMs = deps.now?.() ?? Date.now()
-  let enabled = true
-  try {
-    enabled = (await readDrainConfig(deps.directory)).enabled
-  } catch {
-    enabled = true
-  }
-  if (!enabled) return { emitted: false, reason: "disabled" }
 
-  let due: boolean
+  let cfg: DrainConfig
   try {
-    const check = deps.due
-      ? await deps.due()
-      : await drainDue({
-          directory: deps.directory,
-          stateDir: deps.stateDir,
-          ...(deps.dbFile === undefined ? {} : { dbFile: deps.dbFile }),
-          now: () => nowMs,
-        })
-    due = check.due
+    cfg = await (deps.readConfig ?? (() => readDrainConfig(deps.directory)))()
   } catch (err) {
-    deps.log.warn("[drain] due check failed", err)
-    return { emitted: false, reason: "due-check-failed" }
+    deps.log.warn("[drain] config read failed", err)
+    return { emitted: false, reason: "config-error", pending: null, oldest_age_ms: null }
   }
-  if (!due) return { emitted: false, reason: "not-due" }
-
-  const queue = await loadWorkQueueState(join(deps.stateDir, WORK_QUEUE_FILE))
-  if (queue.items.some((item) => item.id === "drain-pass")) {
-    return { emitted: false, reason: "queued" }
+  if (!cfg.enabled) {
+    return { emitted: false, reason: "disabled", pending: null, oldest_age_ms: null }
   }
 
-  const written = await writeIntent(
-    deps.stateDir,
-    "chron:drain",
-    {
-      id: "drain-pass",
-      kind: "drain-pass",
-      priority: 3,
-      enqueued_ms: nowMs,
-    },
-    { inboxDir: deps.inboxDir },
-  )
+  const readState = deps.readState ?? (() => readDrainProducerState(deps.stateDir))
+  let state: DrainProducerState
+  try {
+    state = await readState()
+  } catch (err) {
+    deps.log.warn("[drain] producer state read failed", err)
+    return { emitted: false, reason: "unavailable", pending: null, oldest_age_ms: null }
+  }
+
+  const intervalMs = normalizeIntervalMs(cfg.producer_interval_minutes)
+  const lastEmitted = effectiveLastEmitted(state.last_emitted_ms, nowMs, intervalMs)
+  if (lastEmitted === 0 && state.last_emitted_ms > nowMs) {
+    deps.log.warn("[drain] producer state last_emitted_ms is in the future; resetting to 0")
+    const saveState = deps.saveState ?? ((next) => saveDrainProducerState(deps.stateDir, next))
+    const reset = await saveState({ version: 1, last_emitted_ms: 0 }).catch(() => false)
+    if (!reset) deps.log.warn("[drain] producer state reset failed")
+  }
+  const cooling = lastEmitted > 0 && nowMs - lastEmitted < intervalMs
+
+  let queued = false
+  if (!cooling) {
+    const readQueue =
+      deps.readQueue ?? (() => loadWorkQueueState(join(deps.stateDir, WORK_QUEUE_FILE)))
+    try {
+      queued = (await readQueue()).items.some((item) => item.id === "drain-pass")
+    } catch (err) {
+      deps.log.warn("[drain] queue read failed", err)
+      return { emitted: false, reason: "unavailable", pending: null, oldest_age_ms: null }
+    }
+  }
+
+  let intentPending = false
+  if (!cooling && !queued) {
+    const intentExists =
+      deps.intentExists ??
+      (() => existsSync(intentPath(deps.stateDir, "chron:drain", "drain-pass", deps.inboxDir)))
+    try {
+      intentPending = intentExists()
+    } catch (err) {
+      deps.log.warn("[drain] intent check failed", err)
+      return { emitted: false, reason: "unavailable", pending: null, oldest_age_ms: null }
+    }
+  }
+
+  let due = false
+  let pending: number | null = null
+  let oldestAgeMs: number | null = null
+  if (!cooling && !queued && !intentPending) {
+    try {
+      const check = deps.due
+        ? await deps.due()
+        : await drainDue({
+            directory: deps.directory,
+            stateDir: deps.stateDir,
+            ...(deps.dbFile === undefined ? {} : { dbFile: deps.dbFile }),
+            readConfig: async () => cfg,
+            now: () => nowMs,
+          })
+      due = check.due
+      pending = check.pending
+      oldestAgeMs = check.oldestAgeMs
+    } catch (err) {
+      deps.log.warn("[drain] due check failed", err)
+      return { emitted: false, reason: "unavailable", pending: null, oldest_age_ms: null }
+    }
+  }
+
+  const decision = decideDrainProduction({
+    now_ms: nowMs,
+    interval_ms: intervalMs,
+    last_emitted_ms: lastEmitted,
+    enabled: cfg.enabled,
+    queued,
+    intent_pending: intentPending,
+    due,
+    pending,
+    oldest_age_ms: oldestAgeMs,
+  })
+  if (!decision.emit) {
+    return { emitted: false, reason: decision.reason, pending, oldest_age_ms: oldestAgeMs }
+  }
+
+  let written: Awaited<ReturnType<typeof writeIntent>>
+  try {
+    written = await writeIntent(
+      deps.stateDir,
+      "chron:drain",
+      {
+        id: "drain-pass",
+        kind: "drain-pass",
+        priority: 3,
+        enqueued_ms: nowMs,
+      },
+      { inboxDir: deps.inboxDir },
+    )
+  } catch (err) {
+    deps.log.warn("[drain] intent write failed", err)
+    return { emitted: false, reason: "write-failed", pending, oldest_age_ms: oldestAgeMs }
+  }
   if (!written.ok) {
     deps.log.warn(`[drain] intent write failed: ${written.reason}`)
-    return { emitted: false, reason: "write-failed" }
+    return { emitted: false, reason: "write-failed", pending, oldest_age_ms: oldestAgeMs }
   }
-  return written.deduped
-    ? { emitted: false, reason: "pending-intent" }
-    : { emitted: true, reason: "emitted" }
+  if (written.deduped) {
+    return { emitted: false, reason: "pending-intent", pending, oldest_age_ms: oldestAgeMs }
+  }
+
+  const saveState = deps.saveState ?? ((next) => saveDrainProducerState(deps.stateDir, next))
+  const saved = await saveState({ version: 1, last_emitted_ms: nowMs }).catch(() => false)
+  if (!saved) deps.log.warn("[drain] producer state save failed")
+  return { emitted: true, reason: "emitted", pending, oldest_age_ms: oldestAgeMs }
 }
 
 /** Build a scan handler with the process-lifetime deps baked in. */

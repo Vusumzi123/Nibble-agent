@@ -11,13 +11,15 @@ import {
   runDrainScan,
   saveDrainProducerState,
   type DrainDecisionInput,
+  type DrainScanDeps,
 } from "./drain.ts"
-import { readIntents } from "../../production/intents.ts"
+import { readIntents, writeIntent } from "../../production/intents.ts"
 import { emptyScheduler, saveWorkQueueState, WORK_QUEUE_FILE } from "../../work-queue.ts"
 import { tempDir } from "../../test-utils.ts"
 import type { ChronLog } from "../types.ts"
 
 const silentLog: ChronLog = { event: () => {}, warn: () => {} }
+const NOW = 1_000_000
 
 async function setup(): Promise<{ dir: string; stateDir: string }> {
   const dir = await tempDir("chron-drain-")
@@ -31,48 +33,31 @@ async function config(dir: string, lines: string[]): Promise<void> {
   await writeFile(join(dir, ".opencode", "sysop-config.yaml"), [...lines, ""].join("\n"), "utf8")
 }
 
-test("a due window emits exactly one drain-pass intent", async () => {
-  const dirs = await setup()
-  const first = await runDrainScan({
+function dueResult(
+  due: boolean,
+  pending: number | null = due ? 99 : 0,
+  oldestAgeMs: number | null = due ? 0 : null,
+): { due: boolean; pending: number | null; oldestAgeMs: number | null } {
+  return { due, pending, oldestAgeMs }
+}
+
+function scanDeps(
+  dirs: { dir: string; stateDir: string },
+  overrides: Partial<DrainScanDeps> = {},
+): DrainScanDeps {
+  return {
     directory: dirs.dir,
     stateDir: dirs.stateDir,
     log: silentLog,
-    due: async () => ({ due: true }),
-  })
-  assert.deepEqual(first, { emitted: true, reason: "emitted" })
+    now: () => NOW,
+    due: async () => dueResult(true),
+    ...overrides,
+  }
+}
 
-  const { intents } = await readIntents(dirs.stateDir)
-  assert.equal(intents.length, 1)
-  assert.equal(intents[0].intent.id, "drain-pass")
-  assert.equal(intents[0].intent.kind, "drain-pass")
-  assert.equal(intents[0].intent.priority, 3)
-
-  const second = await runDrainScan({
-    directory: dirs.dir,
-    stateDir: dirs.stateDir,
-    log: silentLog,
-    due: async () => ({ due: true }),
-  })
-  assert.deepEqual(second, { emitted: false, reason: "pending-intent" })
-  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
-})
-
-test("no intent below the trigger", async () => {
-  const dirs = await setup()
-  const report = await runDrainScan({
-    directory: dirs.dir,
-    stateDir: dirs.stateDir,
-    log: silentLog,
-    due: async () => ({ due: false }),
-  })
-  assert.deepEqual(report, { emitted: false, reason: "not-due" })
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
-})
-
-test("a queued drain-pass suppresses a second intent", async () => {
-  const dirs = await setup()
+async function seedQueue(stateDir: string): Promise<void> {
   await saveWorkQueueState(
-    join(dirs.stateDir, WORK_QUEUE_FILE),
+    join(stateDir, WORK_QUEUE_FILE),
     [
       {
         id: "drain-pass",
@@ -84,48 +69,7 @@ test("a queued drain-pass suppresses a second intent", async () => {
     ],
     emptyScheduler(),
   )
-  const report = await runDrainScan({
-    directory: dirs.dir,
-    stateDir: dirs.stateDir,
-    log: silentLog,
-    due: async () => ({ due: true }),
-  })
-  assert.deepEqual(report, { emitted: false, reason: "queued" })
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
-})
-
-test("drain.enabled false skips the due check", async () => {
-  const dirs = await setup()
-  await config(dirs.dir, ["drain:", "  enabled: false"])
-  let checked = false
-  const report = await runDrainScan({
-    directory: dirs.dir,
-    stateDir: dirs.stateDir,
-    log: silentLog,
-    due: async () => {
-      checked = true
-      return { due: true }
-    },
-  })
-  assert.deepEqual(report, { emitted: false, reason: "disabled" })
-  assert.equal(checked, false)
-})
-
-test("a due-check failure is logged and never emits", async () => {
-  const dirs = await setup()
-  const warnings: string[] = []
-  const report = await runDrainScan({
-    directory: dirs.dir,
-    stateDir: dirs.stateDir,
-    log: { event: () => {}, warn: (message) => warnings.push(message) },
-    due: async () => {
-      throw new Error("boom")
-    },
-  })
-  assert.deepEqual(report, { emitted: false, reason: "due-check-failed" })
-  assert.equal(warnings.length, 1)
-  assert.match(warnings[0], /due check failed/)
-})
+}
 
 test("normalizeIntervalMs coerces invalid input to the shipped default", () => {
   assert.equal(normalizeIntervalMs(15), 15 * 60_000)
@@ -139,7 +83,7 @@ test("normalizeIntervalMs coerces invalid input to the shipped default", () => {
 
 function decisionInput(overrides: Partial<DrainDecisionInput> = {}): DrainDecisionInput {
   return {
-    now_ms: 1_000_000,
+    now_ms: NOW,
     interval_ms: 60_000,
     last_emitted_ms: 0,
     enabled: true,
@@ -153,22 +97,22 @@ function decisionInput(overrides: Partial<DrainDecisionInput> = {}): DrainDecisi
 }
 
 test("decideDrainProduction applies the gates in order", () => {
-  assert.deepEqual(
-    decideDrainProduction(decisionInput({ enabled: false })),
-    { emit: false, reason: "disabled" },
-  )
-  assert.deepEqual(
-    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 59_999 })),
-    { emit: false, reason: "cooldown" },
-  )
-  assert.deepEqual(
-    decideDrainProduction(decisionInput({ queued: true, last_emitted_ms: 0 })),
-    { emit: false, reason: "queued" },
-  )
-  assert.deepEqual(
-    decideDrainProduction(decisionInput({ intent_pending: true, last_emitted_ms: 0 })),
-    { emit: false, reason: "pending-intent" },
-  )
+  assert.deepEqual(decideDrainProduction(decisionInput({ enabled: false })), {
+    emit: false,
+    reason: "disabled",
+  })
+  assert.deepEqual(decideDrainProduction(decisionInput({ last_emitted_ms: NOW - 59_999 })), {
+    emit: false,
+    reason: "cooldown",
+  })
+  assert.deepEqual(decideDrainProduction(decisionInput({ queued: true })), {
+    emit: false,
+    reason: "queued",
+  })
+  assert.deepEqual(decideDrainProduction(decisionInput({ intent_pending: true })), {
+    emit: false,
+    reason: "pending-intent",
+  })
   assert.deepEqual(
     decideDrainProduction(decisionInput({ due: false, pending: null, oldest_age_ms: null })),
     { emit: false, reason: "unavailable" },
@@ -186,11 +130,11 @@ test("decideDrainProduction applies the gates in order", () => {
 
 test("decideDrainProduction treats the cooldown boundary as inclusive", () => {
   assert.equal(
-    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 60_000 })).emit,
+    decideDrainProduction(decisionInput({ last_emitted_ms: NOW - 60_000 })).emit,
     true,
   )
   assert.equal(
-    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 60_001 })).emit,
+    decideDrainProduction(decisionInput({ last_emitted_ms: NOW - 60_001 })).emit,
     true,
   )
 })
@@ -252,10 +196,414 @@ test("saveDrainProducerState reports failure without throwing", async () => {
 })
 
 test("effectiveLastEmitted clamps future and invalid timestamps to zero", () => {
-  const now = 1_000_000
-  assert.equal(effectiveLastEmitted(500, now, 60_000), 500)
-  assert.equal(effectiveLastEmitted(0, now, 60_000), 0)
-  assert.equal(effectiveLastEmitted(now + 1, now, 60_000), 0)
-  assert.equal(effectiveLastEmitted(-1, now, 60_000), 0)
-  assert.equal(effectiveLastEmitted(Number.NaN, now, 60_000), 0)
+  assert.equal(effectiveLastEmitted(500, NOW, 60_000), 500)
+  assert.equal(effectiveLastEmitted(0, NOW, 60_000), 0)
+  assert.equal(effectiveLastEmitted(NOW + 1, NOW, 60_000), 0)
+  assert.equal(effectiveLastEmitted(-1, NOW, 60_000), 0)
+  assert.equal(effectiveLastEmitted(Number.NaN, NOW, 60_000), 0)
+})
+
+test("a due backlog emits exactly one intent and one state update", async () => {
+  const dirs = await setup()
+  let saves = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      saveState: async (state) => {
+        saves++
+        return saveDrainProducerState(dirs.stateDir, state)
+      },
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: true,
+    reason: "emitted",
+    pending: 99,
+    oldest_age_ms: 0,
+  })
+
+  const { intents } = await readIntents(dirs.stateDir)
+  assert.equal(intents.length, 1)
+  assert.equal(intents[0].intent.id, "drain-pass")
+  assert.equal(intents[0].intent.kind, "drain-pass")
+  assert.equal(intents[0].intent.priority, 3)
+  assert.equal(saves, 1)
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: NOW,
+  })
+})
+
+test("a second run inside the interval is a cooldown and skips queue, inbox, and DB", async () => {
+  const dirs = await setup()
+  await runDrainScan(scanDeps(dirs))
+
+  let queueReads = 0
+  let intentChecks = 0
+  let dueChecks = 0
+  const second = await runDrainScan(
+    scanDeps(dirs, {
+      readQueue: async () => {
+        queueReads++
+        return { items: [] }
+      },
+      intentExists: () => {
+        intentChecks++
+        return false
+      },
+      due: async () => {
+        dueChecks++
+        return dueResult(true)
+      },
+    }),
+  )
+  assert.deepEqual(second, {
+    emitted: false,
+    reason: "cooldown",
+    pending: null,
+    oldest_age_ms: null,
+  })
+  assert.equal(queueReads, 0)
+  assert.equal(intentChecks, 0)
+  assert.equal(dueChecks, 0)
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+})
+
+test("a queued drain-pass returns queued without reading the inbox or DB", async () => {
+  const dirs = await setup()
+  await seedQueue(dirs.stateDir)
+  let intentChecks = 0
+  let dueChecks = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      intentExists: () => {
+        intentChecks++
+        return false
+      },
+      due: async () => {
+        dueChecks++
+        return dueResult(true)
+      },
+    }),
+  )
+  assert.deepEqual(report, { emitted: false, reason: "queued", pending: null, oldest_age_ms: null })
+  assert.equal(intentChecks, 0)
+  assert.equal(dueChecks, 0)
+  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+})
+
+test("an existing inbox intent returns pending-intent without advancing state", async () => {
+  const dirs = await setup()
+  await writeIntent(dirs.stateDir, "chron:drain", { id: "drain-pass", kind: "drain-pass" })
+  let saves = 0
+  let dueChecks = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      saveState: async () => {
+        saves++
+        return true
+      },
+      due: async () => {
+        dueChecks++
+        return dueResult(true)
+      },
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "pending-intent",
+    pending: null,
+    oldest_age_ms: null,
+  })
+  assert.equal(saves, 0)
+  assert.equal(dueChecks, 0)
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+})
+
+test("a DB failure returns unavailable and does not write", async () => {
+  const dirs = await setup()
+  const report = await runDrainScan(
+    scanDeps(dirs, { due: async () => dueResult(false, null, null) }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "unavailable",
+    pending: null,
+    oldest_age_ms: null,
+  })
+  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+})
+
+test("a below-trigger backlog reports its counts and does not write", async () => {
+  const dirs = await setup()
+  const report = await runDrainScan(
+    scanDeps(dirs, { due: async () => dueResult(false, 5, 1_000) }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "below-trigger",
+    pending: 5,
+    oldest_age_ms: 1_000,
+  })
+  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+})
+
+test("an empty backlog reports empty", async () => {
+  const dirs = await setup()
+  const report = await runDrainScan(
+    scanDeps(dirs, { due: async () => dueResult(false, 0, null) }),
+  )
+  assert.deepEqual(report, { emitted: false, reason: "empty", pending: 0, oldest_age_ms: null })
+  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+})
+
+test("drain.enabled false skips the queue and the due check", async () => {
+  const dirs = await setup()
+  await config(dirs.dir, ["drain:", "  enabled: false"])
+  let queueReads = 0
+  let dueChecks = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      readQueue: async () => {
+        queueReads++
+        return { items: [] }
+      },
+      due: async () => {
+        dueChecks++
+        return dueResult(true)
+      },
+    }),
+  )
+  assert.deepEqual(report, { emitted: false, reason: "disabled", pending: null, oldest_age_ms: null })
+  assert.equal(queueReads, 0)
+  assert.equal(dueChecks, 0)
+})
+
+test("a thrown state, queue, or intent read returns unavailable and logs", async () => {
+  const cases: Array<{
+    name: string
+    overrides: Partial<DrainScanDeps>
+    pattern: RegExp
+  }> = [
+    {
+      name: "state",
+      overrides: {
+        readState: async () => {
+          throw new Error("state boom")
+        },
+      },
+      pattern: /producer state read failed/,
+    },
+    {
+      name: "queue",
+      overrides: {
+        readQueue: async () => {
+          throw new Error("queue boom")
+        },
+      },
+      pattern: /queue read failed/,
+    },
+    {
+      name: "intent",
+      overrides: {
+        intentExists: () => {
+          throw new Error("intent boom")
+        },
+      },
+      pattern: /intent check failed/,
+    },
+  ]
+
+  for (const item of cases) {
+    const dirs = await setup()
+    const warnings: string[] = []
+    const report = await runDrainScan(
+      scanDeps(dirs, {
+        ...item.overrides,
+        log: { event: () => {}, warn: (message) => warnings.push(message) },
+      }),
+    )
+    assert.deepEqual(report, {
+      emitted: false,
+      reason: "unavailable",
+      pending: null,
+      oldest_age_ms: null,
+    })
+    assert.equal(warnings.length, 1, item.name)
+    assert.match(warnings[0], item.pattern, item.name)
+    assert.deepEqual((await readIntents(dirs.stateDir)).intents, [], item.name)
+  }
+})
+
+test("a thrown due check returns unavailable and logs", async () => {
+  const dirs = await setup()
+  const warnings: string[] = []
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      log: { event: () => {}, warn: (message) => warnings.push(message) },
+      due: async () => {
+        throw new Error("db boom")
+      },
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "unavailable",
+    pending: null,
+    oldest_age_ms: null,
+  })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /due check failed/)
+})
+
+test("an intent write failure returns write-failed, logs, and saves no state", async () => {
+  const dir = await tempDir("chron-drain-")
+  const notADir = join(dir, "state-file")
+  await writeFile(notADir, "x", "utf8")
+  const warnings: string[] = []
+  let saves = 0
+  const report = await runDrainScan({
+    directory: dir,
+    stateDir: notADir,
+    log: { event: () => {}, warn: (message) => warnings.push(message) },
+    now: () => NOW,
+    due: async () => dueResult(true),
+    saveState: async () => {
+      saves++
+      return true
+    },
+  })
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "write-failed",
+    pending: 99,
+    oldest_age_ms: 0,
+  })
+  assert.equal(saves, 0)
+  assert.ok(warnings.some((message) => /intent write failed/.test(message)))
+})
+
+test("a state save failure still reports emitted and logs a warning", async () => {
+  const dirs = await setup()
+  const warnings: string[] = []
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      log: { event: () => {}, warn: (message) => warnings.push(message) },
+      saveState: async () => false,
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: true,
+    reason: "emitted",
+    pending: 99,
+    oldest_age_ms: 0,
+  })
+  assert.ok(warnings.some((message) => /state save failed/.test(message)))
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+})
+
+test("a deduped intent write returns pending-intent without advancing state", async () => {
+  const dirs = await setup()
+  await writeIntent(dirs.stateDir, "chron:drain", { id: "drain-pass", kind: "drain-pass" })
+  let saves = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      intentExists: () => false,
+      saveState: async () => {
+        saves++
+        return true
+      },
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "pending-intent",
+    pending: 99,
+    oldest_age_ms: 0,
+  })
+  assert.equal(saves, 0)
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+})
+
+test("a future last_emitted_ms is reset to zero and warned about", async () => {
+  const dirs = await setup()
+  await writeFile(
+    join(dirs.stateDir, DRAIN_PRODUCER_STATE_FILE),
+    JSON.stringify({ version: 1, last_emitted_ms: NOW + 10_000 }),
+    "utf8",
+  )
+  const warnings: string[] = []
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      log: { event: () => {}, warn: (message) => warnings.push(message) },
+      due: async () => dueResult(false, 5, 1_000),
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "below-trigger",
+    pending: 5,
+    oldest_age_ms: 1_000,
+  })
+  assert.ok(warnings.some((message) => /in the future; resetting to 0/.test(message)))
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+})
+
+test("a future last_emitted_ms still emits when due", async () => {
+  const dirs = await setup()
+  await writeFile(
+    join(dirs.stateDir, DRAIN_PRODUCER_STATE_FILE),
+    JSON.stringify({ version: 1, last_emitted_ms: NOW + 10_000 }),
+    "utf8",
+  )
+  const report = await runDrainScan(scanDeps(dirs))
+  assert.equal(report.emitted, true)
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: NOW,
+  })
+})
+
+test("a thrown config read returns config-error and writes no state", async () => {
+  const dirs = await setup()
+  const warnings: string[] = []
+  let saves = 0
+  const report = await runDrainScan(
+    scanDeps(dirs, {
+      log: { event: () => {}, warn: (message) => warnings.push(message) },
+      readConfig: async () => {
+        throw new Error("config boom")
+      },
+      saveState: async () => {
+        saves++
+        return true
+      },
+    }),
+  )
+  assert.deepEqual(report, {
+    emitted: false,
+    reason: "config-error",
+    pending: null,
+    oldest_age_ms: null,
+  })
+  assert.equal(saves, 0)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /config read failed/)
+})
+
+test("two sequential scans in the same millisecond emit one intent", async () => {
+  const dirs = await setup()
+  const first = await runDrainScan(scanDeps(dirs))
+  const second = await runDrainScan(scanDeps(dirs))
+  assert.equal(first.reason, "emitted")
+  assert.equal(second.reason, "cooldown")
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
 })
