@@ -10,6 +10,7 @@ import {
   dequeueById,
   emptyQueue,
   emptyScheduler,
+  enqueueWithinCapacity,
   enqueueWork,
   loadWorkQueue,
   loadWorkQueueState,
@@ -37,6 +38,33 @@ test("enqueueWork dedupes by id and preserves the original enqueue time", () => 
   const again = enqueueWork(queue, [item({ id: "mission:a", enqueued_ms: 99 })])
   assert.equal(again.length, 1)
   assert.equal(again[0].enqueued_ms, 10)
+})
+
+test("enqueueWithinCapacity accepts free slots and rejects the overflow", () => {
+  const queue = Array.from({ length: 49 }, (_, i) =>
+    item({ id: `mission:existing-${i}`, enqueued_ms: i }),
+  )
+  const { queue: merged, rejected } = enqueueWithinCapacity(queue, [
+    item({ id: "mission:new-a", enqueued_ms: 100 }),
+    item({ id: "mission:new-b", enqueued_ms: 101 }),
+  ])
+  assert.equal(merged.length, 50)
+  assert.deepEqual(rejected.map((i) => i.id), ["mission:new-b"])
+  assert.ok(merged.some((i) => i.id === "mission:existing-0"))
+  assert.ok(merged.some((i) => i.id === "mission:new-a"))
+})
+
+test("saveWorkQueueState reports write success and failure", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "work-queue-save-"))
+  const file = join(dir, "work-queue.json")
+  assert.equal(await saveWorkQueueState(file, [], emptyScheduler()), true)
+
+  const blocker = join(dir, "not-a-dir")
+  await writeFile(blocker, "x", "utf8")
+  assert.equal(
+    await saveWorkQueueState(join(blocker, "work-queue.json"), [], emptyScheduler()),
+    false,
+  )
 })
 
 test("requeueTail refreshes the timestamp, records the reason, and caps", () => {
