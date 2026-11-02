@@ -142,7 +142,7 @@ fully-reported sessions.
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |
 | `settle_seconds` | A session idle for less than this is not consumed — the half-written-turn guard (default 120). |
 | `poll_seconds` | Legacy consumer dial; unused by the tick step. |
-| `producer_interval_minutes` | Chron drain-scan cadence (`every N m`); the scan emits a `drain-pass` intent only when `drainDue()` holds (default 15). |
+| `producer_interval_minutes` | Minimum interval between emitted `drain-pass` intents (default 15). Hot-read on every scan; not the chron clock and not the pass duration. |
 | `max_wall_minutes` | Legacy consumer dial; unused by the tick step. |
 | `token_budget` | Per-pass token ceiling, checked between units; `0` = unlimited (default 80 000). |
 | `wake_token_budget` | Per-wake token ceiling (default 250 000). |
@@ -159,6 +159,17 @@ fully-reported sessions.
 The cursor is **activity time**, never an id. A partial, duplicate, or unknown
 writer report blocks the advance; after `poison_attempts` the pipe advances
 past the batch and records a `dropped` run.
+
+The drain producer runs on a fixed **one-minute chron clock**. Every scan
+hot-reads `producer_interval_minutes` and enforces it with its own persisted
+`last_emitted_ms` cooldown: the value is the minimum interval between emitted
+`drain-pass` intents, not the chron schedule you see in `chron.list()` and not
+the duration of a drain pass. Changing it takes effect on the next scan with no
+restart. The cooldown state is `state/drain-producer.json`; deleting that file
+resets the cooldown. `trigger_pending` and `trigger_max_age_hours` are
+unchanged, and their boundaries are inclusive. This changes the key's old
+meaning (a chron job cadence) to an emission interval; with the default 15 the
+effective drain cadence stays roughly the same.
 
 ---
 

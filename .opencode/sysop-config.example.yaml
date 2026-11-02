@@ -64,7 +64,7 @@ drain:
   trigger_max_age_hours: 2     # or the oldest pending turn is >= T hours old
   settle_seconds: 120          # a session idle this long is safe to consume
   poll_seconds: 60             # reschedule delay when below the trigger
-  producer_interval_minutes: 15  # chron drain scan cadence
+  producer_interval_minutes: 15  # min minutes between drain-pass intents (hot-read)
   max_wall_minutes: 15         # wall-clock ceiling per wake
   token_budget: 80000          # per pass; 0 = unlimited (ceiling, not a target)
   wake_token_budget: 250000    # per wake

@@ -9,6 +9,10 @@ The generic producer is a chron code job. It scans every mission's `schedule`,
 applies the gates once per occurrence, and writes one intent per selected
 mission. Custom producers use the same intent rail but own their own trigger.
 
+Drain is a dedicated work producer, not a `MissionProducer`: it owns the
+`drain-pass` kind and emits one intent from its own cooldown gate. Custom
+mission producers are only for mission files.
+
 ```
 chron mission scan (default every 1m)
   -> load missions + queue snapshot
