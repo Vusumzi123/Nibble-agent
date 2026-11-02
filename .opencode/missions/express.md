@@ -1,11 +1,12 @@
 ---
 id: express
 title: Deliver one stored idea
-frequency: low
+schedule: every 12h
+priority: 2
 menus: [day]
 min_level: 1
 approval: n/a
-candidacy: min-gap:express
+candidacy: always
 agent: ""
 enabled: false
 ---

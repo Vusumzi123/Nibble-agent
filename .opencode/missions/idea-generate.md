@@ -1,7 +1,8 @@
 ---
 id: idea-generate
 title: Draw today's idea for the bucket
-frequency: low
+schedule: every 24h
+priority: 2
 menus: [day]
 min_level: 1
 approval: n/a

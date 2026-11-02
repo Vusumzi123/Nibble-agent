@@ -1,11 +1,12 @@
 ---
 id: research
 title: Light research into the vault
-frequency: mid
+schedule: every 6h
+priority: 5
 menus: [day]
 min_level: 2
 approval: n/a
-candidacy: min-gap:research
+candidacy: always
 agent: ""
 enabled: true
 ---

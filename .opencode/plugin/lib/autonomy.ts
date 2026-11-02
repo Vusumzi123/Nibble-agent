@@ -503,6 +503,7 @@ const DRAIN_SCALAR_RULES: Record<string, Rule> = {
   trigger_max_age_hours: { t: "int", min: 1 },
   settle_seconds: { t: "int", min: 0 },
   poll_seconds: { t: "int", min: 1 },
+  producer_interval_minutes: { t: "int", min: 1 },
   max_wall_minutes: { t: "int", min: 1 },
   token_budget: { t: "int", min: 0 },
   wake_token_budget: { t: "int", min: 0 },
@@ -628,7 +629,7 @@ export async function readCommsConfig(directory: string, opts: ReadAutonomyOpts 
 // Mission overlay — `autonomy.missions.<id>.*` (missions-plan §6, D-M5).
 //
 // Config is restrict-only: it may disable a mission, raise its `min_level`,
-// move `frequency` toward `low`, or narrow `menus` — never widen any of them
+// lower its `priority`, or narrow `menus` — never widen any of them
 // (enforced by applyMissionOverlay in lib/missions.ts, which owns the file
 // values). This reader only parses + type-checks the overlay; every invalid
 // value falls back (key ignored) and warns once to <log>/autonomy-config.log.
@@ -636,23 +637,20 @@ export async function readCommsConfig(directory: string, opts: ReadAutonomyOpts 
 // dedicated scanner below; readAutonomyConfig skips the subtree via
 // AUTONOMY_OPTS.skipBlocks.
 
-export const MISSION_FREQUENCIES = ["high", "mid", "low"] as const
-export type MissionFrequency = (typeof MISSION_FREQUENCIES)[number]
-
 /** Frontmatter/menu window values — `both` is sugar for [day, night]. */
 export const MISSION_MENU_WINDOWS = ["day", "night", "both"] as const
 
 export type MissionOverlay = {
   enabled?: boolean
   min_level?: number
-  frequency?: string
+  priority?: number
   menus?: string[]
 }
 
 const MISSION_OVERLAY_RULES: Record<string, Rule> = {
   enabled: { t: "bool" },
   min_level: { t: "int", min: 0, max: 4 },
-  frequency: { t: "enum", values: MISSION_FREQUENCIES },
+  priority: { t: "int", min: 0, max: 9 },
   menus: { t: "list", members: MISSION_MENU_WINDOWS },
 }
 

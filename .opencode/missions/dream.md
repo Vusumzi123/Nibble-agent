@@ -1,7 +1,7 @@
 ---
 id: dream
 title: Unconscious dream simulation
-frequency: low
+schedule: every 1h
 menus: [night]
 min_level: 1
 priority: 0

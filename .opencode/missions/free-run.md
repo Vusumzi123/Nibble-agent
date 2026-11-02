@@ -1,7 +1,8 @@
 ---
 id: free-run
 title: Free run — one self-chosen action
-frequency: low
+schedule: every 6h
+priority: 2
 menus: [day]
 min_level: 3
 approval: writes-follow-dial

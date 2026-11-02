@@ -13,9 +13,9 @@
 //     (the frontmatter body is wrapped under a synthetic `fm:` section).
 //   - The config overlay `autonomy.missions.<id>.*` (parsed by
 //     lib/autonomy.ts readMissionOverlay) is RESTRICT-ONLY (D-M5): config may
-//     disable a mission, raise min_level, move frequency toward low, or narrow
-//     menus — never widen any of them. Widen attempts are rejected, logged
-//     once, and the file value stands.
+//     disable a mission, raise min_level, lower priority, or narrow menus —
+//     never widen any of them. Widen attempts are rejected, logged once, and
+//     the file value stands.
 //   - `.opencode/missions/**` writes classify as `self-improve` at the
 //     autonomy gate (isSelfImprovePath) — the agent cannot install its own
 //     autonomous missions without approval (missions-plan §8).
@@ -27,11 +27,9 @@ import { readFile, readdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { parseFlatBlock, parseInlineList, stripPairQuotes } from "./config.ts"
 import {
-  MISSION_FREQUENCIES,
   MISSION_MENU_WINDOWS,
   readMissionOverlay,
   reportRejects,
-  type MissionFrequency,
   type MissionOverlay,
   type RejectEvent,
 } from "./autonomy.ts"
@@ -64,8 +62,10 @@ const CANDIDACY_BASE = new Set(["always", "backlog-pending", "brain-stale", "dre
 export type Mission = {
   id: string
   title: string
-  /** Digest WEIGHT, not a gate (D-M3). */
-  frequency: MissionFrequency
+  /** Producer cadence in chron grammar; "" = no schedule (legacy item). */
+  schedule: string
+  /** Production owner: `generic` or a registered custom producer. */
+  producer: string
   /** Effective windows after expanding `both`; subset of ["day", "night"]. */
   menus: string[]
   /** Lowest autonomy.level that may run this mission. */
@@ -88,18 +88,17 @@ export type Mission = {
 // `menus` defaults to the day window so a half-written mission never slips
 // into the quiet hours.
 export const DEFAULT_MISSION: Omit<Mission, "id" | "title" | "body"> = {
-  frequency: "mid",
+  schedule: "",
+  producer: "generic",
   menus: ["day"],
   min_level: 2,
-  priority: 3,
+  priority: 5,
   approval: "writes-follow-dial",
   candidacy: "always",
   enqueue: "producer",
   agent: "",
   enabled: true,
 }
-
-const FREQUENCY_RANK: Record<string, number> = { high: 2, mid: 1, low: 0 }
 
 // ---------------------------------------------------------------------------
 // Frontmatter parsing (pure, never throws)
@@ -131,9 +130,13 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
     case "agent":
       // `agent: ""` is the spec's explicit default (empty = heartbeat agent).
       return stripPairQuotes(raw)
-    case "frequency": {
+    case "schedule": {
       const v = stripPairQuotes(raw)
-      return (MISSION_FREQUENCIES as readonly string[]).includes(v) ? v : undefined
+      return v === "" ? undefined : v
+    }
+    case "producer": {
+      const v = stripPairQuotes(raw)
+      return v === "" ? undefined : v
     }
     case "menus": {
       const list = parseInlineList(raw)
@@ -185,7 +188,8 @@ function coerceMissionField(key: string, raw: string): unknown | undefined {
 const MISSION_KEYS = new Set([
   "id",
   "title",
-  "frequency",
+  "schedule",
+  "producer",
   "menus",
   "min_level",
   "priority",
@@ -240,7 +244,8 @@ export function parseMissionFile(
   const mission: Mission = {
     id,
     title: typeof parsed.title === "string" && parsed.title ? parsed.title : id,
-    frequency: (parsed.frequency as MissionFrequency) ?? DEFAULT_MISSION.frequency,
+    schedule: typeof parsed.schedule === "string" ? parsed.schedule : DEFAULT_MISSION.schedule,
+    producer: typeof parsed.producer === "string" ? parsed.producer : DEFAULT_MISSION.producer,
     menus: (parsed.menus as string[]) ?? DEFAULT_MISSION.menus,
     min_level: typeof parsed.min_level === "number" ? parsed.min_level : DEFAULT_MISSION.min_level,
     priority: typeof parsed.priority === "number" ? parsed.priority : DEFAULT_MISSION.priority,
@@ -296,17 +301,15 @@ export function applyMissionOverlay(
     }
   }
 
-  // 3. frequency may only move toward low (rarer).
-  if (overlay.frequency !== undefined && overlay.frequency !== mission.frequency) {
-    const o = FREQUENCY_RANK[overlay.frequency]
-    const f = FREQUENCY_RANK[mission.frequency]
-    if (Number.isFinite(o) && o < f) {
-      out.frequency = overlay.frequency as MissionFrequency
-    } else if (Number.isFinite(o) && o > f) {
+  // 3. priority may only decrease (a config cannot promote a mission).
+  if (overlay.priority !== undefined && overlay.priority !== mission.priority) {
+    if (overlay.priority < mission.priority) {
+      out.priority = overlay.priority
+    } else {
       rejects.push({
-        path: path("frequency"),
-        raw: overlay.frequency,
-        reason: `frequency may only move toward low (file: ${mission.frequency})`,
+        path: path("priority"),
+        raw: String(overlay.priority),
+        reason: `priority may only decrease (file: ${mission.priority})`,
       })
     }
   }

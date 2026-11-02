@@ -1,7 +1,8 @@
 ---
 id: notify
 title: Fan out approvals and notifications
-frequency: high
+schedule: every 1h
+priority: 8
 menus: [day]
 min_level: 1
 approval: n/a

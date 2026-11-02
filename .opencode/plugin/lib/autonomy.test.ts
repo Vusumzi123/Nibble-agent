@@ -410,7 +410,7 @@ test("parseMissionOverlay parses per-id blocks and reports bad lines", () => {
     "    staleness:",
     "      enabled: false",
     "      min_level: 3          # raise only",
-    "      frequency: low",
+    "      priority: 4          # lower only",
     "      menus: [day]",
     "    drain:",
     "      enabled: true",
@@ -420,7 +420,12 @@ test("parseMissionOverlay parses per-id blocks and reports bad lines", () => {
     "",
   ].join("\n")
   const { overlay, rejects } = parseMissionOverlay(yaml)
-  assert.deepEqual(overlay.staleness, { enabled: false, min_level: 3, frequency: "low", menus: ["day"] })
+  assert.deepEqual(overlay.staleness, {
+    enabled: false,
+    min_level: 3,
+    priority: 4,
+    menus: ["day"],
+  })
   assert.deepEqual(overlay.drain, { enabled: true })
   assert.deepEqual(overlay.bad, {})
   assert.equal(overlay.strung, undefined)
@@ -436,6 +441,7 @@ test("parseMissionOverlay rejects invalid values but keeps valid ones", () => {
     "  missions:",
     "    staleness:",
     "      min_level: 9",
+    "      priority: 12",
     "      frequency: sometimes",
     "      menus: [weekend]",
     "      enabled: maybe",
@@ -452,6 +458,7 @@ test("parseMissionOverlay rejects invalid values but keeps valid ones", () => {
       "missions.staleness.menus",
       "missions.staleness.min_level",
       "missions.staleness.min_level_ok",
+      "missions.staleness.priority",
     ],
   )
 })

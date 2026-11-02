@@ -5,9 +5,8 @@
 // the other libs already own (backlog.ndjson, memory.json, audit.log,
 // profile-note mtimes, reference-note `updated:` dates), the quiet-window
 // predicate, the candidate-list build
-// (enabled ∧ menus.contains(now) ∧ level ≥ min_level ∧ D-M8 candidacy), the
-// bounded frequency × mood bias, and a stable `digest_hash` over the signal
-// set (B7 groundwork — repeated identical digests drive adaptive backoff).
+// (enabled ∧ menus.contains(now) ∧ level ≥ min_level ∧ D-M8 candidacy), and
+// a stable `digest_hash` over the signal set.
 //
 // The pre-gate contract (plan §6.2, §12.1 step 5): an all-quiet tick at
 // level ≤ L2 ends as NO_REPLY with zero LLM calls. `computeDigest` is the
@@ -26,7 +25,7 @@ import { stat } from "node:fs/promises"
 import { join } from "node:path"
 import { parseFlatBlock, readSection, sectionCoercer } from "./config.ts"
 import { HEARTBEAT_CODE_FILES } from "./code-files.ts"
-import { readAutonomyConfig, readMoodConfig, type MissionFrequency } from "./autonomy.ts"
+import { readAutonomyConfig, readMoodConfig } from "./autonomy.ts"
 import { pendingCount, readBacklogConfig, resolveBacklogFile } from "./backlog.ts"
 import { atomicRead, atomicWrite } from "./fsx.ts"
 import { readAuditConfig } from "./audit.ts"
@@ -73,15 +72,6 @@ export function isQuietNow(window: string, now: Date = new Date()): boolean {
   const cur = now.getHours() * 60 + now.getMinutes()
   if (w.startMin < w.endMin) return cur >= w.startMin && cur < w.endMin
   return cur >= w.startMin || cur < w.endMin
-}
-
-// ---------------------------------------------------------------------------
-// Frequency weights (plan §4, D-M3): a digest WEIGHT, never a gate.
-
-export const FREQUENCY_WEIGHTS: Record<MissionFrequency, number> = {
-  high: 1.0,
-  mid: 0.5,
-  low: 0.2,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,11 +135,10 @@ export function digestHash(signals: HeartbeatSignals): string {
 }
 
 // ---------------------------------------------------------------------------
-// Mood dispatch bias (plan §4, §15.4): effective bias =
-// frequency_weight × mood_dispatch_bias. With `dispatch_influence: false`
-// (hot dial) the mood term is exactly 1.0 and only the frequency weight
-// applies. Bounded to [0.5, 1.5]; at rest (neutral valence, baseline
-// arousal) the term is 1.0.
+// Mood dispatch bias (plan §4, §15.4): a bounded multiplier journaled for
+// calibration and usable as a tie-break. It never changes a queued mission's
+// priority or its gates. Bounded to [0.5, 1.5]; at rest (neutral valence,
+// baseline arousal) the term is 1.0.
 
 export const MOOD_BIAS_MIN = 0.5
 export const MOOD_BIAS_MAX = 1.5
@@ -256,44 +245,35 @@ export function candidacyPasses(mission: Mission, ctx: CandidacyContext): boolea
 export type DigestCandidate = {
   id: string
   title: string
-  frequency: MissionFrequency
+  priority: number
   min_level: number
   menus: string[]
   candidacy: MissionCandidacy
-  frequency_weight: number
-  mood_bias: number
-  /** frequency_weight × mood_bias — the journaled dispatch weight (§4). */
-  weight: number
 }
 
 export type CandidateCtx = {
   level: number
   quiet: boolean
-  mood: MoodState
-  dispatchInfluence: boolean
   candidacy: CandidacyContext
 }
 
+/** Structural + candidacy filter for the digest/ledger. Production order is
+ *  decided by the mission producer (priority), never by a mood-weighted draw. */
 export function buildCandidates(missions: Mission[], ctx: CandidateCtx): DigestCandidate[] {
   const window = ctx.quiet ? "night" : "day"
-  const moodBias = moodDispatchBias(ctx.mood, ctx.dispatchInfluence)
   const out: DigestCandidate[] = []
   for (const m of missions) {
     if (!m.enabled) continue
     if (!m.menus.includes(window)) continue
     if (ctx.level < m.min_level) continue
     if (!candidacyPasses(m, ctx.candidacy)) continue
-    const frequencyWeight = FREQUENCY_WEIGHTS[m.frequency]
     out.push({
       id: m.id,
       title: m.title,
-      frequency: m.frequency,
+      priority: m.priority,
       min_level: m.min_level,
       menus: m.menus,
       candidacy: m.candidacy,
-      frequency_weight: frequencyWeight,
-      mood_bias: moodBias,
-      weight: frequencyWeight * moodBias,
     })
   }
   return out
@@ -381,17 +361,30 @@ async function readLastMission(stateDir: string): Promise<string | null> {
   }
 }
 
+export type HeartbeatContext = {
+  nowMs: number
+  autonomy: AutonomyConfig
+  moodCfg: MoodConfig
+  mood: MoodState
+  sleep: SleepState
+  signals: HeartbeatSignals
+  quiet: boolean
+  brainOldest: BrainNoteAge | null
+  stateDir: string
+  logDir: string
+  vaultDir: string
+}
+
 /**
- * Compute the full deterministic digest for a project. Hot-reads every config
- * and state file; a missing/broken input degrades to a silent signal, never a
- * throw. Zero LLM calls anywhere in this path.
+ * Gather the deterministic signal + config snapshot shared by the heartbeat
+ * digest and the mission producer. Hot-reads every input; a missing/broken
+ * one degrades to a silent signal, never a throw. Zero LLM calls.
  */
-export async function computeDigest(
+export async function gatherHeartbeatContext(
   directory: string,
-  opts: ComputeDigestOpts = {},
-): Promise<HeartbeatDigest> {
-  const now = opts.now ?? new Date()
-  const nowMs = now.getTime()
+  opts: { nowMs?: number; dbFile?: string } = {},
+): Promise<HeartbeatContext> {
+  const nowMs = opts.nowMs ?? Date.now()
 
   const autonomy = await readAutonomyConfig(directory)
   const moodCfg = await readMoodConfig(directory)
@@ -460,7 +453,7 @@ export async function computeDigest(
     excludeDirs: parseReadonlyDirs(vaultPolicy.readonly),
   })
 
-  const quiet = isQuietNow(autonomy.quiet.window, now)
+  const quiet = isQuietNow(autonomy.quiet.window, new Date(nowMs))
   const signals: HeartbeatSignals = {
     backlog_pending,
     unconsumed_turns,
@@ -469,6 +462,35 @@ export async function computeDigest(
     brain_oldest: brainOldest,
     quiet,
   }
+
+  return {
+    nowMs,
+    autonomy,
+    moodCfg,
+    mood,
+    sleep,
+    signals,
+    quiet,
+    brainOldest,
+    stateDir,
+    logDir,
+    vaultDir,
+  }
+}
+
+/**
+ * Compute the full deterministic digest for a project. Hot-reads every config
+ * and state file; a missing/broken input degrades to a silent signal, never a
+ * throw. Zero LLM calls anywhere in this path.
+ */
+export async function computeDigest(
+  directory: string,
+  opts: ComputeDigestOpts = {},
+): Promise<HeartbeatDigest> {
+  const now = opts.now ?? new Date()
+  const nowMs = now.getTime()
+  const ctx = await gatherHeartbeatContext(directory, { nowMs, dbFile: opts.dbFile })
+  const { autonomy, moodCfg, mood, sleep, signals, quiet, brainOldest, stateDir } = ctx
 
   let missions: Mission[] = []
   try {
@@ -484,10 +506,8 @@ export async function computeDigest(
   const candidates = buildCandidates(missions, {
     level: autonomy.level,
     quiet,
-    mood,
-    dispatchInfluence: moodCfg.dispatch_influence,
     candidacy: {
-      backlogPending: backlog_pending,
+      backlogPending: signals.backlog_pending,
       brainOldest,
       sleep: {
         status: sleep.status,
