@@ -11,6 +11,8 @@ are most likely to touch.
   and `fire:<id>` events to react to scheduled jobs.
 - [How mission producers work](Mission-Producers.md) — the chron scan, gates,
   priorities, intents, and custom producers.
+- [The drain process](Drain-Process.md) — how settled conversation turns become
+  Brain notes: discovery, summarization, writing, cursor accounting, and budgets.
 - [Registering generic missions](Registering-Generic-Missions.md) — add a
   mission file that the chron scan picks up.
 - [Registering user tasks](Registering-User-Tasks.md) — queue work with
