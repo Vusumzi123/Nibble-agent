@@ -7,9 +7,8 @@ are most likely to touch.
 
 - [Adding scheduled markdown jobs](Adding-Scheduled-Markdown-Jobs.md) — create
   a prompt job in `.opencode/schedule/` and let chron turn it into a user task.
-- [Plugin event listeners](Plugin-Event-Listeners.md) — react to opencode
-  events (`chat.message`, `tool.execute.after`, `session.idle`) and to chron
-  `fire` events.
+- [Chron fire listeners](Chron-Fire-Listeners.md) — attach to chron's `fire`
+  and `fire:<id>` events to react to scheduled jobs.
 
 ## Two schedulers, one queue
 

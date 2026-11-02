@@ -105,7 +105,7 @@ it needs a restart.
 To push a manual job immediately, call `chron.emit("<id>")` from a plugin or a
 code job. `emit` uses the job's source, so a file job still goes through the
 bridge and becomes a task. See
-[Plugin event listeners](Plugin-Event-Listeners.md) for the call site.
+[Chron fire listeners](Chron-Fire-Listeners.md) for the call site.
 
 ## Scheduled job or mission?
 

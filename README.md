@@ -132,7 +132,7 @@ silent no-action wake with zero LLM calls. See [`AGENTS.md`](AGENTS.md).
 The in-repo wiki starts at [`wiki/Home.md`](wiki/Home.md):
 
 - [Adding scheduled markdown jobs](wiki/Adding-Scheduled-Markdown-Jobs.md)
-- [Plugin event listeners](wiki/Plugin-Event-Listeners.md)
+- [Chron fire listeners](wiki/Chron-Fire-Listeners.md)
 
 ## Modes
 
