@@ -22,6 +22,7 @@
 // failures back off, permanent failures count toward poison.
 //
 // Loaded via relative import only.
+import { randomUUID } from "node:crypto"
 import type { DrainConfig } from "./config.ts"
 import {
   advanceSession,
@@ -76,6 +77,12 @@ export type DrainPipeResult = {
   pendingAfter?: number | null
   oldestPendingAgeMs?: number | null
   budgetRemaining?: number | null
+  /** Groups the pipe/summarizer/writer lines of this pass. */
+  passId?: string
+  /** Wall time split per pass phase (ms). */
+  phaseMs?: Record<string, number>
+  /** Unattributed pass time (planning, dedupe, parse). */
+  overheadMs?: number | null
 }
 
 /** One-line mission summary for the heartbeat/dream ledger and backlog. */
@@ -155,9 +162,25 @@ export function chunkPlanned(planned: PlannedItem[], size: number): PlannedChunk
  * accounting. There is no lock: the single heartbeat loop is the executor.
  */
 export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult> {
-  const started = Date.now()
+  const started = performance.now()
+  const passId = randomUUID()
+  const clock = () => performance.now()
+  const phaseMs = {
+    discover: 0,
+    fetch: 0,
+    render: 0,
+    summarize: 0,
+    write: 0,
+    save: 0,
+    count: 0,
+  }
   const cfg = deps.config
   const cursorFile = resolveCursorFile(deps.stateDir, cfg.cursor_file)
+  const timedSave = async (next: DrainCursor): Promise<void> => {
+    const at = clock()
+    await saveCursor(cursorFile, next)
+    phaseMs.save += clock() - at
+  }
 
   let cursor: DrainCursor
   try {
@@ -174,7 +197,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   if (cursor.watermark_ts <= 0 && cfg.initial_lookback_hours > 0) {
     cursor = advanceWatermark(cursor, Date.now() - cfg.initial_lookback_hours * 3_600_000)
     try {
-      await saveCursor(cursorFile, cursor)
+      await timedSave(cursor)
     } catch (err) {
       deps.onWarn?.("drain pipe: cursor bootstrap save failed", err)
     }
@@ -194,6 +217,17 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     Number.isFinite(budget) ? Math.max(0, Math.floor(budget - totalTokens)) : null
 
   const emit = async (result: DrainPipeResult): Promise<DrainPipeResult> => {
+    const elapsed = Math.round(clock() - started)
+    const accounted = Object.values(phaseMs).reduce((sum, value) => sum + value, 0)
+    const roundedPhases = Object.fromEntries(
+      Object.entries(phaseMs).map(([key, value]) => [key, Math.round(value)]),
+    )
+    const enriched: DrainPipeResult = {
+      ...result,
+      passId,
+      phaseMs: roundedPhases,
+      overheadMs: Math.max(0, Math.round(elapsed - accounted)),
+    }
     try {
       await deps.ledger?.write({
         source: "pipe",
@@ -208,8 +242,11 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         cursor_after: result.cursorAfter,
         degraded: result.degraded ?? null,
         error: result.error ?? null,
+        pass_id: passId,
+        phase_ms: roundedPhases,
+        overhead_ms: enriched.overheadMs,
         ...(summarizeReplyBytes !== null ? { reply_bytes: summarizeReplyBytes } : {}),
-        wall_ms: Date.now() - started,
+        wall_ms: elapsed,
         ...(deps.trigger ? { trigger: deps.trigger } : {}),
         ...(deps.pass !== undefined ? { pass: deps.pass } : {}),
         ...(pendingBefore !== null ? { pending_before: pendingBefore } : {}),
@@ -221,7 +258,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     } catch {
       /* fail-open */
     }
-    return result
+    return enriched
   }
 
   const stuck = async (
@@ -274,9 +311,24 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   let degraded: DrainPipeResult["degraded"] = source.degraded
   let error: string | undefined
 
+  const countPending = async (): Promise<number> => {
+    const at = clock()
+    const count = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+    phaseMs.count += clock() - at
+    return count
+  }
+  const oldestPending = async (): Promise<number | null> => {
+    const at = clock()
+    const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
+    phaseMs.count += clock() - at
+    return oldest
+  }
+
   try {
-    pendingBefore = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+    pendingBefore = await countPending()
+    const discoverAt = clock()
     const sessions = await source.discover(cursor.watermark_ts, cfg.batch_sessions)
+    phaseMs.discover += clock() - discoverAt
     const renderings: RenderedSession[] = []
     // Per-session fetch marks + the watermark floor rule (§2.3): a discovered
     // session with unconsumed work above its mark floors the watermark so it
@@ -306,16 +358,20 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         mark = Math.max(session.timeCreated || 0, floor)
       }
 
+      const fetchAt = clock()
       const turns = await source.fetch(session.id, mark, cfg.max_turns_per_session)
+      phaseMs.fetch += clock() - fetchAt
       if (turns.length === 0) {
         consumedMarks.push(mark)
         consumedUpTo.push(Math.max(mark, session.timeUpdated || 0))
         continue
       }
+      const renderAt = clock()
       const rendered = renderSession(session.id, turns, {
         maxBytes: cfg.max_session_bytes,
         priorSummary: cursor.sessions[session.id]?.summary || null,
       })
+      phaseMs.render += clock() - renderAt
       if (!rendered) {
         // Turn rows existed but rendered empty — treat as consumed at the mark.
         consumedMarks.push(mark)
@@ -339,10 +395,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       const candidate = bound === null ? null : floors === null ? bound : Math.min(bound, floors)
       if (candidate !== null && candidate > cursor.watermark_ts) {
         cursor = advanceWatermark(cursor, candidate)
-        await saveCursor(cursorFile, cursor)
+        await timedSave(cursor)
       }
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
-      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
+      pendingAfter = await countPending()
+      const oldest = await oldestPending()
       oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
       return stuck(undefined, degraded, sessions.length)
     }
@@ -355,6 +411,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         stopped = "token-budget"
         break
       }
+      const summarizeAt = clock()
       const summary = await summarizeSession(
         {
           sessionID: rendered.sessionID,
@@ -371,10 +428,38 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           onWarn: deps.onWarn,
         },
       )
+      phaseMs.summarize += clock() - summarizeAt
       if (summary.degraded) degraded ??= summary.degraded
       if (summary.error) error ??= summary.error
       summarizeReplyBytes = summary.replyBytes ?? summarizeReplyBytes
       totalTokens += summary.tokens ?? 0
+
+      try {
+        await deps.ledger?.write({
+          source: "summarizer",
+          outcome: summary.degraded ? "degraded" : summary.error ? "error" : "ok",
+          model: cfg.summarize_model || null,
+          agent: "session-summarizer",
+          session: summary.sessionID ?? null,
+          pass_id: passId,
+          item: rendered.sessionID,
+          attempt: summary.attempts ?? null,
+          prompt_bytes: summary.promptBytes,
+          reply_bytes: summary.replyBytes,
+          wall_ms: summary.wallMs,
+          spawn_ms: summary.spawnMs ?? null,
+          queue_ms: summary.queueMs ?? null,
+          run_ms: summary.runMs ?? null,
+          steps: summary.steps ?? null,
+          span_ms: summary.spanMs ?? null,
+          model_ms: summary.modelMs ?? null,
+          tool_ms: summary.toolMs ?? null,
+          tokens: summary.tokens ?? null,
+          error: summary.error ?? null,
+        })
+      } catch {
+        /* fail-open */
+      }
 
       const ts = Math.max(...rendered.turns.map((turn) => turn.time))
       sessionMaxTs.set(rendered.sessionID, Math.max(sessionMaxTs.get(rendered.sessionID) ?? 0, ts))
@@ -427,10 +512,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         )
         cursor = advanceWatermark(cursor, Math.min(candidate, bound))
         cursor = pruneSessions(cursor, cfg.continuity_sessions)
-        await saveCursor(cursorFile, cursor)
+        await timedSave(cursor)
       }
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
-      const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
+      pendingAfter = await countPending()
+      const oldest = await oldestPending()
       oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
       if (stopped === "token-budget") {
         return emit({
@@ -495,17 +580,18 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     let writerSession: string | null = null
     promptBytes = 0
 
-    for (const chunk of chunks) {
+    for (const [chunkIndex, chunk] of chunks.entries()) {
       // Budget check BEFORE the next writer chunk (§2.2) — never mid-chunk.
       if (totalTokens >= budget) {
         stopped = "token-budget"
         break
       }
-      const writerStarted = Date.now()
+      const writerStarted = clock()
       const chunkReport = await deps.provider!.consolidate!(
         chunk.items.map((entry) => entry.item),
         ctx,
       )
+      phaseMs.write += clock() - writerStarted
       promptBytes += chunkReport.promptBytes ?? 0
       totalTokens += chunkReport.tokens ?? 0
       writerSession = chunkReport.session ?? writerSession
@@ -515,8 +601,19 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           source: "writer",
           outcome: chunkReport.ok ? "ok" : "error",
           model: cfg.writer_model || null,
+          agent: "rag-brain",
+          pass_id: passId,
+          chunk: chunkIndex,
+          items: chunk.items.length,
           prompt_bytes: chunkReport.promptBytes ?? null,
-          wall_ms: Date.now() - writerStarted,
+          wall_ms: Math.round(clock() - writerStarted),
+          spawn_ms: chunkReport.spawnMs ?? null,
+          queue_ms: chunkReport.queueMs ?? null,
+          run_ms: chunkReport.runMs ?? null,
+          steps: chunkReport.steps ?? null,
+          span_ms: chunkReport.spanMs ?? null,
+          model_ms: chunkReport.modelMs ?? null,
+          tool_ms: chunkReport.toolMs ?? null,
           tokens: chunkReport.tokens ?? null,
           cost: chunkReport.cost ?? null,
           cursor_before: cursorBefore,
@@ -650,8 +747,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursor = { ...cursor, blocked: batchBlocked }
         }
         cursor = pruneSessions(cursor, cfg.continuity_sessions)
-        await saveCursor(cursorFile, cursor)
-        pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+        await timedSave(cursor)
+        pendingAfter = await countPending()
         return emit({
           outcome: droppedAny && !keptAny ? "dropped" : "error",
           sessions: renderings.length,
@@ -673,8 +770,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       cursor = recordFailure(cursor, transientBoundary, 0, {
         backoffMs: cfg.poll_seconds * 4 * 1000,
       }).cursor
-      await saveCursor(cursorFile, cursor)
-      pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
+      await timedSave(cursor)
+      pendingAfter = await countPending()
       return emit({
         outcome: "error",
         sessions: renderings.length,
@@ -735,10 +832,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       cursor = advanceWatermark(cursor, candidate)
     }
     cursor = pruneSessions(cursor, cfg.continuity_sessions)
-    await saveCursor(cursorFile, cursor)
+    await timedSave(cursor)
 
-    pendingAfter = await source.unconsumedCount(cursor.watermark_ts, sessionMarks(cursor))
-    const oldest = await source.oldestUnconsumedTs(cursor.watermark_ts, sessionMarks(cursor))
+    pendingAfter = await countPending()
+    const oldest = await oldestPending()
     oldestAgeMs = oldest === null ? null : Math.max(0, Date.now() - oldest)
 
     if (stopped === "token-budget") {

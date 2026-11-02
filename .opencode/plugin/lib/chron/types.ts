@@ -12,7 +12,14 @@ export type FireEvent = {
   payload?: unknown
 }
 
-export type HandlerResult = void | { defer: true }
+/**
+ * A handler/listener may defer (retry the same occurrence) and/or return a
+ * small, non-secret `info` object. Chron merges every `info` into the fire log
+ * line, so a producer can report its decision without writing its own log.
+ */
+export type HandlerResult =
+  | void
+  | { defer?: boolean; info?: Record<string, unknown> }
 
 export type ChronLog = {
   event: (entry: Record<string, unknown>) => void

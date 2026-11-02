@@ -483,8 +483,7 @@ export function readDrain(dir, paths, state, now = Date.now()) {
   return {
     ts: new Date(now).toISOString(),
     enabled: cfg.enabled !== false,
-    consumer: cfg.consumer !== false,
-    state: current.state ?? (cfg.consumer === false ? 'disabled' : drainPass ? 'queued' : 'idle'),
+    state: current.state ?? (cfg.enabled === false ? 'disabled' : drainPass ? 'queued' : 'idle'),
     trigger: current.trigger ?? null,
     queued: Boolean(drainPass),
     queued_since: queuedSince === null ? null : new Date(queuedSince).toISOString(),
@@ -1297,7 +1296,7 @@ export function overview(dir, paths, state, options = {}) {
     missions: {
       total: missions.length,
       enabled: missions.filter((m) => m.enabled).length,
-      ids: missions.map((m) => ({ id: m.id, enabled: m.enabled, level: m.min_level, frequency: m.frequency })),
+      ids: missions.map((m) => ({ id: m.id, enabled: m.enabled, level: m.min_level, schedule: m.schedule, priority: m.priority })),
     },
     cost: {
       total_24h: cost.total,

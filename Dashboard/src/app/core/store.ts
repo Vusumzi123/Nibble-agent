@@ -418,7 +418,7 @@ export class DashboardStore {
     id: string;
     enabled?: boolean;
     min_level?: number;
-    frequency?: string;
+    priority?: number;
     menus?: string[];
   }): Promise<Mission> {
     return this.blocking('saving mission…', async () => {

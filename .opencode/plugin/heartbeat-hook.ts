@@ -724,6 +724,11 @@ export default (async ({ client, directory, ...rest }) => {
     let orphanAbortError: string | undefined
     let stoppedAt: string | undefined
     let transcriptRows: unknown[] | undefined
+    let spanMs: number | null | undefined
+    let modelMs: number | null | undefined
+    let toolMs: number | null | undefined
+    let steps: number | undefined
+    const missionStarted = Date.now()
 
     try {
       const created = await (client as any).session.create({
@@ -798,6 +803,10 @@ export default (async ({ client, directory, ...rest }) => {
           rows = msgs.data
           const acct = sessionAccounting(rows)
           tokenCost = acct.inputTokens + acct.outputTokens
+          spanMs = acct.spanMs
+          modelMs = acct.modelMs
+          toolMs = acct.toolMs
+          steps = acct.assistantSteps
           summary = await sessions.lastAssistantText(childID)
         }
         if (summary || tokenCost > 0 || i === attempts - 1) break
@@ -822,6 +831,11 @@ export default (async ({ client, directory, ...rest }) => {
       runError,
       sessionId,
       result,
+      wallMs: Date.now() - missionStarted,
+      ...(spanMs === undefined ? {} : { spanMs }),
+      ...(modelMs === undefined ? {} : { modelMs }),
+      ...(toolMs === undefined ? {} : { toolMs }),
+      ...(steps === undefined ? {} : { steps }),
       ...(aborted === undefined ? {} : { aborted }),
       ...(abortError === undefined ? {} : { abortError }),
       ...(stopReason === undefined ? {} : { stopReason }),

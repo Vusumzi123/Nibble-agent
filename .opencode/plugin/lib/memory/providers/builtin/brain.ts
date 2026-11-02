@@ -108,6 +108,13 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         cost: spawned.cost,
         promptBytes,
         session: spawned.sessionID || null,
+        spawnMs: spawned.spawnMs ?? null,
+        queueMs: spawned.queueMs ?? null,
+        runMs: spawned.runMs ?? null,
+        steps: spawned.steps ?? null,
+        spanMs: spawned.spanMs ?? null,
+        modelMs: spawned.modelMs ?? null,
+        toolMs: spawned.toolMs ?? null,
       }
 
       if (!spawned.ok) {

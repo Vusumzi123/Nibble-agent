@@ -11,8 +11,9 @@
               <thead>
                 <tr>
                   <th>mission</th>
-                  <th>freq</th>
+                  <th>sched</th>
                   <th class="num">lvl</th>
+                  <th class="num">prio</th>
                   <th>candidacy</th>
                   <th class="num">runs</th>
                   <th class="num">cost</th>
@@ -29,8 +30,9 @@
                       @if (mission.overlay) { <span class="tag tag--warning">overlay</span> }
                       @if (!mission.file_enabled) { <span class="tag tag--ghost">file-off</span> }
                     </td>
-                    <td class="mono dim">{{ mission.frequency }}</td>
+                    <td class="mono dim">{{ mission.schedule || '—' }}</td>
                     <td class="num mono">{{ mission.min_level }}</td>
+                    <td class="num mono">{{ mission.priority }}</td>
                     <td class="mono dim">{{ mission.candidacy }}</td>
                     <td class="num mono">{{ stats(mission.id).runs }}</td>
                     <td class="num mono">{{ fmtCost(stats(mission.id).cost) }}</td>
@@ -56,11 +58,16 @@
 
                   @if (expanded() === mission.id) {
                     <tr class="detail-row">
-                      <td colspan="8">
+                      <td colspan="9">
                         <div class="mission-detail">
                           <dl class="kv kv--dense">
                             <dt>file enabled</dt><dd class="mono">{{ mission.file_enabled ? 'yes' : 'no' }}</dd>
+                            <dt>schedule</dt><dd class="mono">{{ mission.file_schedule || '—' }}</dd>
+                            <dt>producer</dt><dd class="mono">{{ mission.file_producer }}</dd>
+                            <dt>enqueue</dt><dd class="mono">{{ mission.file_enqueue }}</dd>
+                            <dt>priority (file)</dt><dd class="mono">{{ mission.file_priority }}</dd>
                             <dt>menus (file)</dt><dd class="mono">{{ mission.base_menus.join(', ') || '—' }}</dd>
+                            <dt>candidacy</dt><dd class="mono">{{ mission.candidacy }}</dd>
                             <dt>approval</dt><dd class="mono">{{ mission.approval }}</dd>
                             <dt>agent</dt><dd class="mono">{{ mission.agent || '—' }}</dd>
                             <dt>restricted</dt>
@@ -79,10 +86,10 @@
                                 </select>
                               </label>
                               <label class="field-inline">
-                                <span class="label">frequency</span>
-                                <select class="input input--sm" [value]="draft().frequency" (change)="setDraft('frequency', value($event))">
-                                  @for (freq of frequenciesFor(mission); track freq) {
-                                    <option [value]="freq" [selected]="draft().frequency === freq">{{ freq }}</option>
+                                <span class="label">priority</span>
+                                <select class="input input--sm" [value]="draft().priority" (change)="setDraft('priority', +value($event))">
+                                  @for (prio of prioritiesFor(mission); track prio) {
+                                    <option [value]="prio" [selected]="draft().priority === prio">{{ prio }}</option>
                                   }
                                 </select>
                               </label>
@@ -120,7 +127,7 @@
                     </tr>
                   }
                 } @empty {
-                  <tr><td colspan="8" class="empty">no missions found</td></tr>
+                  <tr><td colspan="9" class="empty">no missions found</td></tr>
                 }
               </tbody>
             </table>
@@ -132,8 +139,8 @@
             <header class="panel__head"><span class="panel__title">overlay contract</span></header>
             <div class="panel__body">
               <p class="prose">
-                The overlay is <strong>restrict-only</strong>: disable, raise the level, move frequency
-                toward low, or narrow menus. Widening is rejected by the harness.
+                The overlay is <strong>restrict-only</strong>: disable, raise the level, lower
+                priority, or narrow menus. Widening is rejected by the harness.
               </p>
               <dl class="kv kv--dense">
                 <dt>overrides</dt><dd class="mono">{{ overlayCount() }}</dd>

@@ -185,7 +185,7 @@ export class ApiService {
     id: string;
     enabled?: boolean;
     min_level?: number;
-    frequency?: string;
+    priority?: number;
     menus?: string[];
   }): Promise<{ ok: boolean; mission: Mission; missions: Mission[] }> {
     const headers = await this.csrf();

@@ -35,12 +35,14 @@ export function registerChronBridge(chron: Chron, deps: ChronBridgeDeps): () => 
     try {
       const cfg = await readChronConfig(deps.directory)
       const job = await jobById(deps.directory, event.id)
-      if (!job || !job.enabled) return
+      if (!job || !job.enabled) return { info: { reason: "no-job" } }
 
       const autonomy = await readAutonomyConfig(deps.directory)
-      if (autonomy.level <= 0) return
+      if (autonomy.level <= 0) return { info: { reason: "level-zero", level: autonomy.level } }
       const missions = await loadMissions(deps.directory).catch(() => [])
-      if (!userTaskEnabled({ missions, level: autonomy.level })) return
+      if (!userTaskEnabled({ missions, level: autonomy.level })) {
+        return { info: { reason: "gated", level: autonomy.level } }
+      }
 
       const result = await createTask(
         deps.stateDir,
@@ -57,13 +59,21 @@ export function registerChronBridge(chron: Chron, deps: ChronBridgeDeps): () => 
         { nowMs: event.fired_at_ms },
       )
       if (!result.ok) {
-        if (result.reason.includes("cap")) return { defer: true }
+        if (result.reason.includes("cap")) {
+          return { defer: true, info: { reason: "cap", detail: result.reason } }
+        }
         deps.log.warn(`[chron-bridge] task write failed for ${job.id}: ${result.reason}`)
+        return { info: { reason: "write-failed", detail: result.reason } }
       }
-      return
+      return {
+        info: {
+          task_id: result.id,
+          ...(result.deduped ? { deduped: result.deduped } : {}),
+        },
+      }
     } catch (err) {
       deps.log.warn(`[chron-bridge] fire failed for ${event.id}`, err)
-      return
+      return { info: { reason: "exception" } }
     }
   })
 }

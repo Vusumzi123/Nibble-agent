@@ -305,3 +305,58 @@ test("a recent drain fire waits for the one-minute boundary", async () => {
   assert.deepEqual((await chron.tick({ nowMs: t0 + 50_000 })).fired, ["drain"])
   assert.equal(runs, 1)
 })
+
+test("a fire line records the handler outcome, duration, lag, and info", async () => {
+  const dirs = await setup()
+  const entries: Array<Record<string, any>> = []
+  const chron = createChron({
+    directory: dirs.dir,
+    stateDir: dirs.stateDir,
+    logDir: dirs.logDir,
+    log: { event: (entry) => entries.push(entry), warn: () => {} },
+  })
+  chron.register({
+    id: "probe",
+    schedule: "every 1h",
+    handler: async () => ({ info: { reason: "below-trigger", pending: 3 } }),
+  })
+
+  const t0 = Date.parse("2026-11-01T09:00:00Z")
+  await chron.tick({ nowMs: t0 }) // first sight: seeds the next occurrence
+  await chron.tick({ nowMs: t0 + HOUR })
+
+  const fire = entries.find((entry) => entry.event === "fire" && entry.id === "probe")
+  assert.ok(fire)
+  assert.equal(fire.outcome, "fired")
+  assert.deepEqual(fire.info, { reason: "below-trigger", pending: 3 })
+  assert.equal(typeof fire.duration_ms, "number")
+  assert.equal(fire.lag_ms, 0)
+  assert.equal(typeof fire.next_due_ms, "number")
+})
+
+test("a deferred handler logs defer and keeps the same occurrence", async () => {
+  const dirs = await setup()
+  const entries: Array<Record<string, any>> = []
+  const chron = createChron({
+    directory: dirs.dir,
+    stateDir: dirs.stateDir,
+    logDir: dirs.logDir,
+    log: { event: (entry) => entries.push(entry), warn: () => {} },
+  })
+  chron.register({
+    id: "probe",
+    schedule: "every 1h",
+    handler: async () => ({ defer: true, info: { reason: "cap" } }),
+  })
+
+  const t0 = Date.parse("2026-11-01T09:00:00Z")
+  await chron.tick({ nowMs: t0 })
+  await chron.tick({ nowMs: t0 + HOUR })
+
+  const fire = entries.find((entry) => entry.event === "fire" && entry.id === "probe")
+  assert.ok(fire)
+  assert.equal(fire.outcome, "defer")
+  assert.equal(fire.deferred, true)
+  assert.equal(fire.info.reason, "cap")
+  assert.equal(fire.next_due_ms, t0 + HOUR)
+})

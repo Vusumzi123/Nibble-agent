@@ -24,9 +24,7 @@ export async function registerCodeJobs(chron: Chron): Promise<void> {
   chron.register({
     id: "missions",
     schedule: cfg.mission_scan,
-    handler: async () => {
-      await missionScan()
-    },
+    handler: async () => ({ info: await missionScan() }),
   })
 
   const drainScan = createDrainScan({
@@ -38,8 +36,6 @@ export async function registerCodeJobs(chron: Chron): Promise<void> {
   chron.register({
     id: "drain",
     schedule: "every 1m",
-    handler: async () => {
-      await drainScan()
-    },
+    handler: async () => ({ info: await drainScan() }),
   })
 }

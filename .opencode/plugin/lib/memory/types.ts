@@ -42,6 +42,14 @@ export type WriteReport = {
   cost?: number | null
   promptBytes?: number | null
   session?: string | null
+  /** Writer child metrics (drain ledger). */
+  spawnMs?: number | null
+  queueMs?: number | null
+  runMs?: number | null
+  steps?: number | null
+  spanMs?: number | null
+  modelMs?: number | null
+  toolMs?: number | null
 }
 
 export type MemoryEvidence = {

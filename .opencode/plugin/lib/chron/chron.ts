@@ -156,13 +156,30 @@ export function createChron(deps: ChronDeps): Chron {
     return { jobs: mergeJobs(registry, fileJobs), cfg }
   }
 
-  async function runJob(job: EffectiveJob, event: FireEvent): Promise<"fired" | "defer"> {
+  type JobRun = {
+    outcome: "fired" | "defer"
+    info: Record<string, unknown>
+    errors: string[]
+    duration_ms: number
+  }
+
+  async function runJob(job: EffectiveJob, event: FireEvent): Promise<JobRun> {
+    const started = now()
     let defer = false
+    const info: Record<string, unknown> = {}
+    const errors: string[] = []
     const call = async (label: string, fn: Listener | JobHandler): Promise<void> => {
       try {
         const result = await fn(event)
-        if (result && typeof result === "object" && result.defer === true) defer = true
+        if (result && typeof result === "object") {
+          if (result.defer === true) defer = true
+          if (result.info && typeof result.info === "object" && !Array.isArray(result.info)) {
+            Object.assign(info, result.info)
+          }
+        }
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        errors.push(`${label}: ${message}`)
         log.warn(`[chron] ${label} failed for ${job.id}`, err)
       }
     }
@@ -171,7 +188,12 @@ export function createChron(deps: ChronDeps): Chron {
     for (const fn of [...(listeners.get(`fire:${job.id}`) ?? [])]) {
       await call(`fire:${job.id} listener`, fn)
     }
-    return defer ? "defer" : "fired"
+    return {
+      outcome: defer ? "defer" : "fired",
+      info,
+      errors,
+      duration_ms: Math.max(0, now() - started),
+    }
   }
 
   function on(event: "fire" | `fire:${string}`, listener: Listener): () => void {
@@ -259,25 +281,14 @@ export function createChron(deps: ChronDeps): Chron {
             fired_at_ms: at,
             late: due.late,
           }
-          log.event({
-            ts: new Date(at).toISOString(),
-            event: "fire",
-            id: job.id,
-            source: job.source,
-            occurrence_ms: due.occurrence_ms,
-            late: due.late,
-          })
-          const outcome = await runJob(job, event)
-          if (outcome === "defer") {
+          const run = await runJob(job, event)
+          let firstDeferred: number | null = null
+          let dropped = false
+          if (run.outcome === "defer") {
             const first = entry.first_deferred_ms ?? at
             const ttlMs = Math.max(0, cfg.defer_ttl_hours) * 3_600_000
             if (ttlMs > 0 && at - first >= ttlMs) {
-              log.event({
-                ts: new Date(at).toISOString(),
-                event: "defer-dropped",
-                id: job.id,
-                occurrence_ms: due.occurrence_ms,
-              })
+              dropped = true
               state = advance(state, job, due.occurrence_ms, at)
             } else {
               state = setStateFor(state, job.id, {
@@ -285,13 +296,7 @@ export function createChron(deps: ChronDeps): Chron {
                 first_deferred_ms: first,
                 next_due_ms: due.occurrence_ms,
               })
-              log.event({
-                ts: new Date(at).toISOString(),
-                event: "defer",
-                id: job.id,
-                occurrence_ms: due.occurrence_ms,
-                first_deferred_ms: first,
-              })
+              firstDeferred = first
             }
             deferred.push(job.id)
           } else {
@@ -299,6 +304,24 @@ export function createChron(deps: ChronDeps): Chron {
             fired.push(job.id)
           }
           dirty = true
+          log.event({
+            ts: new Date(at).toISOString(),
+            event: "fire",
+            id: job.id,
+            source: job.source,
+            occurrence_ms: due.occurrence_ms,
+            fired_at_ms: at,
+            lag_ms: Math.max(0, at - due.occurrence_ms),
+            late: due.late,
+            duration_ms: run.duration_ms,
+            outcome: run.errors.length > 0 ? "error" : run.outcome,
+            ...(run.errors.length > 0 ? { error: run.errors.join("; ") } : {}),
+            ...(Object.keys(run.info).length > 0 ? { info: run.info } : {}),
+            next_due_ms: state.jobs[job.id]?.next_due_ms ?? null,
+            ...(run.outcome === "defer" ? { deferred: true } : {}),
+            ...(firstDeferred !== null ? { first_deferred_ms: firstDeferred } : {}),
+            ...(dropped ? { defer_dropped: true } : {}),
+          })
         }
 
         const pruned = pruneMissingJobs(state, ids, at)
@@ -360,8 +383,19 @@ export function createChron(deps: ChronDeps): Chron {
       late: false,
       ...(payload === undefined ? {} : { payload }),
     }
-    const outcome = await runJob(job, event)
-    return outcome === "defer" ? { defer: true } : undefined
+    const run = await runJob(job, event)
+    log.event({
+      ts: new Date(at).toISOString(),
+      event: "emit",
+      id,
+      source: job.source,
+      fired_at_ms: at,
+      duration_ms: run.duration_ms,
+      outcome: run.errors.length > 0 ? "error" : run.outcome,
+      ...(run.errors.length > 0 ? { error: run.errors.join("; ") } : {}),
+      ...(Object.keys(run.info).length > 0 ? { info: run.info } : {}),
+    })
+    return run.outcome === "defer" ? { defer: true } : undefined
   }
 
   async function loop(): Promise<void> {

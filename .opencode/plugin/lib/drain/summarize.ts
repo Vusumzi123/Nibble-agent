@@ -10,7 +10,7 @@
 //
 // Loaded via relative import only.
 import { textOf } from "../sessions.ts"
-import { extractKeywords } from "../transcript.ts"
+import { extractKeywords, sessionAccounting } from "../transcript.ts"
 import { hashContent, extractAtoms, type RenderedSession } from "./render.ts"
 import { SUMMARIZER_SESSION_TITLE } from "./automation.ts"
 
@@ -41,6 +41,24 @@ export type SummarizeResult = {
   tokens?: number | null
   /** Reply size in bytes before parsing. */
   replyBytes: number
+  /** Child session created for the last attempt. */
+  sessionID?: string | null
+  /** Create + prompt setup observed by the caller (ms). */
+  spawnMs?: number | null
+  /** Caller wait from prompt accepted to idle (ms). */
+  runMs?: number | null
+  /** Prompt accepted -> first assistant message (queue + TTFT, ms). */
+  queueMs?: number | null
+  /** Assistant steps in the child session. */
+  steps?: number | null
+  /** Assistant wall span from first start to last completion (ms). */
+  spanMs?: number | null
+  /** Sum of assistant generation time (ms). */
+  modelMs?: number | null
+  /** Sum of tool-call execution time (ms). */
+  toolMs?: number | null
+  /** Attempts spent on this session (malformed-reply retries). */
+  attempts?: number
 }
 
 export type SummarizerClient = {
@@ -361,10 +379,41 @@ export async function summarizeSession(
   input: SummarizeInput,
   deps: SummarizeDeps,
 ): Promise<SummarizeResult> {
-  const started = Date.now()
+  const started = performance.now()
   const prompt = buildSummarizerPrompt(input.priorSummary, input.rendered.text)
   const promptBytes = Buffer.byteLength(prompt, "utf8")
   let lastReplyBytes = 0
+  let attempts = 0
+  let lastSessionID: string | null = null
+  let timing: {
+    spawnMs: number | null
+    runMs: number | null
+    queueMs: number | null
+    steps: number | null
+    spanMs: number | null
+    modelMs: number | null
+    toolMs: number | null
+  } = {
+    spawnMs: null,
+    runMs: null,
+    queueMs: null,
+    steps: null,
+    spanMs: null,
+    modelMs: null,
+    toolMs: null,
+  }
+  const timingFields = (): Pick<
+    SummarizeResult,
+    | "sessionID"
+    | "spawnMs"
+    | "runMs"
+    | "queueMs"
+    | "steps"
+    | "spanMs"
+    | "modelMs"
+    | "toolMs"
+    | "attempts"
+  > => ({ sessionID: lastSessionID, ...timing, attempts })
 
   const fallback = (
     error: string,
@@ -384,6 +433,7 @@ export async function summarizeSession(
       wallMs,
       tokens: null,
       replyBytes: lastReplyBytes,
+      ...timingFields(),
     }
   }
 
@@ -406,10 +456,29 @@ export async function summarizeSession(
       }
     }
 
-    const ask = async (
-      text: string,
-    ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
-      const spawn = async (): Promise<string> => {
+    type AskTiming = {
+      spawnMs: number | null
+      runMs: number | null
+      queueMs: number | null
+      steps: number | null
+      spanMs: number | null
+      modelMs: number | null
+      toolMs: number | null
+    }
+    type AskResult = AskTiming & {
+      rows: unknown[]
+      replies: string[]
+      late: boolean
+      childID: string
+    }
+
+    const ask = async (text: string): Promise<AskResult> => {
+      const spawn = async (): Promise<{
+        childID: string
+        spawnMs: number
+        acceptedAt: number
+      }> => {
+        const createStarted = performance.now()
         const created = await deps.client.session.create({
           body: { title: SUMMARIZER_SESSION_TITLE },
           query: { directory: deps.directory },
@@ -417,6 +486,7 @@ export async function summarizeSession(
         const childID = String(created?.data?.id ?? "")
         if (!childID) throw new Error("session.create returned no id")
         deps.registerChild?.(childID)
+        const spawnMs = performance.now() - createStarted
 
         const res = await deps.client.session.promptAsync({
           path: { id: childID },
@@ -428,7 +498,7 @@ export async function summarizeSession(
           query: { directory: deps.directory },
         })
         if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
-        return childID
+        return { childID, spawnMs, acceptedAt: Date.now() }
       }
 
       const read = async (
@@ -442,10 +512,44 @@ export async function summarizeSession(
         return { rows, replies: assistantReplies(rows), late: false }
       }
 
+      const timingOf = (
+        rows: unknown[],
+        acceptedAt: number,
+        spawnMs: number,
+        runMs: number,
+      ): AskTiming => {
+        const times = rows
+          .map((row) => Number((row as any)?.info?.time?.created ?? NaN))
+          .filter((value) => Number.isFinite(value))
+        const first = times.length > 0 ? Math.min(...times) : null
+        const acct = sessionAccounting(rows)
+        return {
+          spawnMs: Math.round(spawnMs),
+          runMs: Math.round(runMs),
+          queueMs: first === null ? null : Math.max(0, Math.round(first - acceptedAt)),
+          steps: acct.assistantSteps,
+          spanMs: acct.spanMs,
+          modelMs: acct.modelMs,
+          toolMs: acct.toolMs,
+        }
+      }
+
       const collect = async (
         id: string,
-      ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
-        if (await deps.waitForIdle(id)) return read(id)
+        spawnMs: number,
+        acceptedAt: number,
+      ): Promise<AskResult> => {
+        const waitStarted = performance.now()
+        const idled = await deps.waitForIdle(id)
+        const runMs = performance.now() - waitStarted
+        if (idled) {
+          const result = await read(id)
+          return {
+            ...result,
+            ...timingOf(result.rows, acceptedAt, spawnMs, runMs),
+            childID: id,
+          }
+        }
 
         // LATE REPLY: the child may have answered just after the deadline.
         // Read before aborting so a valid reply is never discarded.
@@ -453,15 +557,33 @@ export async function summarizeSession(
         const usable = late?.replies.some((reply) => parseSummaryReply(reply) !== null)
         // A timed-out child must not outlive its own wait (§5.2).
         const abortError = await abortChild(id)
-        if (late && usable) return { ...late, late: true }
+        if (late && usable) {
+          return {
+            ...late,
+            late: true,
+            ...timingOf(late.rows, acceptedAt, spawnMs, runMs),
+            childID: id,
+          }
+        }
+        // Preserve what we know about the failed attempt for the ledger line.
+        lastSessionID = id
+        timing = {
+          spawnMs: Math.round(spawnMs),
+          runMs: Math.round(runMs),
+          queueMs: null,
+          steps: null,
+          spanMs: null,
+          modelMs: null,
+          toolMs: null,
+        }
         throw new SummarizeError(
           abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
           "timeout",
         )
       }
 
-      const childID = await spawn()
-      return collect(childID)
+      const { childID, spawnMs, acceptedAt } = await spawn()
+      return collect(childID, spawnMs, acceptedAt)
     }
 
     // A malformed block reply gets exactly one correction attempt before the
@@ -471,7 +593,19 @@ export async function summarizeSession(
         attempt === 1
           ? prompt
           : `${prompt}\n\nYour previous reply did not follow the block format. Reply again with only \`=== ITEM ===\` blocks, one per durable topic.`
-      const { rows, replies, late } = await ask(text)
+      const asked = await ask(text)
+      attempts = attempt
+      lastSessionID = asked.childID
+      timing = {
+        spawnMs: asked.spawnMs,
+        runMs: asked.runMs,
+        queueMs: asked.queueMs,
+        steps: asked.steps,
+        spanMs: asked.spanMs,
+        modelMs: asked.modelMs,
+        toolMs: asked.toolMs,
+      }
+      const { rows, replies, late } = asked
       const tokens = usageTokens(rows)
 
       // Newest first: accept the last block that parses; a trailing "done"
@@ -489,14 +623,14 @@ export async function summarizeSession(
         if (late) {
           return fallback(
             `late-reply did not parse${suffix}`,
-            Date.now() - started,
+            Math.round(performance.now() - started),
             "late-reply",
             true,
           )
         }
         return fallback(
           `malformed summarizer reply${suffix}`,
-          Date.now() - started,
+          Math.round(performance.now() - started),
           "parse-failure",
         )
       }
@@ -507,15 +641,16 @@ export async function summarizeSession(
           ...(late ? { lateReply: true } : {}),
           model: deps.model || null,
           promptBytes,
-          wallMs: Date.now() - started,
+          wallMs: Math.round(performance.now() - started),
           tokens,
           replyBytes: lastReplyBytes,
+          ...timingFields(),
         }
       }
 
       const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)
       if (items.length === 0) {
-        return fallback("no valid items", Date.now() - started, "parse-failure", late)
+        return fallback("no valid items", Math.round(performance.now() - started), "parse-failure", late)
       }
 
       return {
@@ -523,16 +658,17 @@ export async function summarizeSession(
         ...(late ? { lateReply: true } : {}),
         model: deps.model || null,
         promptBytes,
-        wallMs: Date.now() - started,
+        wallMs: Math.round(performance.now() - started),
         tokens,
         replyBytes: lastReplyBytes,
+        ...timingFields(),
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     const code: SummarizeFailure =
       err instanceof SummarizeError ? err.code : message.includes("timed out") ? "timeout" : "spawn"
-    return fallback(message, Date.now() - started, code)
+    return fallback(message, Math.round(performance.now() - started), code)
   }
 }
 
