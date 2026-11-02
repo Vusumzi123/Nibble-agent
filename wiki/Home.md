@@ -9,6 +9,8 @@ are most likely to touch.
   a prompt job in `.opencode/schedule/` and let chron turn it into a user task.
 - [Chron fire listeners](Chron-Fire-Listeners.md) — attach to chron's `fire`
   and `fire:<id>` events to react to scheduled jobs.
+- [How mission producers work](Mission-Producers.md) — the chron scan, gates,
+  priorities, intents, and custom producers.
 
 ## Two schedulers, one queue
 

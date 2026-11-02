@@ -133,6 +133,7 @@ The in-repo wiki starts at [`wiki/Home.md`](wiki/Home.md):
 
 - [Adding scheduled markdown jobs](wiki/Adding-Scheduled-Markdown-Jobs.md)
 - [Chron fire listeners](wiki/Chron-Fire-Listeners.md)
+- [How mission producers work](wiki/Mission-Producers.md)
 
 ## Modes
 
