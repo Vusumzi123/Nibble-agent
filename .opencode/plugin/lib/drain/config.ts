@@ -33,6 +33,8 @@ export type DrainConfig = {
   settle_seconds: number
   /** Consumer reschedule delay when the backlog is below the trigger. */
   poll_seconds: number
+  /** Chron producer cadence (`every N m`); 15 = the shipped default. */
+  producer_interval_minutes: number
   /** Wall-clock ceiling for one consumer wake (§2.6). */
   max_wall_minutes: number
   /** Per-pass token budget; 0 = unlimited (ceiling, not a target). */
@@ -70,6 +72,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   trigger_max_age_hours: 2,
   settle_seconds: 120,
   poll_seconds: 60,
+  producer_interval_minutes: 15,
   max_wall_minutes: 15,
   token_budget: 80000,
   wake_token_budget: 250000,
@@ -96,6 +99,7 @@ const INT_KEYS = new Set([
   "trigger_max_age_hours",
   "settle_seconds",
   "poll_seconds",
+  "producer_interval_minutes",
   "max_wall_minutes",
   "token_budget",
   "wake_token_budget",
@@ -203,6 +207,11 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   )
   cfg.settle_seconds = atLeast(cfg.settle_seconds, 0, DEFAULT_DRAIN.settle_seconds)
   cfg.poll_seconds = atLeast(cfg.poll_seconds, 1, DEFAULT_DRAIN.poll_seconds)
+  cfg.producer_interval_minutes = atLeast(
+    cfg.producer_interval_minutes,
+    1,
+    DEFAULT_DRAIN.producer_interval_minutes,
+  )
   cfg.max_wall_minutes = atLeast(cfg.max_wall_minutes, 1, DEFAULT_DRAIN.max_wall_minutes)
   cfg.token_budget = atLeast(cfg.token_budget, 0, DEFAULT_DRAIN.token_budget)
   cfg.wake_token_budget = atLeast(cfg.wake_token_budget, 0, DEFAULT_DRAIN.wake_token_budget)
