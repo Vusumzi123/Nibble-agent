@@ -7,7 +7,6 @@
 // Loaded via relative import only.
 import { createMissionScan } from "../../production/missions.ts"
 import { createDrainScan } from "./drain.ts"
-import { readDrainConfig } from "../../drain/config.ts"
 import type { ChronLog } from "../types.ts"
 import type { Chron } from "../chron.ts"
 import { readChronConfig } from "../config.ts"
@@ -30,7 +29,6 @@ export async function registerCodeJobs(chron: Chron): Promise<void> {
     },
   })
 
-  const drainCfg = await readDrainConfig(chron.deps.directory)
   const drainScan = createDrainScan({
     directory: chron.deps.directory,
     stateDir: chron.deps.stateDir,
@@ -39,7 +37,7 @@ export async function registerCodeJobs(chron: Chron): Promise<void> {
   })
   chron.register({
     id: "drain",
-    schedule: `every ${Math.max(1, drainCfg.producer_interval_minutes)}m`,
+    schedule: "every 1m",
     handler: async () => {
       await drainScan()
     },

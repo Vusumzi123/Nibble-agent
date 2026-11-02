@@ -250,3 +250,58 @@ test("list reports file and code jobs with state", async () => {
   assert.equal(list[1].last_fired_ms, now)
   assert.equal(list[1].deferred, false)
 })
+
+test("a persisted old drain fire runs on the first one-minute clock tick", async () => {
+  const dirs = await setup()
+  const t0 = Date.parse("2026-11-01T09:00:00Z")
+  await mkdir(dirs.stateDir, { recursive: true })
+  await writeFile(
+    join(dirs.stateDir, "chron.json"),
+    JSON.stringify({
+      version: 1,
+      jobs: {
+        drain: {
+          last_fired_ms: t0 - 5 * 60_000,
+          next_due_ms: t0 + 10 * 60_000,
+          first_deferred_ms: null,
+        },
+      },
+    }),
+    "utf8",
+  )
+  const chron = makeChron(dirs)
+  let runs = 0
+  chron.register({ id: "drain", schedule: "every 1m", handler: () => void runs++ })
+
+  const result = await chron.tick({ nowMs: t0 })
+  assert.deepEqual(result.fired, ["drain"])
+  assert.equal(runs, 1)
+})
+
+test("a recent drain fire waits for the one-minute boundary", async () => {
+  const dirs = await setup()
+  const t0 = Date.parse("2026-11-01T09:00:00Z")
+  await mkdir(dirs.stateDir, { recursive: true })
+  await writeFile(
+    join(dirs.stateDir, "chron.json"),
+    JSON.stringify({
+      version: 1,
+      jobs: {
+        drain: {
+          last_fired_ms: t0 - 10_000,
+          next_due_ms: t0 + 10 * 60_000,
+          first_deferred_ms: null,
+        },
+      },
+    }),
+    "utf8",
+  )
+  const chron = makeChron(dirs)
+  let runs = 0
+  chron.register({ id: "drain", schedule: "every 1m", handler: () => void runs++ })
+
+  assert.equal((await chron.tick({ nowMs: t0 })).fired.length, 0)
+  assert.equal(runs, 0)
+  assert.deepEqual((await chron.tick({ nowMs: t0 + 50_000 })).fired, ["drain"])
+  assert.equal(runs, 1)
+})
