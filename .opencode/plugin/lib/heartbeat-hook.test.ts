@@ -1,10 +1,11 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { mockClient, tempDir, tempHome } from "./test-utils.ts"
 import { HEARTBEAT_FIXED_PROMPT } from "./heartbeat.ts"
+import { writeIntent } from "./production/intents.ts"
 
 // Isolate HOME before the hook module resolves anything home-scoped.
 const TEST_HOME = tempHome("hbhook-home-")
@@ -44,7 +45,8 @@ async function writeMission(dir: string): Promise<void> {
       "---",
       "id: drain",
       "title: Drain conversation backlog into the vault",
-      "frequency: high",
+      "schedule: every 1m",
+      "priority: 5",
       "menus: [day, night]",
       "min_level: 2",
       'agent: ""',
@@ -71,7 +73,7 @@ async function writeMissionWithCandidacy(
       "---",
       `id: ${id}`,
       `title: ${title}`,
-      "frequency: high",
+      "schedule: every 1m",
       "menus: [day, night]",
       "min_level: 2",
       'agent: ""',
@@ -84,6 +86,121 @@ async function writeMissionWithCandidacy(
     ].join("\n"),
     "utf8",
   )
+}
+
+// Mission production now happens in chron; seed the inbox directly so these
+// consumer tests exercise the merge -> dispatch path with one intent.
+async function seedMissionIntent(
+  dir: string,
+  id = "drain",
+  kind: "mission" | "staleness" = "mission",
+): Promise<void> {
+  const now = Date.now()
+  const result = await writeIntent(join(dir, ".opencode", "state"), "chron:missions", {
+    id: `mission:${id}`,
+    kind,
+    priority: 5,
+    enqueued_ms: now,
+    expires_ms: now + 24 * HOUR,
+    payload: {
+      mission: id,
+      occurrence_ms: now,
+      level: 3,
+      quiet: false,
+      sleep_status: "awake",
+      signals: {},
+    },
+  })
+  assert.equal(result.ok, true)
+}
+
+async function writeBurstMission(dir: string, id: string): Promise<void> {
+  await mkdir(join(dir, ".opencode", "missions"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "missions", `${id}.md`),
+    [
+      "---",
+      `id: ${id}`,
+      `title: ${id}`,
+      "schedule: every 1h",
+      "priority: 5",
+      "menus: [day, night]",
+      "min_level: 1",
+      "candidacy: always",
+      'agent: ""',
+      "enabled: true",
+      "---",
+      "",
+      `Do the ${id} thing.`,
+      "",
+    ].join("\n"),
+    "utf8",
+  )
+}
+
+async function seedMissionQueue(dir: string, ids: string[]): Promise<void> {
+  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
+  await writeFile(
+    join(dir, ".opencode", "state", "work-queue.json"),
+    JSON.stringify({
+      version: 2,
+      items: ids.map((id, index) => ({
+        id: `mission:${id}`,
+        kind: "mission",
+        producer: "chron:missions",
+        enqueued_ms: Date.now() - (ids.length - index) * 1_000,
+        requeue_count: 0,
+      })),
+    }),
+    "utf8",
+  )
+}
+
+function burstClient() {
+  const calls = { create: 0, prompts: [] as any[], ids: [] as string[] }
+  return {
+    calls,
+    session: {
+      get: async () => ({ data: {} }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", id: "a1", tokens: { input: 10, output: 5 } },
+            parts: [{ type: "text", text: "done" }],
+          },
+        ],
+      }),
+      create: async () => {
+        calls.create++
+        const id = `ses_burst_${calls.create}`
+        calls.ids.push(id)
+        return { data: { id } }
+      },
+      promptAsync: async (args: any) => {
+        calls.prompts.push(args)
+        return { response: { ok: true, status: 200 } }
+      },
+    },
+  }
+}
+
+async function driveChildren(client: ReturnType<typeof burstClient>, hooks: any, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await waitFor(() => client.calls.prompts.length >= i + 1, 8000)
+    const id = client.calls.prompts[i].path.id
+    await delay(5)
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: id } } } as any)
+  }
+}
+
+async function seedDrainIntent(dir: string): Promise<void> {
+  const result = await writeIntent(join(dir, ".opencode", "state"), "chron:drain", {
+    id: "drain-pass",
+    kind: "drain-pass",
+    priority: 3,
+    enqueued_ms: Date.now(),
+  })
+  assert.equal(result.ok, true)
 }
 
 // Seed the default opencode DB (under the test HOME) with one unconsumed turn
@@ -402,6 +519,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
     "  provider: openjev",
   ])
   await writeMission(dir)
+  await seedMissionIntent(dir)
   const client = missionClient()
   const hooks = await createHook({ client, directory: dir, spawner: missionSpawner } as any)
 
@@ -433,7 +551,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
   assert.equal(t.session, "ses_child", "the ledger carries the child session id")
   assert.equal(t.mood_event, null)
   assert.equal(t.reason, "none")
-  assert.ok(t.candidates.some((c: string) => /^drain:1\.\d\d$/.test(c)), String(t.candidates))
+  assert.ok(t.candidates.includes("drain"), String(t.candidates))
 
   // 4. The mission recorded itself in the backlog with the reserved result.
   const entries = await readBacklog(dir)
@@ -541,6 +659,13 @@ test("an unrunnable pool item is labelled no-runnable, not empty", async () => {
   assert.equal(tick.reason, "no-runnable")
   assert.equal(tick.queues, 1)
   assert.equal(client.calls.create, 0)
+
+  await delay(200)
+  assert.equal(
+    (await readTickLog(dir)).length,
+    1,
+    "no-runnable sleeps to the frequency instead of spinning at 0",
+  )
 })
 
 // A declined mission drops its queue item and records the result without
@@ -548,6 +673,7 @@ test("an unrunnable pool item is labelled no-runnable, not empty", async () => {
 test("a declined mission drops the item and records the result", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
   await writeMission(dir)
+  await seedMissionIntent(dir)
 
   const calls = { creates: 0, prompts: [] as any[] }
   const client = {
@@ -614,6 +740,7 @@ test("mission failure: outcome error feeds mission_failure and records a failed 
     "  provider: openjev",
   ])
   await writeMission(dir)
+  await seedMissionIntent(dir)
   const client = missionClient({ promptOk: false })
   const hooks = await createHook({ client, directory: dir, spawner: missionSpawner } as any)
 
@@ -686,16 +813,111 @@ test("long_silence: a 36h gap feeds the mood event; an empty queue ticks silentl
 // ladder); a mission execution resets the streak. The `wakeCapMs` seam
 // shrinks the 60 s wake ceiling so the loop re-checks due-ness on a test
 // timescale — the due MATH is what is under test.
-test("B7 backoff: identical-digest no_reply streaks stretch the cadence; a mission resets", async () => {
+test("consumer session: a 12-item burst runs 10, leaves 2, and wakes immediately", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 3",
+    "consumer:",
+    "  max_items_per_tick: 10",
+  ])
+  const ids = Array.from({ length: 12 }, (_, i) => `burst-${i}`)
+  for (const id of ids) await writeBurstMission(dir, id)
+  await seedMissionQueue(dir, ids)
+
+  const client = burstClient()
+  const hooks = await createHook({ client, directory: dir } as any)
+  await driveChildren(client, hooks, 12)
+
+  await waitFor(
+    async () => (await readTickLog(dir)).filter((t: any) => t.stopped !== undefined).length >= 2,
+    8000,
+  )
+  const sessions = (await readTickLog(dir)).filter((t: any) => t.stopped !== undefined)
+  assert.equal(sessions[0].items_run, 10)
+  assert.equal(sessions[0].items_left, 2)
+  assert.equal(sessions[0].stopped, "max-items")
+  assert.equal(sessions[1].items_run, 2)
+  assert.equal(sessions[1].stopped, "empty")
+  assert.equal(client.calls.create, 12, "the cap split the burst across two sessions")
+})
+
+test("consumer caps: a wall cap stops between items", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
-  let answer = "no_reply" // switched to mission:drain for the reset leg
-  const spawner = async () => ({
-    code: 0,
-    stdout: JSON.stringify({ kind: "choice", value: answer, confidence: 0.9, abstained: false, provider: "openjev", backend: "test", latencyMs: 1 }),
-    stderr: "",
-  })
+  await writeBurstMission(dir, "wall-a")
+  await writeBurstMission(dir, "wall-b")
+  await seedMissionQueue(dir, ["wall-a", "wall-b"])
+
+  const client = burstClient()
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    consumer: { max_wall_minutes: 0.0002 },
+  } as any)
+  await waitFor(() => client.calls.prompts.length >= 1, 8000)
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: client.calls.prompts[0].path.id } },
+  } as any)
+
+  await waitFor(
+    async () => (await readTickLog(dir)).some((t: any) => t.stopped === "max-wall"),
+    8000,
+  )
+  const line = (await readTickLog(dir)).find((t: any) => t.stopped === "max-wall")!
+  assert.equal(line.items_run, 1, "the item that crossed the cap completed")
+})
+
+test("consumer caps: a token budget stops between items", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  await writeBurstMission(dir, "tok-a")
+  await writeBurstMission(dir, "tok-b")
+  await seedMissionQueue(dir, ["tok-a", "tok-b"])
+
+  const client = burstClient()
+  const hooks = await createHook({
+    client,
+    directory: dir,
+    consumer: { token_budget: 1 },
+  } as any)
+  await waitFor(() => client.calls.prompts.length >= 1, 8000)
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: client.calls.prompts[0].path.id } },
+  } as any)
+
+  await waitFor(
+    async () => (await readTickLog(dir)).some((t: any) => t.stopped === "token-budget"),
+    8000,
+  )
+  const line = (await readTickLog(dir)).find((t: any) => t.stopped === "token-budget")!
+  assert.equal(line.items_run, 1)
+})
+
+test("consumer caps: lease loss stops the session between items", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  await writeBurstMission(dir, "lease-a")
+  await writeBurstMission(dir, "lease-b")
+  await seedMissionQueue(dir, ["lease-a", "lease-b"])
+
+  const client = burstClient()
+  const hooks = await createHook({ client, directory: dir } as any)
+  await waitFor(() => client.calls.prompts.length >= 1, 8000)
+  await rm(join(dir, ".opencode", "state", "ownership.lock"), { force: true })
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: client.calls.prompts[0].path.id } },
+  } as any)
+
+  await waitFor(
+    async () => (await readTickLog(dir)).some((t: any) => t.stopped === "lease-lost"),
+    8000,
+  )
+  const line = (await readTickLog(dir)).find((t: any) => t.stopped === "lease-lost")!
+  assert.equal(line.items_run, 1)
+  assert.equal(client.calls.create, 1, "the second item waits for a new session")
+})
+
+test("no backoff stretching: identical no-reply ticks keep the raw cadence", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
   const client = missionClient()
-  const hooks = await createHook({ client, directory: dir, wakeCapMs: 25, spawner } as any)
+  await createHook({ client, directory: dir, wakeCapMs: 25 } as any)
 
   const forceDue = async (gapMs: number): Promise<void> => {
     const file = join(dir, ".opencode", "state", "heartbeat.json")
@@ -703,53 +925,17 @@ test("B7 backoff: identical-digest no_reply streaks stretch the cadence; a missi
     await writeFile(file, JSON.stringify({ ...cur, last_tick: Date.now() - gapMs }), "utf8")
   }
 
-  // Tick 1 (decisions disabled → no_reply, fresh hash) fires at boot.
   await waitFor(async () => (await readTickLog(dir)).length >= 1)
-  const [t1] = await readTickLog(dir)
-  await waitFor(async () => ((await readTickState(dir)) as any).noop_streak === 1)
-  let state: any = await readTickState(dir)
-  assert.equal(state.noop_streak, 1, "first no_reply starts the streak")
-  assert.equal(state.noop_hash, t1.digest_hash)
-
-  // Tick 2 forced due at the BASE frequency (streak 1 → ×1): same digest →
-  // the streak extends to the step boundary.
   await forceDue(12 * HOUR)
   await waitFor(async () => (await readTickLog(dir)).length >= 2)
-  await waitFor(async () => ((await readTickState(dir)) as any).noop_streak === 2)
-  state = await readTickState(dir)
-  assert.equal(state.noop_streak, 2, "identical digest extends the streak")
-  assert.equal(state.noop_hash, t1.digest_hash)
 
-  // Tick 3 at the BASE frequency is now refused: the cadence stretched ×2
-  // (12h → 24h), so a 12h stamp is no longer due.
+  const state: any = await readTickState(dir)
+  assert.equal(state.noop_streak, undefined, "the consumer keeps no no-op streak")
+  assert.equal(state.noop_hash, undefined)
+
+  // The third base-frequency window is still due: no ×2/×4 stretch.
   await forceDue(12 * HOUR)
-  await delay(400)
-  assert.equal((await readTickLog(dir)).length, 2, "stretched cadence rejects the base-frequency due stamp")
-
-  // An executed mission resets the streak: decisions flip on (hot-read), the
-  // seam answers mission:drain, and a stamp past the STRETCHED window fires.
-  await writeFile(
-    join(dir, ".opencode", "sysop-config.yaml"),
-    ["autonomy:", "  level: 3", "", "decisions:", "  enabled: true", "  provider: openjev", ""].join("\n"),
-    "utf8",
-  )
-  await writeMission(dir)
-  answer = "mission:drain"
-  await forceDue(48 * HOUR) // stretched ×2 window is 24h → 48h is overdue
-  await waitFor(() => client.calls.prompts.length >= 1)
-  // The tick completes when its child idles (15 min abandon otherwise).
-  await hooks.event({
-    event: { type: "session.idle", properties: { sessionID: "ses_child" } },
-  } as any)
   await waitFor(async () => (await readTickLog(dir)).length >= 3)
-  const lines = await readTickLog(dir)
-  assert.equal(lines[2].verdict, "mission:drain")
-  await waitFor(async () => ((await readTickState(dir)) as any).noop_streak === 0)
-  state = await readTickState(dir)
-  assert.equal(state.noop_streak, 0, "an executed mission resets the B7 streak")
-  assert.equal(state.noop_hash, null)
-  assert.equal((state as any).last_mission, "drain", "the dispatched mission is recorded")
-  assert.equal(client.calls.create, 1, "exactly one mission child across the whole test")
 })
 
 // A provider abstain is a fallback, not a verdict: pending work must still
@@ -841,34 +1027,6 @@ async function settleSummarizer(client: any, hooks: any, timeoutMs = 8000): Prom
   return prompt
 }
 
-function writeLaneMission(
-  dir: string,
-  id: string,
-  opts: { lane: string; candidacy: string; menus?: string },
-): Promise<void> {
-  return mkdir(join(dir, ".opencode", "missions"), { recursive: true }).then(() =>
-    writeFile(
-      join(dir, ".opencode", "missions", `${id}.md`),
-      [
-        "---",
-        `id: ${id}`,
-        `title: ${id}`,
-        "frequency: high",
-        `menus: ${opts.menus ?? "[day, night]"}`,
-        "min_level: 2",
-        'agent: ""',
-        `candidacy: ${opts.candidacy}`,
-        `lane: ${opts.lane}`,
-        "enabled: true",
-        "---",
-        "",
-        `Do the ${id} thing.`,
-        "",
-      ].join("\n"),
-      "utf8",
-    ),
-  )
-}
 
 test("a failed abort is recorded as an error, never a clean stop", async () => {
   const dir = await project([
@@ -887,6 +1045,7 @@ test("a failed abort is recorded as an error, never a clean stop", async () => {
     "",
   ])
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "lanes-abort-fail")
 
   const client = laneClient({ abortFails: true })
@@ -940,6 +1099,7 @@ const partEvent = (sessionID: string, part: Record<string, unknown> = {}) =>
 test("a stall watchdog keeps waiting while the child is active", async () => {
   const dir = await stallProject()
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "stall-active")
 
   const client = laneClient()
@@ -969,6 +1129,7 @@ test("a stall watchdog keeps waiting while the child is active", async () => {
 test("silence during an open shell tool is exempt until the tool closes", async () => {
   const dir = await stallProject()
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "stall-shell")
 
   const client = laneClient()
@@ -1004,6 +1165,7 @@ test("silence during an open shell tool is exempt until the tool closes", async 
 test("descendant activity keeps the mission child alive (no task exemption)", async () => {
   const dir = await stallProject()
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "stall-descendant")
 
   const client = laneClient()
@@ -1034,6 +1196,7 @@ test("descendant activity keeps the mission child alive (no task exemption)", as
 test("a background task child is aborted when its mission child aborts", async () => {
   const dir = await stallProject()
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "orphan-abort")
 
   const client = laneClient()
@@ -1072,6 +1235,7 @@ test("a background task child is aborted when its mission child aborts", async (
 test("a foreground task child already settled is not double-aborted", async () => {
   const dir = await stallProject()
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "orphan-foreground")
 
   const client = laneClient()
@@ -1125,6 +1289,7 @@ test("a resumed mission carries the === RESUMED MISSION === block into the next 
     "",
   ])
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "resume-block")
 
   const client = laneClient()
@@ -1141,6 +1306,17 @@ test("a resumed mission carries the === RESUMED MISSION === block into the next 
   await hooks.event({ event: { type: "session.idle", properties: { sessionID: client.calls.ids[0] } } } as any)
   await settleSummarizer(client, hooks)
   await waitFor(async () => (await readTickLog(dir)).length >= 1, 8000)
+  await waitFor(
+    async () => (await readTickLog(dir)).some((t: any) => t.stopped !== undefined),
+    8000,
+  )
+  const firstSession = (await readTickLog(dir)).find((t: any) => t.stopped !== undefined)!
+  assert.equal(firstSession.items_run, 1)
+  assert.equal(
+    firstSession.stopped,
+    "no-runnable",
+    "the timeout requeue waits for the next session",
+  )
 
   // Force the next tick due.
   const stateFile = join(dir, ".opencode", "state", "heartbeat.json")
@@ -1188,6 +1364,7 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
     "",
   ])
   await writeMission(dir)
+  await seedMissionIntent(dir)
   await seedTurns(dir, "resume-cap")
   await mkdir(join(dir, ".opencode", "state"), { recursive: true })
   // A resume item already at the ceiling: the next stall must drop it without
@@ -1289,7 +1466,7 @@ test("user-task: queue_add writes a file, the next tick dispatches it, and done/
       "---",
       "id: user-task",
       "title: Execute one queued user task",
-      "frequency: low",
+      "priority: 2",
       "menus: [both]",
       "min_level: 2",
       "candidacy: always",
@@ -1366,7 +1543,7 @@ async function writeDreamMission(dir: string): Promise<void> {
       "---",
       "id: dream",
       "title: Unconscious dream simulation",
-      "frequency: low",
+      "schedule: every 1h",
       "menus: [night]",
       "min_level: 2",
       "priority: 0",
@@ -1425,6 +1602,7 @@ test("quiet hours: a due drain backlog runs through the single pool", async () =
     "  provider: none",
   ])
   await seedTurns(dir, "quietdrain")
+  await seedDrainIntent(dir)
   const client = mockClient()
   const hooks = await createHook({ client, directory: dir } as any)
 
@@ -1453,6 +1631,7 @@ test("quiet hours: dream is a night mission dispatched through the same pool", a
     "  provider: none",
   ])
   await writeDreamMission(dir)
+  await seedMissionIntent(dir, "dream")
   const client = dreamClient(
     '{"title":"Tide","narrative":"A grey tide rolls under a paper moon.","tone":"pleasant","seeds":["mood"]}',
   )

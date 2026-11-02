@@ -23,7 +23,6 @@ import {
   HEARTBEAT_WAKE_CAP_MS,
   computeDigest,
   computeWakeDelayMs,
-  effectiveFrequencyMs,
   frequencyToMs,
   idleHeartbeatCurrent,
   isQuietNow,
@@ -68,6 +67,7 @@ import {
   type WorkItem,
   dequeueById,
   enqueueWork,
+  isDue,
   loadWorkQueueState,
   pickFair,
   pruneWork,
@@ -77,10 +77,13 @@ import {
 import { readSchedulerConfig } from "./lib/scheduler-config.ts"
 import {
   type ProducerCtx,
-  collectWork,
+  collectUserTasks,
   itemRunnable,
   itemStillDue,
 } from "./lib/work-producers.ts"
+import { mergeIntents } from "./lib/production/intents.ts"
+import { readConsumerConfig, type ConsumerConfig } from "./lib/consumer-config.ts"
+import { readChronConfig } from "./lib/chron/config.ts"
 import { parseMissionResult } from "./lib/mission-result.ts"
 import {
   deterministicResumeSummary,
@@ -90,7 +93,7 @@ import {
   type ResumePayload,
 } from "./lib/mission-resume.ts"
 import { readDrainConfig } from "./lib/drain/config.ts"
-import { drainDue, runDrainStep } from "./lib/drain/step.ts"
+import { runDrainStep } from "./lib/drain/step.ts"
 import { runSteps } from "./lib/step-registry.ts"
 import { readMemoryConfig } from "./lib/memory/config.ts"
 import { resolveProvider } from "./lib/memory/registry.ts"
@@ -108,10 +111,6 @@ import type { ChildOutcome, ChildRun, DispatchContext } from "./lib/work-kinds/t
 
 /** Post-abort idle confirmation budget (plan 5.2) — never the tick budget. */
 const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
-
-/** `min-gap:research` cadence. Research is the only judgment mission left
- *  after the JEV digest was removed, so its restraint lives here. */
-const RESEARCH_MIN_GAP_MS = 24 * 60 * 60_000
 
 // In-process heartbeat scheduler (kanban card D, missions-plan §12 — the
 // D-M9 locked vehicle) + outcome recording (kanban card E, plan §7): a
@@ -131,21 +130,23 @@ const RESEARCH_MIN_GAP_MS = 24 * 60 * 60_000
 //      while held; a stale lease is stealable). A live lease skips the tick —
 //      one mission at a time even when a TUI-embedded server and a separate
 //      `opencode serve` both load this plugin.
-//   5. Producers: each states intent into the single work pool — at most one
-//      mission and one staleness item per tick, plus `drain-pass` when due.
-//      This is where the decision is made (candidacy + weighted draw); there
-//      is no model gate.
-//   6. Consumer: pick exactly one runnable pool item and execute it — a
-//      `drain-pass`, a background step, or one mission child — or skip the
-//      tick when the pool is empty. The mission runs under the same autonomy
-//      gate and irreversibility floor as any session.
+//   5. Producers: chron writes durable intents under `state/inbox/` and the
+//      tick merges them (dedupe, capacity, checked save); user-task files are
+//      ingested in the same step. Decisions happen in the producer (schedule,
+//      gates, priority); there is no model gate.
+//   6. Consumer: run a bounded fair session — one item at a time, SWRR
+//      re-run between items, `lease.refresh()` checked between items — under
+//      the `consumer:` caps. Each item is a `drain-pass`, a background step,
+//      a mission child, or a user task, all under the same autonomy gate and
+//      irreversibility floor. A cap with runnable work left wakes immediately;
+//      `empty`/`no-runnable` sleep to `heartbeat.frequency`.
 //
-// Outcome recording (§7): every tick appends one NDJSON line to the
-// `heartbeat:` ledger (`ts, tick, digest_hash, level, quiet, candidates, bias,
-// verdict, mission, outcome, token_cost, mood_event`) through the shared
-// rotation engine; a mission run also records itself in `backlog.ndjson`
-// (`source: "heartbeat"`, `result.token_cost` filled) and refreshes the derived
-// view one-way. The heartbeat feeds `long_silence` (gap ≥ factor × frequency)
+// Outcome recording (§7): the tick appends one NDJSON line per executed item
+// (handler fields + `position`) and one session line (`items_run`,
+// `items_left`, `wall_ms`, `tokens`, `stopped`) to the `heartbeat:` ledger
+// through the shared rotation engine; a mission run also records itself in
+// `backlog.ndjson` (`source: "heartbeat"`, `result.token_cost` filled) and
+// refreshes the derived view one-way. The heartbeat feeds `long_silence` (gap ≥ factor × frequency)
 // and `mission_failure` (non-completed run) through the shared `createMoodFeed`
 // entry point — mood stays advisory, never touches the gate or the floor.
 //
@@ -201,38 +202,18 @@ export default (async ({ client, directory, ...rest }) => {
     currentMarker = { ...currentMarker, ...patch, updated_at: nowIso() }
     await writeHeartbeatCurrent(currentFile, currentMarker)
   }
-  // `noop_hash`/`noop_streak` drive B7 day-side backoff (missions-plan §7):
-  // consecutive no_reply ticks on an identical digest stretch the cadence ×2/×4.
   const stateStore = createStateStore<{
     last_tick: number
     ticks: number
-    noop_hash: string | null
-    noop_streak: number
     last_mission: string | null
     /** Per-mission last dispatch epoch ms (`min-gap:` candidacy). */
     last_runs?: Record<string, number>
   }>(join(stateDir, HEARTBEAT_STATE_FILE), {
     last_tick: 0,
     ticks: 0,
-    noop_hash: null,
-    noop_streak: 0,
     last_mission: null,
     last_runs: {},
   })
-
-  // B7 bookkeeping: a no_reply tick on the SAME digest extends the streak, a
-  // changed digest restarts it at 1; an executed mission clears it (§17.8
-  // reset rule, day twin).
-  const recordNoop = async (digestHash: string): Promise<void> => {
-    await stateStore.update((s) => ({
-      ...s,
-      noop_hash: digestHash,
-      noop_streak: s.noop_hash === digestHash ? s.noop_streak + 1 : 1,
-    }))
-  }
-  const recordExecution = async (): Promise<void> => {
-    await stateStore.update((s) => ({ ...s, noop_hash: null, noop_streak: 0 }))
-  }
 
   // Card 7a (§17.10): the idea pipeline's deterministic half rides the
   // heartbeat — no idea-hook scheduler. Log settings are init-once (the
@@ -299,9 +280,15 @@ export default (async ({ client, directory, ...rest }) => {
   // Test-injection seam: point the drain pipe at a fixture SQLite store
   // instead of the real opencode data dir. Production input never carries it.
   const drainDbFile = (rest as { drainDbFile?: string }).drainDbFile
+  // Test-injection seam: shrink the consumer caps so the stop paths are
+  // observable without long runs. Production input never carries it.
+  const consumerOverride = (rest as { consumer?: Partial<ConsumerConfig> }).consumer
 
   // In-process single-flight (the file lock covers cross-instance overlap).
   let ticking = false
+  // A capped session with work left wakes at 0; this flag lets that wake
+  // bypass the idle-frequency due check without touching persisted state.
+  let backlogPending = false
 
   // Child-idle waiters, resolved from the event hook below (never a poll
   // loop). Registered BEFORE the prompt so the child's first idle is caught.
@@ -847,10 +834,13 @@ export default (async ({ client, directory, ...rest }) => {
     }
   }
 
-  type TickStatus = "fired" | "lock-held" | "sleeping"
+  type TickResult = {
+    status: "fired" | "lock-held" | "sleeping" | "backlog"
+    wakeMs?: number
+  }
 
-  const runTick = async (): Promise<TickStatus> => {
-    if (ticking) return "lock-held" // in-process single-flight
+  const runTick = async (): Promise<TickResult> => {
+    if (ticking) return { status: "lock-held" } // in-process single-flight
     ticking = true
     let ownership: OwnershipHandle | null = null
     // Troubleshooting trail: which stage the tick is in, and the ledger
@@ -866,7 +856,7 @@ export default (async ({ client, directory, ...rest }) => {
       // parses to null and sleeps — a garbage dial must never fire the
       // heartbeat.
       const hbCfg = await readHeartbeatConfig(dir)
-      if (!hbCfg.enabled) return "sleeping"
+      if (!hbCfg.enabled) return { status: "sleeping" }
       // Hot-read the child budget: a config flip applies from the next tick
       // (the test seam wins when injected so timeout/requeue stays testable).
       // Hot-read the watchdog dials: a config flip applies from the next tick
@@ -881,23 +871,26 @@ export default (async ({ client, directory, ...rest }) => {
       // B7: the effective day cadence carries the identical-digest NO_REPLY
       // backoff (missions-plan §7) — the SAME value feeds the wake loop.
       const state = await stateStore.read()
-      const frequencyMs = effectiveFrequencyMs(
-        frequencyToMs(autonomy.heartbeat.frequency),
-        state.noop_streak,
-      )
+      const frequencyMs = frequencyToMs(autonomy.heartbeat.frequency)
       const nowMs = Date.now()
-      const wake = computeWakeDelayMs({
-        level: autonomy.level,
-        frequencyMs,
-        lastTickMs: state.last_tick > 0 ? state.last_tick : null,
-        nowMs,
-      })
-      if (wake > 0) return "sleeping"
+      // L0 and `frequency: off` remain hard stops even when a backlog wake was
+      // queued; the backlog flag only bypasses the idle waiting period.
+      if (autonomy.level <= 0 || frequencyMs === null) return { status: "sleeping" }
+      const wake = backlogPending
+        ? 0
+        : computeWakeDelayMs({
+            level: autonomy.level,
+            frequencyMs,
+            lastTickMs: state.last_tick > 0 ? state.last_tick : null,
+            nowMs,
+          })
+      if (wake > 0) return { status: "sleeping" }
 
       // 4. Cross-instance lease; a live holder means another instance is
       // inside a tick (overrun semantics) — skip, retry next wake.
       const lease = await acquireOwnership(ownershipPath, { nowMs })
-      if (!lease) return "lock-held"
+      if (!lease) return { status: "lock-held" }
+      backlogPending = false
       ownership = lease
       const prevState = state
       const nextState = await stateStore.update((s) => ({
@@ -949,10 +942,7 @@ export default (async ({ client, directory, ...rest }) => {
         now: new Date(nowMs),
         ideaDay,
         gaps: { ...(ideaGaps ?? {}), ...(state.last_runs ?? {}) },
-        minGapMs: {
-          express: ideaCfg.express_min_gap_hours * 3_600_000,
-          research: RESEARCH_MIN_GAP_MS,
-        },
+        minGapMs: { express: ideaCfg.express_min_gap_hours * 3_600_000 },
         dbFile: drainDbFile,
       }
       let digest = await computeDigest(dir, digestOpts)
@@ -985,7 +975,7 @@ export default (async ({ client, directory, ...rest }) => {
             digest_hash: digest.digest_hash,
             level: digest.level,
             quiet: digest.quiet,
-            candidates: digest.candidates.map((c) => `${c.id}:${c.weight.toFixed(2)}`),
+            candidates: digest.candidates.map((c) => c.id),
             bias: digest.bias,
             ...schedulerFields,
             ...extra,
@@ -1012,6 +1002,18 @@ export default (async ({ client, directory, ...rest }) => {
         weights: { ...DEFAULT_WORK_WEIGHTS },
       }))
       const queueState = await loadWorkQueueState(workQueueFile)
+      const chronCfg = await readChronConfig(dir)
+      const intentMerge = await mergeIntents({
+        stateDir,
+        inboxDir: chronCfg.inbox_dir,
+        queueFile: workQueueFile,
+        queue: queueState.items,
+        scheduler: queueState.scheduler,
+        nowMs,
+      })
+      for (const bad of intentMerge.bad) {
+        void diag.warn(`[heartbeat-hook] bad intent ${bad.path}: ${bad.reason}`)
+      }
       const producerCtx: ProducerCtx = {
         nowMs,
         stateDir,
@@ -1020,69 +1022,25 @@ export default (async ({ client, directory, ...rest }) => {
         quiet: digest.quiet,
         signals: digest.signals,
         missions: allMissions,
-        candidates: digest.candidates,
-        queuedIds: new Set(queueState.items.map((i) => i.id)),
+        queuedIds: new Set(intentMerge.queue.map((i) => i.id)),
         random: Math.random,
-        drainDue: () =>
-          drainDue({
-            directory: dir,
-            stateDir,
-            ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
-          }),
       }
-      let work = enqueueWork(queueState.items, await collectWork(producerCtx))
+      // Mission/drain intents arrive through the inbox; user tasks are still
+      // ingested from their files here.
+      const produced = await collectUserTasks(producerCtx)
+      let work = enqueueWork(intentMerge.queue, produced)
       work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
       let scheduler: SchedulerState = queueState.scheduler
 
-      // 7. Consumer: exactly one item per tick, or skip.
-      const fairPick = pickFair(
-        work,
-        scheduler,
-        nowMs,
-        (item) => itemRunnable(producerCtx, item),
-        schedulerCfg.weights,
-      )
-      if (!fairPick) {
-        await saveWorkQueueState(workQueueFile, work, scheduler)
-        const depth = queueDepth(work)
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "queues",
-          reason: depth === 0 ? "empty" : "no-runnable",
-          queues: depth,
-        })
-        await recordNoop(digest.digest_hash)
-        return "fired"
-      }
-      scheduler = fairPick.scheduler
-      schedulerFields = {
-        scheduler_fair: true,
-        scheduled_kind: fairPick.kind,
-        scheduler_runnable: fairPick.runnable,
-        scheduler_credit_before: fairPick.credit_before,
-        scheduler_credit_after: fairPick.credit_after,
-      }
-      const picked = dequeueById(work, fairPick.item.id)
-      if (!picked) {
-        await saveWorkQueueState(workQueueFile, work, scheduler)
-        const depth = queueDepth(work)
-        await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: "queues",
-          reason: depth === 0 ? "empty" : "no-runnable",
-          queues: depth,
-        })
-        await recordNoop(digest.digest_hash)
-        return "fired"
-      }
-      work = picked.rest
-      await saveWorkQueueState(workQueueFile, work, scheduler)
+      // 7. Consumer session: a bounded, fair batch from the durable snapshot.
+      // SWRR decides the order between items; caps are checked between items,
+      // so the item that crosses a cap settles before the session stops.
+      const consumerCfg = { ...(await readConsumerConfig(dir)), ...(consumerOverride ?? {}) }
+      const sessionStartedMs = Date.now()
+      const seen = new Set<string>()
+      let itemsRun = 0
+      let tokens = 0
+      let stopped = "empty"
 
       // 8. Dispatch through the work-kind registry. The hook supplies the
       // transport and records the outcome; it makes no per-kind decisions.
@@ -1201,36 +1159,129 @@ export default (async ({ client, directory, ...rest }) => {
         },
       }
 
-      const handler = handlerFor(fairPick.kind)
-      if (!handler) {
+      const maxItems = consumerCfg.max_items_per_tick
+      const maxWallMs = consumerCfg.max_wall_minutes * 60_000
+      const tokenBudget = consumerCfg.token_budget
+      const pickable = (item: WorkItem): boolean =>
+        !seen.has(item.id) && itemRunnable(producerCtx, item) && isDue(item, nowMs)
+
+      while (true) {
+        if (maxItems > 0 && itemsRun >= maxItems) {
+          stopped = "max-items"
+          break
+        }
+        if (maxWallMs > 0 && Date.now() - sessionStartedMs >= maxWallMs) {
+          stopped = "max-wall"
+          break
+        }
+        if (tokenBudget > 0 && tokens >= tokenBudget) {
+          stopped = "token-budget"
+          break
+        }
+        if (!(await lease.refresh())) {
+          stopped = "lease-lost"
+          break
+        }
+
+        const fairPick = pickFair(work, scheduler, nowMs, pickable, schedulerCfg.weights)
+        if (!fairPick) {
+          stopped = queueDepth(work) === 0 ? "empty" : "no-runnable"
+          break
+        }
+        scheduler = fairPick.scheduler
+        schedulerFields = {
+          scheduler_fair: true,
+          scheduled_kind: fairPick.kind,
+          scheduler_runnable: fairPick.runnable,
+          scheduler_credit_before: fairPick.credit_before,
+          scheduler_credit_after: fairPick.credit_after,
+        }
+        const picked = dequeueById(work, fairPick.item.id)
+        if (!picked) {
+          stopped = "no-runnable"
+          break
+        }
+        work = picked.rest
+        seen.add(picked.item.id)
+        await saveWorkQueueState(workQueueFile, work, scheduler)
+
+        const handler = handlerFor(fairPick.kind)
+        if (!handler) {
+          await ledger({
+            verdict: "no_reply",
+            mission: null,
+            outcome: "silent",
+            token_cost: 0,
+            gate: fairPick.kind,
+            reason: "missing-handler",
+            position: itemsRun + 1,
+            queues: queueDepth(work),
+          })
+          continue
+        }
+
+        const result = await handler.run(dispatchCtx, picked.item)
+        if (result.requeue) work = enqueueWork(work, [result.requeue])
+        await saveWorkQueueState(workQueueFile, work, scheduler)
+
+        if (result.session_id) sessionId = result.session_id
+        if (result.mood) {
+          await moodFeed.apply(result.mood)
+          moodEvent = result.mood
+        }
+        if (result.backlog) await recordBacklog(result.backlog)
+
+        const itemTokens =
+          typeof result.ledger.token_cost === "number" ? result.ledger.token_cost : 0
+        tokens += itemTokens
+        itemsRun++
         await ledger({
-          verdict: "no_reply",
-          mission: null,
-          outcome: "silent",
-          token_cost: 0,
-          gate: fairPick.kind,
-          reason: "missing-handler",
+          ...result.ledger,
+          position: itemsRun,
+          items_run: itemsRun,
+          ...(sessionId ? { session: sessionId } : {}),
           queues: queueDepth(work),
         })
-        await recordNoop(digest.digest_hash)
-        return "fired"
       }
 
-      const result = await handler.run(dispatchCtx, picked.item)
-      if (result.requeue) work = enqueueWork(work, [result.requeue])
-      await saveWorkQueueState(workQueueFile, work, scheduler)
+      const itemsLeft = work.filter(
+        (item) => !seen.has(item.id) && itemRunnable(producerCtx, item) && isDue(item, nowMs),
+      ).length
+      const depth = queueDepth(work)
+      const capped =
+        stopped === "max-items" || stopped === "max-wall" || stopped === "token-budget"
+      await ledger({
+        verdict: itemsRun > 0 ? "session" : "no_reply",
+        mission: null,
+        outcome: itemsRun > 0 ? "completed" : "silent",
+        token_cost: tokens,
+        gate: "queues",
+        reason: stopped,
+        items_run: itemsRun,
+        items_left: itemsLeft,
+        wall_ms: Date.now() - sessionStartedMs,
+        tokens,
+        stopped,
+        queues: depth,
+        ...(sessionId ? { session: sessionId } : {}),
+      })
 
-      if (result.session_id) sessionId = result.session_id
-      if (result.mood) {
-        await moodFeed.apply(result.mood)
-        moodEvent = result.mood
+      if (stopped === "lease-lost") return { status: "fired", wakeMs: wakeCapMs }
+      if (capped && itemsLeft > 0) {
+        backlogPending = true
+        return { status: "backlog", wakeMs: 0 }
       }
-      if (result.backlog) await recordBacklog(result.backlog)
-
-      await ledger({ ...result.ledger, queues: queueDepth(work) })
-      if (result.executed) await recordExecution()
-      else await recordNoop(digest.digest_hash)
-      return "fired"
+      if (stopped === "empty" || stopped === "no-runnable") {
+        const freq = frequencyToMs(autonomy.heartbeat.frequency)
+        let delay = freq ?? wakeCapMs
+        for (const item of work) {
+          if (item.not_before_ms !== undefined && item.not_before_ms > nowMs) {
+            delay = Math.min(delay, item.not_before_ms - nowMs)
+          }
+        }
+        return { status: "fired", wakeMs: Math.max(0, Math.min(delay, wakeCapMs)) }
+      }
+      return { status: "fired" }
     } catch (err) {
       void diag.error("[heartbeat-hook] tick failed:", err)
       // Never a silent tick: record the failure in the ledger itself with
@@ -1247,7 +1298,7 @@ export default (async ({ client, directory, ...rest }) => {
       }
       if (ledgerForTick) await ledgerForTick({ verdict: null, mission: null, ...line })
       else await logTick({ tick: null, ...line })
-      return "fired"
+      return { status: "fired" }
     } finally {
       ticking = false
       // The ownership lease is the only release left (Phase 1).
@@ -1278,10 +1329,7 @@ export default (async ({ client, directory, ...rest }) => {
     const state = await stateStore.read()
     return {
       level: autonomy.level,
-      frequencyMs: effectiveFrequencyMs(
-        frequencyToMs(autonomy.heartbeat.frequency),
-        state.noop_streak,
-      ),
+      frequencyMs: frequencyToMs(autonomy.heartbeat.frequency),
       lastTickMs: state.last_tick > 0 ? state.last_tick : null,
       nowMs: Date.now(),
     }
@@ -1296,14 +1344,20 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   const loop = async (): Promise<void> => {
-    let status: TickStatus = "sleeping"
+    let outcome: TickResult = { status: "sleeping" }
     try {
-      status = await runTick()
+      outcome = await runTick()
     } catch (err) {
       void diag.error("[heartbeat-hook] loop error:", err)
     }
-    if (status === "lock-held") {
+    if (outcome.status === "lock-held") {
       scheduleWake(wakeCapMs)
+      return
+    }
+    // A capped session with work left wakes immediately: the cap must not
+    // delay the backlog by a full idle frequency.
+    if (outcome.status === "backlog") {
+      scheduleWake(0)
       return
     }
     // Background steps (dream, staleness, profile-update, soul-update) run in
@@ -1315,7 +1369,9 @@ export default (async ({ client, directory, ...rest }) => {
     } catch (err) {
       void diag.error("[heartbeat-hook] step run failed:", err)
     }
-    scheduleWake(Math.min(computeWakeDelayMs(await wakeInput()), wakeCapMs))
+    const delay =
+      outcome.wakeMs ?? computeWakeDelayMs(await wakeInput())
+    scheduleWake(Math.min(delay, wakeCapMs))
   }
 
   // First wake deferred so plugin init returns first (startup-catch-up
