@@ -3,11 +3,12 @@ import { RouterLink } from '@angular/router';
 
 import { fmtAge, fmtCost, fmtDuration, fmtTime, fmtTokens } from '../core/format';
 import { DashboardStore } from '../core/store';
+import { CooldownRing } from '../shared/cooldown-ring';
 import { Transcript } from '../shared/transcript';
 
 @Component({
   selector: 'db-flight-page',
-  imports: [Transcript, RouterLink],
+  imports: [CooldownRing, Transcript, RouterLink],
   templateUrl: './flight.html',
   styleUrl: './flight.css',
 })
@@ -37,6 +38,12 @@ export class FlightPage {
   protected readonly queuePeek = computed(() => this.store.queueItems().slice(0, 6));
 
   protected readonly activity = computed(() => (this.store.activity()?.events ?? []).slice(0, 9));
+
+  protected cooldownText(remainingMs: number): string {
+    if (remainingMs <= 0) return 'due';
+    if (remainingMs < 60_000) return `${Math.ceil(remainingMs / 1000)}s left`;
+    return `${Math.ceil(remainingMs / 60_000)}m left`;
+  }
 
   protected kindTone(kind: string): string {
     switch (kind) {

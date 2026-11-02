@@ -73,6 +73,8 @@ export interface Sleep {
   last_tick: number | null;
   window: string;
   quiet: boolean;
+  cooldown_total_ms: number | null;
+  cooldown_remaining_ms: number | null;
   available: boolean;
 }
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-02
+
+### Added
+
+- **Flight sleep cooldown ring.** The Vitals panel replaces the plain `sleep`
+  row with a 20px ring plus `woken · Nm left` while the agent is woken during
+  quiet hours. `readSleep` now reports `cooldown_total_ms` (from
+  `autonomy.quiet.resume_cooldown`, default 60m) and a server-computed
+  `cooldown_remaining_ms` anchored on `since` — the last activity, not
+  `woken_at` — so the countdown restarts when the user keeps talking. The
+  store interpolates between 5s polls with its 1s clock; the ring turns
+  warning under 25% and danger at zero, where it shows `due` until the next
+  heartbeat tick reconciles `woken → dreaming`. Reusable as
+  `db-cooldown-ring` for a later top-strip cell.
+
 ## 2026-11-01
 
 ### Added

@@ -614,15 +614,25 @@ export function readSleep(dir, paths, now = Date.now()) {
   const sleep = safeJson(join(paths.state, 'sleep.json'));
   const window = data?.autonomy?.quiet?.window ?? '23:00-08:00';
   const quiet = quietNow(window, now);
+  const cooldownTotal = parseDuration(data?.autonomy?.quiet?.resume_cooldown) ?? 60 * 60_000;
   if (sleep) {
+    const status = sleep.status ?? 'awake';
+    const since = sleep.since ?? null;
+    const sinceMs = parseTime(since);
+    const remaining =
+      status === 'woken' && quiet && sinceMs !== null
+        ? Math.max(0, cooldownTotal - (now - sinceMs))
+        : null;
     return {
-      status: sleep.status ?? 'awake',
-      since: sleep.since ?? null,
+      status,
+      since,
       woken_at: sleep.woken_at ?? null,
       dreams_tonight: sleep.dreams_tonight ?? 0,
       last_tick: sleep.last_tick ?? null,
       window,
       quiet,
+      cooldown_total_ms: cooldownTotal,
+      cooldown_remaining_ms: remaining,
       available: true,
     };
   }
@@ -634,6 +644,8 @@ export function readSleep(dir, paths, now = Date.now()) {
     last_tick: null,
     window,
     quiet,
+    cooldown_total_ms: cooldownTotal,
+    cooldown_remaining_ms: null,
     available: false,
   };
 }

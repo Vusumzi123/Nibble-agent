@@ -79,7 +79,16 @@
               <dt>mood</dt>
               <dd class="mono">{{ store.mood()?.label ?? '—' }} · v {{ store.mood()?.valence?.toFixed(2) ?? '—' }}</dd>
               <dt>sleep</dt>
-              <dd class="mono">{{ store.sleep()?.status ?? '—' }} · {{ store.sleep()?.window ?? '—' }}</dd>
+              <dd class="mono">
+                @if (store.sleepCooldown(); as cooldown) {
+                  <span class="sleep-cell">
+                    <db-cooldown-ring [totalMs]="cooldown.totalMs" [remainingMs]="cooldown.remainingMs" />
+                    <span>woken · {{ cooldownText(cooldown.remainingMs) }}</span>
+                  </span>
+                } @else {
+                  {{ store.sleep()?.status ?? '—' }} · {{ store.sleep()?.window ?? '—' }}
+                }
+              </dd>
               <dt>ideas</dt>
               <dd class="mono">{{ store.idea()?.generatedToday ?? 0 }} / {{ store.idea()?.dailyTarget ?? 0 }} today</dd>
               <dt>cadence</dt>

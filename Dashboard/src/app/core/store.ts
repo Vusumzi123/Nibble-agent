@@ -57,6 +57,7 @@ export class DashboardStore {
   readonly heartbeat = signal<Heartbeat | null>(null);
   readonly mood = signal<Mood | null>(null);
   readonly sleep = signal<Sleep | null>(null);
+  readonly sleepAt = signal(Date.now());
   readonly idea = signal<Idea | null>(null);
   readonly queues = signal<Queues | null>(null);
   readonly drain = signal<Drain | null>(null);
@@ -119,6 +120,18 @@ export class DashboardStore {
   readonly runCount = computed(() => this.errors()?.runs.total ?? this.overview()?.errors.total ?? 0);
   readonly moodLabel = computed(() => this.mood()?.label ?? 'unknown');
   readonly quiet = computed(() => this.sleep()?.quiet ?? false);
+
+  readonly sleepCooldown = computed(() => {
+    const sleep = this.sleep();
+    if (!sleep || sleep.status !== 'woken' || !sleep.quiet) return null;
+    const totalMs = sleep.cooldown_total_ms;
+    const baseMs = sleep.cooldown_remaining_ms;
+    if (typeof totalMs !== 'number' || typeof baseMs !== 'number') return null;
+    const elapsed = Math.max(0, this.now() - this.sleepAt());
+    const remainingMs = Math.max(0, baseMs - elapsed);
+    const pct = totalMs > 0 ? Math.min(1, remainingMs / totalMs) : 0;
+    return { totalMs, remainingMs, pct, expired: remainingMs <= 0 };
+  });
 
   readonly updatedLabel = computed(() => {
     const ts = this.lastUpdated();
@@ -332,7 +345,10 @@ export class DashboardStore {
           this.api.backlog(100),
         ]);
         if (activity.status === 'fulfilled') this.activity.set(activity.value);
-        if (sleep.status === 'fulfilled') this.sleep.set(sleep.value);
+        if (sleep.status === 'fulfilled') {
+          this.sleep.set(sleep.value);
+          this.sleepAt.set(Date.now());
+        }
         if (idea.status === 'fulfilled') this.idea.set(idea.value);
         if (backlog.status === 'fulfilled') this.backlog.set(backlog.value);
         await this.pollTranscript();
