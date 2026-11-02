@@ -1,0 +1,23 @@
+    <svg
+      class="ring"
+      [class]="'ring ring--' + tone()"
+      viewBox="0 0 20 20"
+      role="img"
+      [attr.aria-label]="label()"
+    >
+      <title>{{ label() }}</title>
+      <circle class="ring__track" cx="10" cy="10" r="8" fill="none" stroke-width="2" />
+      <circle
+        class="ring__value"
+        cx="10"
+        cy="10"
+        r="8"
+        fill="none"
+        stroke-width="2"
+        stroke-linecap="round"
+        pathLength="100"
+        transform="rotate(-90 10 10)"
+        [attr.stroke-dasharray]="100"
+        [attr.stroke-dashoffset]="offset()"
+      />
+    </svg>

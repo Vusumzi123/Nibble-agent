@@ -156,6 +156,11 @@ test("successful summarization normalizes items and preserves atoms", async () =
   assert.equal(result.items.length, 2)
   assert.equal(result.tokens, 16)
   assert.equal(result.model, "test/model")
+  assert.equal(result.sessionID, "ses_sum")
+  assert.equal(result.steps, 1)
+  assert.equal(typeof result.spawnMs, "number")
+  assert.equal(typeof result.runMs, "number")
+  assert.equal(result.queueMs, null, "the fake rows carry no time.created")
 
   assert.deepEqual(result.items[0].tags, ["linux/network"])
   assert.equal(result.items[1].title, "wireguard setup (2)")

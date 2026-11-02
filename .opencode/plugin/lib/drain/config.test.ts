@@ -20,6 +20,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  trigger_max_age_hours: 4",
       "  settle_seconds: 300",
       "  poll_seconds: 120",
+      "  producer_interval_minutes: 5",
       "  max_wall_minutes: 30",
       "  token_budget: 40000",
       "  wake_token_budget: 100000",
@@ -41,6 +42,7 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.trigger_max_age_hours, 4)
   assert.equal(parsed.settle_seconds, 300)
   assert.equal(parsed.poll_seconds, 120)
+  assert.equal(parsed.producer_interval_minutes, 5)
   assert.equal(parsed.max_wall_minutes, 30)
   assert.equal(parsed.token_budget, 40000)
   assert.equal(parsed.wake_token_budget, 100000)
@@ -92,6 +94,7 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
       "  trigger_pending: 0",
       "  trigger_max_age_hours: -1",
       "  poll_seconds: 0",
+      "  producer_interval_minutes: 0",
       "  token_budget: -5",
       "  max_passes_per_wake: 0",
       "  lock_refresh_ms: 60000",
@@ -104,6 +107,7 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
   assert.equal(cfg.trigger_pending, DEFAULT_DRAIN.trigger_pending)
   assert.equal(cfg.trigger_max_age_hours, DEFAULT_DRAIN.trigger_max_age_hours)
   assert.equal(cfg.poll_seconds, DEFAULT_DRAIN.poll_seconds)
+  assert.equal(cfg.producer_interval_minutes, DEFAULT_DRAIN.producer_interval_minutes)
   assert.equal(cfg.token_budget, DEFAULT_DRAIN.token_budget, "negative falls back to the default")
   assert.equal(cfg.max_passes_per_wake, DEFAULT_DRAIN.max_passes_per_wake)
   assert.equal(

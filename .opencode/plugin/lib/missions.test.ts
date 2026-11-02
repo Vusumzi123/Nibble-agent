@@ -36,7 +36,8 @@ const FULL_FM = [
   "---",
   "id: staleness",
   "title: Refresh stale notes",
-  "frequency: mid",
+  "schedule: every 6h",
+  "producer: generic",
   "menus: [day]",
   "min_level: 3",
   "approval: per-item",
@@ -58,10 +59,11 @@ test("parseMissionFile parses a full frontmatter mission", () => {
   assert.deepEqual(mission, {
     id: "staleness",
     title: "Refresh stale notes",
-    frequency: "mid",
+    schedule: "every 6h",
+    producer: "generic",
     menus: ["day"],
     min_level: 3,
-    priority: 3,
+    priority: 5,
     approval: "per-item",
     candidacy: "min-gap:last_refresh",
     enqueue: "producer",
@@ -80,12 +82,23 @@ test("parseMissionFile accepts brain-stale and brain-stale:<hours>", () => {
   assert.ok(parse("brain-stale:soon").issues.some((i) => i.key === "candidacy"))
 })
 
+test("parseMissionFile accepts a custom producer and schedule", () => {
+  const { mission, issues } = parseMissionFile(
+    "---\nid: report\nschedule: 0 9 * * *\nproducer: nightly-report\n---\nbody\n",
+    "report",
+  )
+  assert.deepEqual(issues, [])
+  assert.equal(mission.schedule, "0 9 * * *")
+  assert.equal(mission.producer, "nightly-report")
+})
+
 test("parseMissionFile falls back to safe defaults for missing keys", () => {
   const { mission, issues } = parseMissionFile("---\nid: drain\n---\nBody here.\n", "fallback")
   assert.deepEqual(issues, [])
   assert.equal(mission.id, "drain")
   assert.equal(mission.title, "drain") // title falls back to id
-  assert.equal(mission.frequency, DEFAULT_MISSION.frequency)
+  assert.equal(mission.schedule, DEFAULT_MISSION.schedule)
+  assert.equal(mission.producer, DEFAULT_MISSION.producer)
   assert.deepEqual(mission.menus, DEFAULT_MISSION.menus)
   assert.equal(mission.min_level, DEFAULT_MISSION.min_level)
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
@@ -112,10 +125,10 @@ test("parseMissionFile accepts `agent: \"\"` (the spec default) without an issue
 })
 
 test("parseMissionFile reports unknown keys once and keeps valid fields", () => {
-  const content = ["---", "id: x", "tools: [rag-brain]", "frequency: high", "---", "b"].join("\n")
+  const content = ["---", "id: x", "tools: [rag-brain]", "schedule: 1h", "---", "b"].join("\n")
   const { mission, issues } = parseMissionFile(content, "x")
   assert.deepEqual(issues, [{ key: "tools", reason: "unknown key" }])
-  assert.equal(mission.frequency, "high") // valid key still parsed
+  assert.equal(mission.schedule, "1h") // valid key still parsed
   assert.equal(mission.id, "x")
 })
 
@@ -123,7 +136,7 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
   const content = [
     "---",
     "id: x",
-    "frequency: sometimes",
+    "priority: 99",
     "min_level: 9",
     "menus: [weekend]",
     "approval: yolo",
@@ -135,9 +148,9 @@ test("parseMissionFile falls back on invalid values and reports each", () => {
   const { mission, issues } = parseMissionFile(content, "x")
   assert.deepEqual(
     issues.map((i) => i.key).sort(),
-    ["approval", "candidacy", "enabled", "frequency", "menus", "min_level"],
+    ["approval", "candidacy", "enabled", "menus", "min_level", "priority"],
   )
-  assert.equal(mission.frequency, DEFAULT_MISSION.frequency)
+  assert.equal(mission.priority, DEFAULT_MISSION.priority)
   assert.equal(mission.min_level, DEFAULT_MISSION.min_level)
   assert.deepEqual(mission.menus, DEFAULT_MISSION.menus)
   assert.equal(mission.approval, DEFAULT_MISSION.approval)
@@ -166,7 +179,7 @@ test("expandMenus expands `both` and passes windows through", () => {
 
 function base(): Mission {
   const { mission } = parseMissionFile(FULL_FM, "fallback")
-  return mission // enabled: false, min_level: 3, frequency: mid, menus: [day]
+  return mission // enabled: false, min_level: 3, priority: 5, menus: [day]
 }
 
 function applied(overlay: Parameters<typeof applyMissionOverlay>[1]): { m: Mission; rejects: string[] } {
@@ -199,15 +212,19 @@ test("overlay: min_level raise is honoured; lower is rejected, file stands", () 
   assert.match(lower.rejects[0], /min_level may only be raised/)
 })
 
-test("overlay: frequency toward low is honoured; higher is rejected", () => {
-  const rarer = applied({ frequency: "low" })
-  assert.equal(rarer.m.frequency, "low")
-  assert.deepEqual(rarer.rejects, [])
+test("overlay: priority may only decrease", () => {
+  const higher = { ...base(), priority: 7 }
+  const lower = applyMissionOverlay(higher, { priority: 5 }, [])
+  assert.equal(lower.priority, 5)
 
-  const commoner = applied({ frequency: "high" })
-  assert.equal(commoner.m.frequency, "mid") // file stands
-  assert.equal(commoner.rejects.length, 1)
-  assert.match(commoner.rejects[0], /frequency may only move toward low/)
+  const raise = applied({ priority: 7 }) // file: 5
+  assert.equal(raise.m.priority, 5)
+  assert.equal(raise.rejects.length, 1)
+  assert.match(raise.rejects[0], /priority may only decrease/)
+
+  const same = applied({ priority: 5 })
+  assert.equal(same.m.priority, 5)
+  assert.deepEqual(same.rejects, [])
 })
 
 test("overlay: menus narrowing is honoured; widening is rejected", () => {
@@ -257,7 +274,7 @@ test("loadMissions yields [] for a missing directory (never throws)", async () =
 
 test("loadMissions applies the config overlay restrict-only", async () => {
   const dir = await missionsDir({
-    "staleness.md": FULL_FM, // enabled: false, min_level: 3, frequency: mid, menus: [day]
+    "staleness.md": FULL_FM, // enabled: false, min_level: 3, priority: 5, menus: [day]
   })
   await mkdir(join(dir, ".opencode"), { recursive: true })
   await writeFile(
@@ -268,7 +285,7 @@ test("loadMissions applies the config overlay restrict-only", async () => {
       "    staleness:",
       "      enabled: false",
       "      min_level: 4",
-      "      frequency: low",
+      "      priority: 2",
       "      menus: [day, night]", // widen attempt — must be rejected
       "",
     ].join("\n"),
@@ -280,7 +297,7 @@ test("loadMissions applies the config overlay restrict-only", async () => {
   const m = missions[0]
   assert.equal(m.enabled, false)
   assert.equal(m.min_level, 4) // raise honoured
-  assert.equal(m.frequency, "low") // rarer honoured
+  assert.equal(m.priority, 2) // lower honoured
   assert.deepEqual(m.menus, ["day"]) // widen rejected, file stands
   assert.ok(rejects.some((r) => r.includes("missions.staleness.menus")), `menu widen reject in ${rejects}`)
 })
@@ -342,9 +359,26 @@ test("shipped built-ins parse clean: dream/staleness/research/notify/idea-genera
   const express = byId.get("express")!
   assert.equal(express.enabled, false) // comms = card 10 (the notify precedent)
   assert.deepEqual(express.menus, ["day"])
-  assert.equal(express.candidacy, "min-gap:express") // §17.10 deterministic gate
+  assert.equal(express.candidacy, "always") // the schedule is the gap now
+  assert.equal(express.schedule, "every 12h")
   assert.equal(express.min_level, 1)
   assert.ok(express.body.length > 0)
+
+  // Scheduler migration: every mission carries a schedule and a priority.
+  assert.equal(notify.schedule, "every 1h")
+  assert.equal(notify.priority, 8)
+  assert.equal(byId.get("research")!.schedule, "every 6h")
+  assert.equal(byId.get("research")!.priority, 5)
+  assert.equal(byId.get("idea-generate")!.schedule, "every 24h")
+  assert.equal(byId.get("idea-generate")!.priority, 2)
+  assert.equal(byId.get("free-run")!.schedule, "every 6h")
+  assert.equal(byId.get("free-run")!.priority, 2)
+  assert.equal(byId.get("staleness")!.schedule, "every 6h")
+  assert.equal(byId.get("staleness")!.priority, 5)
+  assert.equal(dream.schedule, "every 1h")
+  assert.equal(dream.priority, 0)
+  assert.equal(byId.get("user-task")!.schedule, "")
+  assert.equal(byId.get("user-task")!.priority, 2)
 
   // Free run: one self-chosen action, day-only, ~10% roll, Working level.
   const freeRun = byId.get("free-run")!
@@ -364,7 +398,7 @@ test("shipped built-ins parse clean: dream/staleness/research/notify/idea-genera
   assert.deepEqual(research.menus, ["day"], "research day-only")
   assert.ok(research.body.length > 0, "research has a body")
   assert.equal(byId.get("staleness")!.candidacy, "brain-stale:720")
-  assert.equal(byId.get("research")!.candidacy, "min-gap:research")
+  assert.equal(byId.get("research")!.candidacy, "always") // the schedule is the gap now
   assert.equal(byId.get("dream")!.priority, 0, "dream is the lowest-priority mission")
 
   // Security prereq: built-ins must NOT be reachable without approval — the

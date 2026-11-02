@@ -244,16 +244,19 @@ function normalizeKind(kind: unknown): WorkKind | null {
   return null
 }
 
-/** Persist the queue + scheduler state (atomic rename); never throws. */
+/** Persist the queue + scheduler state (atomic rename); never throws. Returns
+ *  false on a write failure so callers can keep intent files for a retry. */
 export async function saveWorkQueueState(
   file: string,
   queue: WorkItem[],
   scheduler: SchedulerState,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await atomicWrite(file, JSON.stringify({ version: 2, items: queue, scheduler }))
+    return true
   } catch {
     // best-effort — a queue write must never fail a tick
+    return false
   }
 }
 
@@ -279,6 +282,28 @@ export function enqueueWork(queue: WorkItem[], items: readonly WorkItem[]): Work
 
 function cap(items: WorkItem[]): WorkItem[] {
   return items.length > MAX_QUEUE_DEPTH ? items.slice(items.length - MAX_QUEUE_DEPTH) : items
+}
+
+/** Merge intents up to the free capacity. Existing work is never evicted; the
+ *  overflow is returned as `rejected` and stays in the producer's inbox. */
+export function enqueueWithinCapacity(
+  queue: WorkItem[],
+  items: readonly WorkItem[],
+): { queue: WorkItem[]; rejected: WorkItem[] } {
+  const out = [...queue]
+  const rejected: WorkItem[] = []
+  for (const item of items) {
+    if (out.some((existing) => existing.id === item.id)) continue
+    if (out.length >= MAX_QUEUE_DEPTH) {
+      rejected.push(item)
+      continue
+    }
+    out.push({ ...item })
+  }
+  return {
+    queue: out.sort((a, b) => a.enqueued_ms - b.enqueued_ms),
+    rejected,
+  }
 }
 
 export type FairPick = {

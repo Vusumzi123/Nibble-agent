@@ -1,7 +1,8 @@
 ---
 id: staleness
 title: Refresh the oldest reference note
-frequency: mid
+schedule: every 6h
+priority: 5
 menus: [both]
 min_level: 2
 approval: writes-follow-dial

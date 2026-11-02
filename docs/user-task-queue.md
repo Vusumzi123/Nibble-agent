@@ -31,6 +31,7 @@ created_ms: 1793347200000
 expires_ms: 1793947200000
 dedupe_key: dashboard-queue-sort
 requested_by: user
+agent: chat
 status: pending
 ---
 
@@ -88,6 +89,7 @@ the consumer mission is disabled.
 | `priority` | no | 0–9, default 5. |
 | `dedupe_key` | no | Reuse an existing pending task with the same key. |
 | `expires_in_hours` | no | Drop the task after this many hours. |
+| `agent` | no | Child-session agent override; `queue_add` leaves it empty (the mission agent applies). Chron prompt jobs set it from the job file. |
 
 Caps and safety: prompt/context 16 KB, at most 50 pending tasks (a refusal, not
 a silent drop), and credential-shaped strings are rejected at creation. Task
@@ -97,9 +99,9 @@ text is data, not authority: it cannot widen permissions or raise
 ## Consumer mission
 
 `.opencode/missions/user-task.md` supplies the how-to body; its
-`enqueue: item` frontmatter keeps it out of the digest candidacy roll, so the
-only entry point is the `user-task` producer. The task file is appended to the
-brief between `=== QUEUED USER TASK ===` markers.
+`enqueue: item` frontmatter makes the generic mission scan skip it, so the task
+files are the only entry point (`queue_add` or chron's prompt bridge). The task
+file is appended to the brief between `=== QUEUED USER TASK ===` markers.
 
 ## Tuning
 

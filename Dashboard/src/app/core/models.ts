@@ -73,6 +73,8 @@ export interface Sleep {
   last_tick: number | null;
   window: string;
   quiet: boolean;
+  cooldown_total_ms: number | null;
+  cooldown_remaining_ms: number | null;
   available: boolean;
 }
 
@@ -126,7 +128,6 @@ export interface DrainPass {
 export interface Drain {
   ts: string;
   enabled: boolean;
-  consumer: boolean;
   state: string;
   trigger: string | null;
   pass: number;
@@ -346,17 +347,27 @@ export interface Activity {
 export interface Mission {
   id: string;
   title: string;
-  frequency: string;
+  /** Chron schedule in the mission frontmatter ("" = no schedule). */
+  schedule: string;
+  /** Production owner: `generic` or a registered custom producer. */
+  producer: string;
   menus: string[];
   base_menus: string[];
   min_level: number;
+  /** Within-kind queue priority (0–9). */
+  priority: number;
   approval: string;
   candidacy: string;
+  /** Queue entry point: the digest roll (`producer`) or a dedicated producer (`item`). */
+  enqueue: string;
   agent: string;
   enabled: boolean;
   file_enabled: boolean;
   file_min_level: number;
-  file_frequency: string;
+  file_priority: number;
+  file_schedule: string;
+  file_producer: string;
+  file_enqueue: string;
   overlay: Record<string, unknown> | null;
   overlay_rejects: string[];
 }
@@ -415,7 +426,7 @@ export interface Overview {
   };
   drain: Drain;
   backlog: { total: number; open: number; counts: Record<string, number> };
-  missions: { total: number; enabled: number; ids: Array<{ id: string; enabled: boolean; level: number; frequency: string }> };
+  missions: { total: number; enabled: number; ids: Array<{ id: string; enabled: boolean; level: number; schedule: string; priority: number }> };
   cost: { total_24h: number; today: number; avg_per_run: number | null; top_model: ModelSpend | null };
   errors: { rate: number; errors: number; total: number; gates: Record<string, number>; audit_failures: number };
   last_run: RunRow | null;

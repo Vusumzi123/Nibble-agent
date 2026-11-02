@@ -9,7 +9,7 @@ import { UiService } from '../core/ui';
 interface Draft {
   id: string;
   min_level: number;
-  frequency: string;
+  priority: number;
   menus: string[];
 }
 
@@ -25,10 +25,9 @@ export class MissionsPage {
   protected readonly expanded = signal<string | null>(null);
   protected readonly pending = signal<string | null>(null);
   protected readonly saving = signal<string | null>(null);
-  protected readonly draft = signal<Draft>({ id: '', min_level: 0, frequency: 'mid', menus: [] });
+  protected readonly draft = signal<Draft>({ id: '', min_level: 0, priority: 5, menus: [] });
 
   protected readonly levels = [0, 1, 2, 3, 4];
-  protected readonly frequencies = ['high', 'mid', 'low'];
 
   protected fmtCost = fmtCost;
 
@@ -81,7 +80,7 @@ export class MissionsPage {
     this.draft.set({
       id: mission.id,
       min_level: typeof overlay['min_level'] === 'number' ? (overlay['min_level'] as number) : mission.min_level,
-      frequency: typeof overlay['frequency'] === 'string' ? (overlay['frequency'] as string) : mission.frequency,
+      priority: typeof overlay['priority'] === 'number' ? (overlay['priority'] as number) : mission.priority,
       menus: Array.isArray(overlay['menus']) ? ([...(overlay['menus'] as string[])] as string[]) : [...mission.menus],
     });
   }
@@ -90,10 +89,8 @@ export class MissionsPage {
     return this.levels.filter((level) => level >= mission.file_min_level);
   }
 
-  protected frequenciesFor(mission: Mission): string[] {
-    const rank = { high: 0, mid: 1, low: 2 };
-    const floor = rank[mission.file_frequency as keyof typeof rank] ?? 0;
-    return this.frequencies.slice(floor);
+  protected prioritiesFor(mission: Mission): number[] {
+    return Array.from({ length: Math.max(0, Math.min(9, mission.file_priority)) + 1 }, (_, index) => index);
   }
 
   protected menuOptions(mission: Mission): string[] {
@@ -144,7 +141,7 @@ export class MissionsPage {
       await this.store.saveMission({
         id: mission.id,
         min_level: draft.min_level,
-        frequency: draft.frequency,
+        priority: draft.priority,
         menus: draft.menus,
       });
       this.ui.notify(`${mission.id} overlay saved`, 'success');

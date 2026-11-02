@@ -8,6 +8,7 @@
 //
 // Loaded via relative import only.
 import { textOf } from "../../../../sessions.ts"
+import { sessionAccounting } from "../../../../transcript.ts"
 import { WRITER_SESSION_TITLE } from "../../../../drain/automation.ts"
 
 export type ConsolidationClient = {
@@ -43,6 +44,20 @@ export type SpawnResult = {
   tokens: number | null
   cost: number | null
   error?: string
+  /** Child create + prompt setup observed by the caller (ms). */
+  spawnMs?: number | null
+  /** Prompt accepted -> first assistant message (queue + TTFT, ms). */
+  queueMs?: number | null
+  /** Caller wait from prompt accepted to idle (ms). */
+  runMs?: number | null
+  /** Assistant steps in the child session. */
+  steps?: number | null
+  /** Assistant wall span from first start to last completion (ms). */
+  spanMs?: number | null
+  /** Sum of assistant generation time (ms). */
+  modelMs?: number | null
+  /** Sum of tool-call execution time (ms). */
+  toolMs?: number | null
 }
 
 const ABORT_CONFIRM_MS = 10_000
@@ -123,12 +138,41 @@ export async function spawnConsolidationChild(
   opts: SpawnOptions,
 ): Promise<SpawnResult> {
   let sessionID = ""
+  let timing: Pick<
+    SpawnResult,
+    "spawnMs" | "queueMs" | "runMs" | "steps" | "spanMs" | "modelMs" | "toolMs"
+  > = {
+    spawnMs: null,
+    queueMs: null,
+    runMs: null,
+    steps: null,
+    spanMs: null,
+    modelMs: null,
+    toolMs: null,
+  }
+  const timingFromRows = (rows: unknown[], acceptedAt: number): void => {
+    const acct = sessionAccounting(rows)
+    const times = rows
+      .map((row) => Number((row as any)?.info?.time?.created ?? NaN))
+      .filter((value) => Number.isFinite(value))
+    const first = times.length > 0 ? Math.min(...times) : null
+    timing = {
+      ...timing,
+      queueMs: first === null ? null : Math.max(0, Math.round(first - acceptedAt)),
+      steps: acct.assistantSteps,
+      spanMs: acct.spanMs,
+      modelMs: acct.modelMs,
+      toolMs: acct.toolMs,
+    }
+  }
   try {
+    const createStarted = performance.now()
     const created = await client.session.create({
       body: { title: WRITER_SESSION_TITLE },
       query: { directory: opts.directory },
     })
     sessionID = String(created?.data?.id ?? "")
+    timing.spawnMs = Math.round(performance.now() - createStarted)
     if (!sessionID) {
       return {
         ok: false,
@@ -139,6 +183,7 @@ export async function spawnConsolidationChild(
         tokens: null,
         cost: null,
         error: "session.create returned no id",
+        ...timing,
       }
     }
     opts.registerChild?.(sessionID)
@@ -152,6 +197,7 @@ export async function spawnConsolidationChild(
       },
       query: { directory: opts.directory },
     })
+    const acceptedAt = Date.now()
     if (res?.error || (res?.response && !res.response.ok)) {
       return {
         ok: false,
@@ -162,6 +208,7 @@ export async function spawnConsolidationChild(
         tokens: null,
         cost: null,
         error: "promptAsync failed",
+        ...timing,
       }
     }
 
@@ -173,12 +220,16 @@ export async function spawnConsolidationChild(
       return Array.isArray(messages?.data) ? messages.data : []
     }
 
-    if (!(await opts.waitForIdle(sessionID))) {
+    const waitStarted = performance.now()
+    const idled = await opts.waitForIdle(sessionID)
+    timing.runMs = Math.round(performance.now() - waitStarted)
+    if (!idled) {
       // LATE REPLY: read before aborting so a report that landed just after the
       // deadline is still used. The child never outlives the wait either way.
       const lateRows = await read().catch(() => [] as unknown[])
       const abortError = await abortChild(client, opts.directory, sessionID)
       const lateReplies = assistantReplies(lateRows)
+      timingFromRows(lateRows, acceptedAt)
       if (lateReplies.length > 0) {
         const { tokens, cost } = usage(lateRows)
         return {
@@ -189,6 +240,7 @@ export async function spawnConsolidationChild(
           lateReply: true,
           tokens,
           cost,
+          ...timing,
         }
       }
       if (abortError) {
@@ -201,6 +253,7 @@ export async function spawnConsolidationChild(
           tokens: null,
           cost: null,
           error: `timeout; abort failed: ${abortError}`,
+          ...timing,
         }
       }
       const confirmMs = opts.abortConfirmMs ?? ABORT_CONFIRM_MS
@@ -215,6 +268,7 @@ export async function spawnConsolidationChild(
           tokens: null,
           cost: null,
           error: `timeout; abort not confirmed within ${confirmMs}ms`,
+          ...timing,
         }
       }
       return {
@@ -226,12 +280,14 @@ export async function spawnConsolidationChild(
         tokens: null,
         cost: null,
         error: "timeout",
+        ...timing,
       }
     }
 
     const rows = await read()
     const replies = assistantReplies(rows)
     const { tokens, cost } = usage(rows)
+    timingFromRows(rows, acceptedAt)
 
     return {
       ok: true,
@@ -241,6 +297,7 @@ export async function spawnConsolidationChild(
       lateReply: false,
       tokens,
       cost,
+      ...timing,
     }
   } catch (err) {
     return {
@@ -252,6 +309,7 @@ export async function spawnConsolidationChild(
       tokens: null,
       cost: null,
       error: err instanceof Error ? err.message : String(err),
+      ...timing,
     }
   }
 }

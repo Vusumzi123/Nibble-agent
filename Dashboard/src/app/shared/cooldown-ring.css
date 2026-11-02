@@ -1,0 +1,30 @@
+/* per-component styles — extracted from src/styles.css; shared primitives remain global */
+/* cooldown ring */
+
+:host {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ring {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+.ring__track {
+  stroke: var(--ph-border);
+}
+
+.ring__value {
+  stroke: var(--ph-primary);
+  transition: stroke-dashoffset 1s linear, stroke var(--ph-transition-base);
+}
+
+.ring--warning .ring__value {
+  stroke: var(--ph-warning);
+}
+
+.ring--danger .ring__value {
+  stroke: var(--ph-danger);
+}

@@ -11,15 +11,29 @@ import { parseDocument } from 'yaml';
 
 const f = (path, type, opts = {}) => ({ path, type, ...opts });
 
-function rotation(prefix = '') {
+/** Rotation keys for blocks that use the `log_` prefix (heartbeat, idea, …). */
+function rotation() {
   return [
-    f(`${prefix}log_rotate_bytes`, 'int', { min: 0, default: 1048576, label: 'rotate bytes' }),
-    f(`${prefix}log_keep_generations`, 'int', { min: 0, default: 5, label: 'keep generations' }),
-    f(`${prefix}log_retention_days`, 'int', { min: 0, default: 90, label: 'retention days' }),
-    f(`${prefix}log_compress`, 'bool', { default: true, label: 'compress' }),
-    f(`${prefix}log_compress_after`, 'int', { min: 0, default: 1, label: 'compress after' }),
-    f(`${prefix}log_compress_level`, 'int', { min: 1, max: 9, default: 6, label: 'compress level' }),
-    f(`${prefix}log_rotate_by`, 'enum', { options: ['size', 'daily', 'weekly'], default: 'size', label: 'rotate by' }),
+    f('log_rotate_bytes', 'int', { min: 0, default: 1048576, label: 'rotate bytes' }),
+    f('log_keep_generations', 'int', { min: 0, default: 5, label: 'keep generations' }),
+    f('log_retention_days', 'int', { min: 0, default: 90, label: 'retention days' }),
+    f('log_compress', 'bool', { default: true, label: 'compress' }),
+    f('log_compress_after', 'int', { min: 0, default: 1, label: 'compress after' }),
+    f('log_compress_level', 'int', { min: 1, max: 9, default: 6, label: 'compress level' }),
+    f('log_rotate_by', 'enum', { options: ['size', 'daily', 'weekly'], default: 'size', label: 'rotate by' }),
+  ];
+}
+
+/** Rotation keys for blocks that follow the `audit:` pattern — bare keys. */
+function bareRotation() {
+  return [
+    f('rotate_bytes', 'int', { min: 0, default: 1048576, label: 'rotate bytes' }),
+    f('keep_generations', 'int', { min: 0, default: 5, label: 'keep generations' }),
+    f('retention_days', 'int', { min: 0, default: 90, label: 'retention days' }),
+    f('compress', 'bool', { default: true, label: 'compress' }),
+    f('compress_after', 'int', { min: 0, default: 1, label: 'compress after' }),
+    f('compress_level', 'int', { min: 1, max: 9, default: 6, label: 'compress level' }),
+    f('rotate_by', 'enum', { options: ['size', 'daily', 'weekly'], default: 'size', label: 'rotate by' }),
   ];
 }
 
@@ -94,6 +108,37 @@ export const SECTIONS = [
     ],
   },
   {
+    id: 'chron',
+    label: 'Chron',
+    description: 'Production clock: schedule scans, producer spool and prompt expiry. Hot-read.',
+    writable: true,
+    restart: false,
+    fields: [
+      f('enabled', 'bool', { default: true, help: 'false = no production at all (fail closed).' }),
+      f('schedule_dir', 'string', { default: '.opencode/schedule', help: 'Markdown schedule job files, hot-read.' }),
+      f('state_file', 'string', { default: 'chron.json', help: 'Leaf under <state>.' }),
+      f('inbox_dir', 'string', { default: 'inbox', help: 'Leaf under <state>; producer intent spool.' }),
+      f('max_sleep_seconds', 'int', { min: 0, default: 60, help: 'Timer cap so config/folder edits land within a minute.' }),
+      f('prompt_ttl_hours', 'int', { min: 0, default: 24, help: 'Expiry for a chron prompt -> user task.' }),
+      f('default_priority', 'int', { min: 0, max: 9, default: 5, help: 'Priority for chron-created user tasks.' }),
+      f('mission_scan', 'string', { default: 'every 1m', help: 'Generic mission scan cadence (chron grammar).' }),
+      f('mission_max_per_scan', 'int', { min: 0, default: 5, help: 'At most N mission intents per scan.' }),
+      f('defer_ttl_hours', 'int', { min: 0, default: 24, help: 'Drop an occurrence after this long deferred.' }),
+    ],
+  },
+  {
+    id: 'consumer',
+    label: 'Consumer',
+    description: 'Heartbeat consumer session caps. Hot-read.',
+    writable: true,
+    restart: false,
+    fields: [
+      f('max_items_per_tick', 'int', { min: 0, default: 10, help: 'Executed items per session; 0 = unlimited.' }),
+      f('max_wall_minutes', 'int', { min: 0, default: 60, help: 'Wall ceiling per session; 0 = unlimited.' }),
+      f('token_budget', 'int', { min: 0, default: 250000, help: 'Summed item tokens per session; 0 = unlimited.' }),
+    ],
+  },
+  {
     id: 'drain',
     label: 'Drain',
     description: 'Cursor-backed conversation consolidation as a heartbeat work item. Hot-read.',
@@ -101,7 +146,6 @@ export const SECTIONS = [
     restart: false,
     fields: [
       f('enabled', 'bool', { default: true }),
-      f('consumer', 'bool', { default: true }),
       f('cursor_file', 'string', { default: 'drain-cursor.json', readOnly: true }),
       f('writer_model', 'string', { default: '', help: 'Empty = agent default.' }),
       f('summarize_model', 'string', { default: '', help: 'Empty = agent default.' }),
@@ -121,6 +165,7 @@ export const SECTIONS = [
       f('trigger_max_age_hours', 'int', { min: 1, default: 2 }),
       f('settle_seconds', 'int', { min: 0, default: 120 }),
       f('poll_seconds', 'int', { min: 1, default: 60 }),
+      f('producer_interval_minutes', 'int', { min: 1, default: 15, help: 'Chron drain producer cadence (every N m).' }),
       f('max_wall_minutes', 'int', { min: 1, default: 15 }),
       f('token_budget', 'int', { min: 0, default: 80000 }),
       f('wake_token_budget', 'int', { min: 0, default: 250000 }),
@@ -298,7 +343,7 @@ export const SECTIONS = [
       f('watch_agents', 'list', { default: ['rag-search', 'safe-browser', 'deep-browser'] }),
       f('brain_log', 'string', { default: 'rag-search.log' }),
       f('web_log', 'string', { default: 'web-usage.log' }),
-      ...rotation(),
+      ...bareRotation(),
     ],
   },
   {
@@ -351,7 +396,7 @@ export const SECTIONS = [
     fields: [
       f('enabled', 'bool', { default: true }),
       f('log', 'string', { default: 'audit.log', readOnly: true }),
-      ...rotation(),
+      ...bareRotation(),
     ],
   },
   {
@@ -635,7 +680,36 @@ function readFrontmatter(text) {
   }
 }
 
-const FREQ_RANK = { high: 1, mid: 2, low: 3 };
+const MISSION_MENUS = ['day', 'night'];
+const MISSION_PRIORITY_MIN = 0;
+const MISSION_PRIORITY_MAX = 9;
+
+/** Expand the `both` menu token; unknown windows are dropped (fail safe). */
+function expandMenus(list) {
+  const out = [];
+  for (const m of list) {
+    if (m === 'both') {
+      if (!out.includes('day')) out.push('day');
+      if (!out.includes('night')) out.push('night');
+    } else if (MISSION_MENUS.includes(m) && !out.includes(m)) {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+// File defaults mirror lib/missions.ts DEFAULT_MISSION on the chron branch.
+const MISSION_DEFAULTS = {
+  schedule: '',
+  producer: 'generic',
+  menus: ['day'],
+  min_level: 2,
+  priority: 5,
+  approval: 'writes-follow-dial',
+  candidacy: 'always',
+  enqueue: 'producer',
+  agent: '',
+};
 
 export function readMissions(dir) {
   const { data } = readConfig(dir);
@@ -656,18 +730,30 @@ export function readMissions(dir) {
       try { text = readFileSync(join(missionDir, name), 'utf8'); } catch { return null; }
       const fm = readFrontmatter(text);
       const fileEnabled = fm.enabled !== false;
+      const fileMenus = Array.isArray(fm.menus) ? expandMenus(fm.menus) : [...MISSION_DEFAULTS.menus];
+      const fileMinLevel = Number.isInteger(fm.min_level) ? fm.min_level : MISSION_DEFAULTS.min_level;
+      const filePriority = Number.isInteger(fm.priority) ? fm.priority : MISSION_DEFAULTS.priority;
+      const fileSchedule = typeof fm.schedule === 'string' ? fm.schedule : MISSION_DEFAULTS.schedule;
+      const fileProducer = typeof fm.producer === 'string' && fm.producer ? fm.producer : MISSION_DEFAULTS.producer;
+      const fileEnqueue = fm.enqueue === 'item' ? 'item' : MISSION_DEFAULTS.enqueue;
       const base = {
         id,
         title: typeof fm.title === 'string' ? fm.title : id,
-        frequency: ['high', 'mid', 'low'].includes(fm.frequency) ? fm.frequency : 'mid',
-        menus: Array.isArray(fm.menus) ? fm.menus : ['day'],
-        min_level: typeof fm.min_level === 'number' ? fm.min_level : 0,
-        approval: typeof fm.approval === 'string' ? fm.approval : 'n/a',
-        candidacy: typeof fm.candidacy === 'string' ? fm.candidacy : 'always',
-        agent: typeof fm.agent === 'string' ? fm.agent : '',
+        schedule: fileSchedule,
+        producer: fileProducer,
+        menus: [...fileMenus],
+        min_level: fileMinLevel,
+        priority: filePriority,
+        approval: typeof fm.approval === 'string' ? fm.approval : MISSION_DEFAULTS.approval,
+        candidacy: typeof fm.candidacy === 'string' ? fm.candidacy : MISSION_DEFAULTS.candidacy,
+        enqueue: fileEnqueue,
+        agent: typeof fm.agent === 'string' ? fm.agent : MISSION_DEFAULTS.agent,
         file_enabled: fileEnabled,
-        file_min_level: typeof fm.min_level === 'number' ? fm.min_level : 0,
-        file_frequency: ['high', 'mid', 'low'].includes(fm.frequency) ? fm.frequency : 'mid',
+        file_min_level: fileMinLevel,
+        file_priority: filePriority,
+        file_schedule: fileSchedule,
+        file_producer: fileProducer,
+        file_enqueue: fileEnqueue,
       };
       const overlay = overlayAll[id] ?? null;
       const effective = { ...base };
@@ -677,25 +763,24 @@ export function readMissions(dir) {
         else if (overlay.enabled === true && !fileEnabled) {
           rejects.push('overlay cannot enable a file-disabled mission');
         }
-        if (typeof overlay.min_level === 'number') {
+        if (Number.isInteger(overlay.min_level)) {
           if (overlay.min_level > base.min_level) effective.min_level = overlay.min_level;
           else if (overlay.min_level < base.min_level) rejects.push('min_level may only be raised');
         }
-        if (typeof overlay.frequency === 'string' && overlay.frequency !== base.frequency) {
-          if ((FREQ_RANK[overlay.frequency] ?? 0) > (FREQ_RANK[base.frequency] ?? 0)) effective.frequency = overlay.frequency;
-          else rejects.push('frequency may only move toward low');
+        if (Number.isInteger(overlay.priority) && overlay.priority !== base.priority) {
+          if (overlay.priority < base.priority) effective.priority = overlay.priority;
+          else rejects.push('priority may only decrease');
         }
         if (Array.isArray(overlay.menus)) {
-          const fileWin = new Set(base.menus.includes('both') ? ['day', 'night'] : base.menus);
-          const wanted = overlay.menus.includes('both') ? ['day', 'night'] : overlay.menus;
-          if (wanted.some((m) => !fileWin.has(m))) rejects.push('menus may only be narrowed');
+          const wanted = expandMenus(overlay.menus);
+          if (wanted.some((m) => !fileMenus.includes(m))) rejects.push('menus may only be narrowed');
           else effective.menus = wanted;
         }
       }
       effective.enabled = fileEnabled && effective.enabled !== false;
       return {
         ...effective,
-        base_menus: base.menus,
+        base_menus: [...fileMenus],
         enabled: effective.enabled,
         overlay,
         overlay_rejects: rejects,
@@ -741,32 +826,31 @@ export function updateMission(dir, body) {
     }
   }
 
-  if (body.frequency !== undefined) {
-    if (!['high', 'mid', 'low'].includes(body.frequency)) {
-      return { ok: false, status: 400, error: 'frequency must be high, mid or low' };
+  if (body.priority !== undefined) {
+    if (!Number.isInteger(body.priority) || body.priority < MISSION_PRIORITY_MIN || body.priority > MISSION_PRIORITY_MAX) {
+      return { ok: false, status: 400, error: 'priority must be 0..9' };
     }
-    if ((FREQ_RANK[body.frequency] ?? 0) < (FREQ_RANK[mission.file_frequency] ?? 0)) {
-      return { ok: false, status: 400, error: `frequency may only move toward low (file: ${mission.file_frequency})` };
+    if (body.priority > mission.file_priority) {
+      return { ok: false, status: 400, error: `priority may only decrease (file: ${mission.file_priority})` };
     }
-    if (body.frequency === mission.file_frequency) {
-      doc.deleteIn(['autonomy', 'missions', mission.id, 'frequency']);
+    if (body.priority === mission.file_priority) {
+      doc.deleteIn(['autonomy', 'missions', mission.id, 'priority']);
     } else {
       ensureContainers(doc, ['autonomy', 'missions', mission.id]);
-      doc.setIn(['autonomy', 'missions', mission.id, 'frequency'], body.frequency);
+      doc.setIn(['autonomy', 'missions', mission.id, 'priority'], body.priority);
     }
   }
 
   if (body.menus !== undefined) {
-    const wanted = Array.isArray(body.menus) ? body.menus : [];
-    if (wanted.some((m) => !['day', 'night', 'both'].includes(m))) {
+    if (!Array.isArray(body.menus) || body.menus.some((m) => !['day', 'night', 'both'].includes(m))) {
       return { ok: false, status: 400, error: 'menus must be day, night or both' };
     }
-    const width = (list) => (list.includes('both') ? ['day', 'night'] : list);
-    const base = new Set(width(mission.base_menus));
-    if (width(wanted).some((m) => !base.has(m))) {
+    const wanted = expandMenus(body.menus);
+    const base = new Set(expandMenus(mission.base_menus));
+    if (wanted.some((m) => !base.has(m))) {
       return { ok: false, status: 400, error: `menus may only be narrowed (file: ${mission.base_menus.join(', ')})` };
     }
-    const baseWidth = width(mission.base_menus);
+    const baseWidth = expandMenus(mission.base_menus);
     if (wanted.length === baseWidth.length && wanted.every((m) => baseWidth.includes(m))) {
       doc.deleteIn(['autonomy', 'missions', mission.id, 'menus']);
     } else {

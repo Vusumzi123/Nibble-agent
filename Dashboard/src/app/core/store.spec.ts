@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiService } from './api';
+import type { Sleep } from './models';
 import { DashboardStore, scopeForUrl } from './store';
 
 interface MockApi {
@@ -241,5 +242,67 @@ describe('DashboardStore scopes', () => {
     expect(api.saveMission).toHaveBeenCalled();
     expect(api.settings).not.toHaveBeenCalled();
     expect(api.runs).toHaveBeenCalled();
+  });
+});
+
+const MIN = 60_000;
+
+function wokenSleep(overrides: Partial<Sleep> = {}): Sleep {
+  return {
+    status: 'woken',
+    since: '2026-11-02T06:40:00.000Z',
+    woken_at: '2026-11-02T06:30:00.000Z',
+    dreams_tonight: 0,
+    last_tick: null,
+    window: '23:00-08:00',
+    quiet: true,
+    cooldown_total_ms: 60 * MIN,
+    cooldown_remaining_ms: 60 * MIN,
+    available: true,
+    ...overrides,
+  };
+}
+
+describe('DashboardStore sleep cooldown', () => {
+  it('is null unless the agent is woken during a quiet window', () => {
+    const store = makeStore(makeApi());
+    for (const sleep of [
+      wokenSleep({ status: 'dreaming' }),
+      wokenSleep({ quiet: false }),
+      wokenSleep({ status: 'awake' }),
+    ]) {
+      store.sleep.set(sleep);
+      expect(store.sleepCooldown()).toBeNull();
+    }
+  });
+
+  it('interpolates the remaining time from the fetch timestamp', () => {
+    const store = makeStore(makeApi());
+    store.sleep.set(wokenSleep());
+    store.sleepAt.set(1_000);
+    store.now.set(1_000 + 10 * MIN);
+
+    const cooldown = store.sleepCooldown();
+    expect(cooldown?.remainingMs).toBe(50 * MIN);
+    expect(cooldown?.pct).toBeCloseTo(50 / 60, 5);
+    expect(cooldown?.expired).toBe(false);
+  });
+
+  it('floors at zero once the cooldown is due', () => {
+    const store = makeStore(makeApi());
+    store.sleep.set(wokenSleep());
+    store.sleepAt.set(1_000);
+    store.now.set(1_000 + 90 * MIN);
+
+    const cooldown = store.sleepCooldown();
+    expect(cooldown?.remainingMs).toBe(0);
+    expect(cooldown?.pct).toBe(0);
+    expect(cooldown?.expired).toBe(true);
+  });
+
+  it('ignores payloads without cooldown fields', () => {
+    const store = makeStore(makeApi());
+    store.sleep.set(wokenSleep({ cooldown_total_ms: null, cooldown_remaining_ms: null }));
+    expect(store.sleepCooldown()).toBeNull();
   });
 });

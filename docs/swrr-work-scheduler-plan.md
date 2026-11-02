@@ -2,8 +2,9 @@
 
 Status: **implemented, then simplified** — SWRR picker, persisted credits, and
 Dashboard panels are live. The `fair: false` rollback, the side lane, and the
-JEV digest dispatch were removed on 2026-10-28: producers decide at enqueue
-time and the consumer runs one pool item per tick. Background step kinds remain
+JEV digest dispatch were removed on 2026-10-28. Production moved to chron on
+2026-11-01: chron writes intents, and the consumer runs a bounded fair session
+(caps in `consumer:`), not one item per tick. Background step kinds remain
 follow-ups (see §7.4 and §9.2).
 Date: 2026-10-27 (updated 2026-10-28)
 Scope: Kael heartbeat scheduler + Dashboard v2
@@ -11,6 +12,7 @@ Supersedes the scheduling assumptions in `docs/heartbeat-lanes.md` and the
 consumer-era assumptions in `docs/drain-consumer.md`.
 
 Related: [Dashboard SPEC](../Dashboard/SPEC.md) ·
+[chron scheduler](CHRON-SCHEDULER-PLAN.md) ·
 [historical lane queues](heartbeat-lanes.md) ·
 [historical drain consumer](drain-consumer.md) ·
 [sysop config reference](sysop-config-reference.md).
@@ -103,7 +105,7 @@ These are the facts the plan is built on; several older docs are stale.
 | Area | Current reality |
 | --- | --- |
 | Queue | One `work-queue.json`; `pickFair()` is the only picker (the `pickNext()` rollback is gone). |
-| Mission collection | `collectMissions()` draws **one** candidate per tick (frequency × mood); dedupe preserves the first enqueue time. |
+| Mission collection | Chron's generic mission scan emits priority-ordered intents per scheduled occurrence; the consumer merges them and SWRR orders the session. |
 | Drain | A `drain-pass` work item, enqueued by the heartbeat when `drainDue()` is true. There is no consumer loop. |
 | Staleness | A `staleness` work kind emitted by `collectStaleness()`; it goes through the same picker. |
 | `drain.consumer` | Removed (2026-10-28). Drain is always the `drain-pass` work kind; there is no side-mission fallback. |

@@ -16,7 +16,7 @@ import { nowIso } from "../util.ts"
 
 export const DRAIN_LEDGER_FILE = "drain.log"
 
-export type DrainLedgerSource = "pipe" | "writer" | "explorer" | "consumer"
+export type DrainLedgerSource = "pipe" | "summarizer" | "writer" | "explorer" | "consumer"
 
 export type DrainLedgerOutcome =
   | "completed"
@@ -36,12 +36,31 @@ export type DrainLedgerEntry = {
   /** Model used for the call ("" / null when the agent default applied). */
   model?: string | null
   prompt_bytes?: number
+  reply_bytes?: number | null
   wall_ms?: number
   steps?: number | null
   tokens?: number | null
   cost?: number | null
   sessions?: number
   items?: number
+  /** Child session and the work unit it served. */
+  session?: string | null
+  item?: string | null
+  agent?: string | null
+  /** Groups the pipe/summarizer/writer lines of one drain pass. */
+  pass_id?: string
+  attempt?: number | null
+  chunk?: number | null
+  /** Caller-side timings, in milliseconds. */
+  spawn_ms?: number | null
+  queue_ms?: number | null
+  run_ms?: number | null
+  span_ms?: number | null
+  model_ms?: number | null
+  tool_ms?: number | null
+  /** Wall time split per pass phase. */
+  phase_ms?: Record<string, number>
+  overhead_ms?: number | null
   /** Activity-time cursor (ms) before and after the run. */
   cursor_before?: number | null
   cursor_after?: number | null

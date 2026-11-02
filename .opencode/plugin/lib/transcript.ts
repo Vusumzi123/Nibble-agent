@@ -133,6 +133,12 @@ export type DrainAccounting = {
   cacheWriteTokens: number
   cost: number
   usageKnown: boolean
+  /** Wall span between the first and last assistant step (ms), when timed. */
+  spanMs: number | null
+  /** Sum of assistant generation time (completed - created), when timed. */
+  modelMs: number | null
+  /** Sum of tool-call execution time, when timed. */
+  toolMs: number | null
 }
 
 // Fold a child session's message rows into a usage summary. Deduped by
@@ -149,7 +155,16 @@ export function sessionAccounting(messages: unknown[]): DrainAccounting {
     cacheWriteTokens: 0,
     cost: 0,
     usageKnown: false,
+    spanMs: null,
+    modelMs: null,
+    toolMs: null,
   }
+  let firstCreated: number | null = null
+  let lastCompleted: number | null = null
+  let modelMs = 0
+  let modelKnown = false
+  let toolMs = 0
+  let toolKnown = false
 
   for (const row of messages ?? []) {
     const info = (row as any)?.info ?? {}
@@ -159,9 +174,28 @@ export function sessionAccounting(messages: unknown[]): DrainAccounting {
     if (id) seen.add(id)
     acc.assistantSteps++
 
+    const time = info.time as { created?: unknown; completed?: unknown } | undefined
+    const created = Number(time?.created ?? NaN)
+    const completed = Number(time?.completed ?? NaN)
+    if (Number.isFinite(created) && Number.isFinite(completed) && completed >= created) {
+      modelMs += completed - created
+      modelKnown = true
+      firstCreated = firstCreated === null ? created : Math.min(firstCreated, created)
+      lastCompleted = lastCompleted === null ? completed : Math.max(lastCompleted, completed)
+    }
+
     const parts = Array.isArray((row as any)?.parts) ? (row as any).parts : []
     for (const p of parts) {
-      if (p?.type === "tool" || p?.type === "tool-invocation" || p?.type === "tool_call") acc.toolCalls++
+      if (p?.type === "tool" || p?.type === "tool-invocation" || p?.type === "tool_call") {
+        acc.toolCalls++
+        const toolTime = p?.state?.time as { start?: unknown; end?: unknown } | undefined
+        const start = Number(toolTime?.start ?? NaN)
+        const end = Number(toolTime?.end ?? NaN)
+        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+          toolMs += end - start
+          toolKnown = true
+        }
+      }
     }
 
     const t = info.tokens
@@ -175,5 +209,8 @@ export function sessionAccounting(messages: unknown[]): DrainAccounting {
       if (typeof info.cost === "number") acc.cost += info.cost
     }
   }
+  acc.spanMs = firstCreated !== null && lastCompleted !== null ? lastCompleted - firstCreated : null
+  acc.modelMs = modelKnown ? modelMs : null
+  acc.toolMs = toolKnown ? toolMs : null
   return acc
 }

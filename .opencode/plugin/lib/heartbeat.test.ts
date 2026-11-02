@@ -7,7 +7,6 @@ import { DatabaseSync } from "node:sqlite"
 
 import {
   DEFAULT_HEARTBEAT_CONFIG,
-  FREQUENCY_WEIGHTS,
   HEARTBEAT_FIXED_PROMPT,
   HEARTBEAT_WAKE_CAP_MS,
   MOOD_BIAS_MAX,
@@ -243,7 +242,7 @@ test("moodDispatchBias: bounded to [MOOD_BIAS_MIN, MOOD_BIAS_MAX]", () => {
 
 function mission(over: Partial<Mission> = {}): Mission {
   const { mission: base } = parseMissionFile(
-    "---\nid: x\ntitle: X\nfrequency: mid\nmenus: [day]\nmin_level: 2\ncandidacy: always\n---\nBody.\n",
+    "---\nid: x\ntitle: X\nschedule: every 1h\nmenus: [day]\nmin_level: 2\ncandidacy: always\n---\nBody.\n",
     "x",
   )
   return { ...base, ...over }
@@ -354,8 +353,6 @@ function candidatesFor(missions: Mission[], over: Partial<Parameters<typeof buil
   return buildCandidates(missions, {
     level: 2,
     quiet: false,
-    mood: mood(),
-    dispatchInfluence: false,
     candidacy: CAND,
     ...over,
   })
@@ -387,26 +384,6 @@ test("buildCandidates: backlog-pending candidacy sees the pending count", () => 
   const missions = [mission({ id: "bp", candidacy: "backlog-pending" })]
   assert.deepEqual(candidatesFor(missions).map((c) => c.id), [])
   assert.deepEqual(candidatesFor(missions, { candidacy: { ...CAND, backlogPending: 2 } }).map((c) => c.id), ["bp"])
-})
-
-test("buildCandidates: weight = frequency_weight × mood_bias; kill switch zeroes the mood term", () => {
-  const missions = [
-    mission({ id: "h", frequency: "high" }),
-    mission({ id: "m", frequency: "mid" }),
-    mission({ id: "l", frequency: "low" }),
-  ]
-  const off = candidatesFor(missions, { dispatchInfluence: false })
-  assert.deepEqual(off.map((c) => c.weight), [FREQUENCY_WEIGHTS.high, FREQUENCY_WEIGHTS.mid, FREQUENCY_WEIGHTS.low])
-  assert.ok(off.every((c) => c.mood_bias === 1))
-
-  const glad = mood({ valence: 0.8, arousal: 0.3 })
-  const on = candidatesFor(missions, { dispatchInfluence: true, mood: glad })
-  const bias = moodDispatchBias(glad, true)
-  assert.ok(bias > 1)
-  for (const c of on) {
-    assert.equal(c.mood_bias, bias)
-    assert.equal(c.weight, c.frequency_weight * bias)
-  }
 })
 
 test("buildCandidates: min_level compares against the live level", () => {
@@ -572,7 +549,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "---",
       "id: drain",
       "title: Drain",
-      "frequency: high",
+      "schedule: every 1h",
       "menus: [day, night]",
       "min_level: 2",
       "candidacy: always",
@@ -585,7 +562,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "---",
       "id: research",
       "title: Research",
-      "frequency: mid",
+      "schedule: every 6h",
       "menus: [day]",
       "min_level: 2",
       "candidacy: always",
@@ -598,7 +575,7 @@ test("computeDigest: reads backlog, memory, audit, quiet window and missions end
       "---",
       "id: notify",
       "title: Notify",
-      "frequency: high",
+      "schedule: every 1h",
       "menus: [day]",
       "min_level: 1",
       "candidacy: always",
@@ -661,7 +638,7 @@ test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (car
       "---",
       "id: idea-generate",
       "title: Idea",
-      "frequency: low",
+      "schedule: every 12h",
       "menus: [day]",
       "min_level: 1",
       "candidacy: idea-roll",
@@ -674,7 +651,7 @@ test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (car
       "---",
       "id: express",
       "title: Express",
-      "frequency: low",
+      "schedule: every 12h",
       "menus: [day]",
       "min_level: 1",
       "candidacy: min-gap:express",
@@ -709,23 +686,6 @@ test("computeDigest: idea opts feed idea-roll and min-gap:express candidacy (car
 // ---------------------------------------------------------------------------
 // JEV digest decision (card C) — typed verdict, request shape, brief assembly
 
-function digestCandidate(
-  id: string,
-  candidacy: DigestCandidate["candidacy"],
-  weight: number,
-): DigestCandidate {
-  return {
-    id,
-    title: id,
-    frequency: "mid",
-    min_level: 1,
-    menus: ["day"],
-    candidacy,
-    frequency_weight: weight,
-    mood_bias: 1,
-    weight,
-  }
-}
 
 function digestFixture(over: Partial<HeartbeatDigest> = {}): HeartbeatDigest {
   return {
@@ -735,8 +695,8 @@ function digestFixture(over: Partial<HeartbeatDigest> = {}): HeartbeatDigest {
     all_quiet: false,
     signals: signals({ backlog_pending: 1 }),
     candidates: candidatesFor([
-      mission({ id: "drain", title: "Drain", frequency: "high" }),
-      mission({ id: "research", title: "Research", frequency: "mid" }),
+      mission({ id: "drain", title: "Drain" }),
+      mission({ id: "research", title: "Research" }),
     ]),
     bias: { mood: 1, dispatch_influence: false },
     digest_hash: "abc123def4567890",
@@ -1017,7 +977,7 @@ test("computeDigest: memory.provider none yields zero unconsumed turns", async (
       "---",
       "id: drain",
       "title: Drain",
-      "frequency: high",
+      "schedule: every 1h",
       "menus: [day, night]",
       "min_level: 2",
       "candidacy: always",

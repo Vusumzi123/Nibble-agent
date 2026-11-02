@@ -102,27 +102,40 @@ Rule of thumb: **the code is neutral, your identity lives in gitignored files.**
 ## Missions
 
 Missions live in `.opencode/missions/*.md`: the frontmatter is configuration
-(id, frequency, menus, level, candidacy, enabled, agent) and the body is the
-child-session prompt. Every mission ends by calling `mission_result`; a
-declined mission drops its queue item and the producer re-proposes it later if
-its gate still passes.
+(id, schedule, priority, menus, level, candidacy, producer, enabled, agent) and
+the body is the child-session prompt. Every mission ends by calling
+`mission_result`; a declined mission drops its queue item and the schedule
+re-proposes it on its next occurrence.
 
-Work reaches missions through **one persistent work pool**. Producers decide at
-enqueue time (weighted draw for missions, status for staleness, `drainDue` for
-`drain-pass`, pending task files for `user-task`) and emit their items each
-tick; the heartbeat executes exactly one unit per tick. A **smooth weighted
-round-robin (SWRR)** scheduler picks the work *kind* (default mission 4 /
-user-task 2 / drain 3 / maintenance 1). This makes starvation structural: a
-perpetual
-mission candidate cannot lock drain out. Weights and the one-release
-`fair: false` rollback live under `scheduler:` in sysop-config; see
-[`docs/swrr-work-scheduler-plan.md`](docs/swrr-work-scheduler-plan.md). The
-old lane-queue and drain-consumer pages are retained as history. Queue work for
-later with the `queue_add` tool (`user-task-queue` skill); the task file is the
-brief and is archived under `done/`, `blocked/`, or `failed/`. Empty queues
-make a tick a silent no-action tick with zero LLM calls. See
-[`AGENTS.md`](AGENTS.md) and the
-[SWRR plan](docs/swrr-work-scheduler-plan.md).
+Production is decoupled from execution. **Chron** scans mission schedules and
+the drain backlog on its own timer and writes durable intents under
+`.opencode/state/inbox/`; the **heartbeat consumer** merges those intents,
+ingests pending task files, and runs a bounded fair session. A **smooth
+weighted round-robin (SWRR)** scheduler picks the work *kind* (default mission
+4 / user-task 2 / drain 3 / maintenance 1), and the consumer runs up to
+`consumer.max_items_per_tick` items per session (default 10), stopping between
+items at the wall or token cap. A capped session with runnable work left wakes
+immediately; an empty or gated queue sleeps to `autonomy.heartbeat.frequency`.
+Markdown prompt jobs in `.opencode/schedule/*.md` enter the same task rail on
+their own schedule; their knobs live under `chron:`. The work-kind weights and
+the per-session caps live under `scheduler:` and `consumer:` in sysop-config;
+see
+[`docs/CHRON-SCHEDULER-PLAN.md`](docs/CHRON-SCHEDULER-PLAN.md) and the
+[SWRR plan](docs/swrr-work-scheduler-plan.md). The old lane-queue and
+drain-consumer pages are retained as history. Queue work for later with the
+`queue_add` tool (`user-task-queue` skill); the task file is the brief and is
+archived under `done/`, `blocked/`, or `failed/`. An empty queue makes a wake a
+silent no-action wake with zero LLM calls. See [`AGENTS.md`](AGENTS.md).
+
+## Wiki
+
+The in-repo wiki starts at [`wiki/Home.md`](wiki/Home.md):
+
+- [Adding scheduled markdown jobs](wiki/Adding-Scheduled-Markdown-Jobs.md)
+- [Chron fire listeners](wiki/Chron-Fire-Listeners.md)
+- [How mission producers work](wiki/Mission-Producers.md)
+- [Registering generic missions](wiki/Registering-Generic-Missions.md)
+- [Registering user tasks](wiki/Registering-User-Tasks.md)
 
 ## Modes
 

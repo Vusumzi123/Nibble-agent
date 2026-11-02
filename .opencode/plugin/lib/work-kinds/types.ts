@@ -46,6 +46,16 @@ export type ChildRun = {
   stoppedAt?: string
   /** Transcript rows sampled after the stop (summary source, P4c). */
   transcriptRows?: unknown[]
+  /** Caller-observed child wall time (create -> settle), ms. */
+  wallMs?: number
+  /** Assistant wall span from first start to last completion, ms. */
+  spanMs?: number | null
+  /** Sum of assistant generation time, ms. */
+  modelMs?: number | null
+  /** Sum of tool-call execution time, ms. */
+  toolMs?: number | null
+  /** Assistant steps in the child session. */
+  steps?: number
   /** Id of the resume item this run re-enqueued (P4c ledger). */
   resumeItem?: string
   /** Which summary path fed the resume item; null when capped before summarizing. */

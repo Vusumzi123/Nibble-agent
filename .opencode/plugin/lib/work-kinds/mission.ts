@@ -26,15 +26,7 @@ import type { MissionResult } from "../mission-result.ts"
 import type { Mission } from "../missions.ts"
 import { nowIso } from "../util.ts"
 import { MAX_REQUEUES, stallResumeItem, type WorkItem } from "../work-queue.ts"
-import {
-  isStatusSide,
-  missionEligible,
-  missionExpiry,
-  missionIdOf,
-  missionItemId,
-  weightedPick,
-  type ProducerCtx,
-} from "./shared.ts"
+import { missionEligible, missionIdOf, type ProducerCtx } from "./shared.ts"
 import type {
   ChildRun,
   DispatchContext,
@@ -74,6 +66,11 @@ function runEntry(
     token_cost: run.tokenCost,
     over_budget: overBudgetOf(ctx, run.tokenCost),
     session: run.sessionId,
+    wall_ms: run.wallMs ?? null,
+    steps: run.steps ?? null,
+    span_ms: run.spanMs ?? null,
+    model_ms: run.modelMs ?? null,
+    tool_ms: run.toolMs ?? null,
     result_status: override?.resultStatus ?? resultStatusOf(run),
     result_missing: override?.resultMissing ?? !run.result,
     requeued,
@@ -342,35 +339,6 @@ async function runIdeaPostProcess(
   }
 }
 
-/** Mission intent: at most one candidate per tick, chosen by frequency × mood.
- *  Missions with `enqueue: item` are produced by their own handler and never
- *  enter through the digest roll (the `user-task` consumer is one). */
-export function collectMissions(ctx: ProducerCtx): WorkItem[] {
-  const itemEnqueued = new Set(
-    ctx.missions.filter((m) => m.enqueue === "item").map((m) => m.id),
-  )
-  const eligible = ctx.candidates.filter(
-    (c) =>
-      !isStatusSide(c.candidacy) &&
-      !itemEnqueued.has(c.id) &&
-      !ctx.queuedIds?.has(missionItemId(c.id)),
-  )
-  const picked = weightedPick(eligible, ctx.random ?? Math.random)
-  if (!picked) return []
-  const mission = ctx.missions.find((m) => m.id === picked.id)
-  return [
-    {
-      id: missionItemId(picked.id),
-      kind: "mission",
-      producer: "tick",
-      enqueued_ms: ctx.nowMs,
-      priority: mission?.priority ?? 3,
-      expires_ms: missionExpiry(ctx.nowMs),
-      requeue_count: 0,
-    },
-  ]
-}
-
 /** Dequeue-time re-check: structural eligibility only. A queued mission is a
  *  reservation and runs even when the per-tick roll no longer offers it. */
 export function missionRunnable(ctx: ProducerCtx, item: WorkItem): boolean {
@@ -388,7 +356,6 @@ export function missionStillDue(_ctx: ProducerCtx, _item: WorkItem): boolean {
 
 export const missionHandler: WorkKindHandler = {
   kind: "mission",
-  produce: collectMissions,
   runnable: missionRunnable,
   stillDue: missionStillDue,
   run: runMissionItem,

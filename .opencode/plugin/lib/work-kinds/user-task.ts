@@ -240,7 +240,7 @@ export async function runUserTaskItem(ctx: DispatchContext, item: WorkItem): Pro
   }
 
   await ctx.setPhase("dispatch")
-  const run = await ctx.runChild({ mission, prompt, agent: mission.agent })
+  const run = await ctx.runChild({ mission, prompt, agent: task.agent ?? mission.agent })
   await ctx.setPhase("post")
   const { outcome, requeue } = await settleTaskRun(ctx, item, mission, task, run)
 
@@ -271,7 +271,6 @@ export async function runUserTaskItem(ctx: DispatchContext, item: WorkItem): Pro
 
 export const userTaskHandler: WorkKindHandler = {
   kind: "user-task",
-  produce: collectUserTasks,
   runnable: userTaskRunnable,
   stillDue: userTaskStillDue,
   run: runUserTaskItem,

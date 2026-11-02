@@ -282,10 +282,11 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line))
-  assert.deepEqual(lines.map((l) => l.source), ["writer", "pipe"])
+  assert.deepEqual(lines.map((l) => l.source), ["summarizer", "writer", "pipe"])
   assert.equal(lines[0].outcome, "ok")
-  assert.equal(lines[1].cursor_after, 1000)
-  assert.equal(typeof lines[1].reply_bytes, "number")
+  assert.equal(lines[1].outcome, "ok")
+  assert.equal(lines[2].cursor_after, 1000)
+  assert.equal(typeof lines[2].reply_bytes, "number")
 })
 
 test("a fresh cursor starts at the configured lookback, not at epoch", async () => {
@@ -542,7 +543,7 @@ test("a batch over max_items_per_batch is chunked into complete writer reports",
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line))
-  assert.deepEqual(lines.map((l) => l.source), ["writer", "writer", "pipe"])
+  assert.deepEqual(lines.map((l) => l.source), ["summarizer", "writer", "writer", "pipe"])
 })
 
 test("a later chunk failure blocks the cursor even when earlier chunks succeeded", async () => {

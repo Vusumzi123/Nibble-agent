@@ -57,6 +57,8 @@ export type UserTask = {
   /** Creation-time dedupe token; `queue_add` scans pending tasks for it. */
   dedupe_key?: string
   requested_by: string
+  /** Optional opencode agent override for the consuming child session. */
+  agent?: string
   status: UserTaskStatus
   /** The task prompt (the per-item brief). */
   prompt: string
@@ -71,6 +73,7 @@ export type CreateTaskInput = {
   priority?: number
   dedupe_key?: string
   requested_by?: string
+  agent?: string
   expires_in_hours?: number
 }
 
@@ -146,6 +149,7 @@ export function renderTaskFile(task: UserTask): string {
     ...(task.expires_ms === undefined ? [] : [`expires_ms: ${task.expires_ms}`]),
     ...(task.dedupe_key ? [`dedupe_key: ${oneLine(task.dedupe_key)}`] : []),
     `requested_by: ${oneLine(task.requested_by)}`,
+    ...(task.agent ? [`agent: ${oneLine(task.agent)}`] : []),
     `status: ${task.status}`,
     "---",
     "",
@@ -194,6 +198,7 @@ export function parseTaskFile(content: string, fallbackId: string): ParseTaskRes
     ...(expiresRaw && /^\d+$/.test(expiresRaw) ? { expires_ms: Number(expiresRaw) } : {}),
     ...(fields.get("dedupe_key") ? { dedupe_key: fields.get("dedupe_key")! } : {}),
     requested_by: fields.get("requested_by") || "user",
+    ...(fields.get("agent") ? { agent: fields.get("agent")! } : {}),
     status: isTaskStatus(statusRaw) ? statusRaw : "pending",
     prompt,
     context,
@@ -296,6 +301,7 @@ export async function createTask(
     }
 
     const dedupeKey = input.dedupe_key ? oneLine(input.dedupe_key) : ""
+    const agent = input.agent ? oneLine(input.agent) : ""
     const pending = await listPendingTasks(stateDir)
     if (dedupeKey) {
       const existing = pending.find((task) => task.dedupe_key === dedupeKey)
@@ -328,6 +334,7 @@ export async function createTask(
       ...(expiresMs === undefined ? {} : { expires_ms: expiresMs }),
       ...(dedupeKey ? { dedupe_key: dedupeKey } : {}),
       requested_by: oneLine(input.requested_by ?? "user") || "user",
+      ...(agent ? { agent } : {}),
       status: "pending",
       prompt,
       context,

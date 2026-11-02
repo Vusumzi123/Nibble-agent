@@ -159,6 +159,9 @@ export async function runDrainStep(deps: DrainStepDeps): Promise<DrainStepResult
       pending_before: null,
       pending_after: result.pendingAfter ?? null,
       stopped: result.stopped ?? "max-passes",
+      pass_id: result.passId ?? null,
+      phase_ms: result.phaseMs ?? null,
+      overhead_ms: result.overheadMs ?? null,
       ...(result.error ? { error: result.error } : {}),
     })
   } catch {

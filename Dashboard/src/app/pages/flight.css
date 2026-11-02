@@ -1,6 +1,12 @@
 /* per-component styles — extracted from src/styles.css; shared primitives remain global */
 /* flight */
 
+.sleep-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .mission-line {
   display: flex;
   flex-direction: column;

@@ -1,7 +1,7 @@
 ---
 id: user-task
 title: Execute one queued user task
-frequency: low
+priority: 2
 menus: [both]
 min_level: 2
 approval: writes-follow-dial
@@ -11,9 +11,9 @@ agent: ""
 enabled: true
 ---
 
-Execute exactly one task the user queued with `queue_add`. The task file is
-the brief: its instructions and context follow the fixed prompt below, between
-the `=== QUEUED USER TASK ===` markers.
+Execute exactly one task that was queued by the user (`queue_add`) or
+scheduled by chron. The task file is the brief: its instructions and context
+follow the fixed prompt below, between the `=== QUEUED USER TASK ===` markers.
 
 `enqueue: item` keeps this mission out of the digest roll — the `user-task`
 producer queues one item per pending task file, and this body is the how-to

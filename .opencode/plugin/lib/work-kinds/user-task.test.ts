@@ -161,6 +161,39 @@ test("run: completed settles the file under done/ with a result block", async ()
   assert.equal(await taskSettled(dir, (created as any).id), true)
 })
 
+test("run: a task agent overrides the consumer mission agent", async () => {
+  const dir = await stateDir()
+  const created = await createTask(dir, { title: "t", prompt: "do it", agent: "chat" })
+  const seen: Array<{ agent: string }> = []
+  const result = await runUserTaskItem(
+    dispatchCtx(dir, completed("completed"), {
+      runChild: async (args) => {
+        seen.push({ agent: args.agent })
+        return completed("completed")
+      },
+    }),
+    itemFor((created as any).id),
+  )
+  assert.equal(result.ledger.reason, "done")
+  assert.deepEqual(seen, [{ agent: "chat" }])
+})
+
+test("run: a task without an agent falls back to the mission agent", async () => {
+  const dir = await stateDir()
+  const created = await createTask(dir, { title: "t", prompt: "do it" })
+  const seen: Array<{ agent: string }> = []
+  await runUserTaskItem(
+    dispatchCtx(dir, completed("completed"), {
+      runChild: async (args) => {
+        seen.push({ agent: args.agent })
+        return completed("completed")
+      },
+    }),
+    itemFor((created as any).id),
+  )
+  assert.deepEqual(seen, [{ agent: consumer.agent }])
+})
+
 test("run: a declined task is archived under blocked/", async () => {
   const dir = await stateDir()
   const created = await createTask(dir, { title: "t", prompt: "do it" })

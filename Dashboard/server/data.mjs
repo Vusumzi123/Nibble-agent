@@ -483,8 +483,7 @@ export function readDrain(dir, paths, state, now = Date.now()) {
   return {
     ts: new Date(now).toISOString(),
     enabled: cfg.enabled !== false,
-    consumer: cfg.consumer !== false,
-    state: current.state ?? (cfg.consumer === false ? 'disabled' : drainPass ? 'queued' : 'idle'),
+    state: current.state ?? (cfg.enabled === false ? 'disabled' : drainPass ? 'queued' : 'idle'),
     trigger: current.trigger ?? null,
     queued: Boolean(drainPass),
     queued_since: queuedSince === null ? null : new Date(queuedSince).toISOString(),
@@ -615,15 +614,25 @@ export function readSleep(dir, paths, now = Date.now()) {
   const sleep = safeJson(join(paths.state, 'sleep.json'));
   const window = data?.autonomy?.quiet?.window ?? '23:00-08:00';
   const quiet = quietNow(window, now);
+  const cooldownTotal = parseDuration(data?.autonomy?.quiet?.resume_cooldown) ?? 60 * 60_000;
   if (sleep) {
+    const status = sleep.status ?? 'awake';
+    const since = sleep.since ?? null;
+    const sinceMs = parseTime(since);
+    const remaining =
+      status === 'woken' && quiet && sinceMs !== null
+        ? Math.max(0, cooldownTotal - (now - sinceMs))
+        : null;
     return {
-      status: sleep.status ?? 'awake',
-      since: sleep.since ?? null,
+      status,
+      since,
       woken_at: sleep.woken_at ?? null,
       dreams_tonight: sleep.dreams_tonight ?? 0,
       last_tick: sleep.last_tick ?? null,
       window,
       quiet,
+      cooldown_total_ms: cooldownTotal,
+      cooldown_remaining_ms: remaining,
       available: true,
     };
   }
@@ -635,6 +644,8 @@ export function readSleep(dir, paths, now = Date.now()) {
     last_tick: null,
     window,
     quiet,
+    cooldown_total_ms: cooldownTotal,
+    cooldown_remaining_ms: null,
     available: false,
   };
 }
@@ -1083,7 +1094,13 @@ export function throughputReport(dir, paths, hours = 24) {
     }));
   const durations = runs.map((r) => r.duration_ms).filter((v) => typeof v === 'number');
   const ticks = parseLines(join(paths.logs, 'heartbeat.log'), 0).filter(
-    (row) => !row.raw && Number.isFinite(row.tick) && (parseTime(row.ts) ?? 0) >= Date.now() - hours * 3_600_000,
+    (row) =>
+      !row.raw &&
+      Number.isFinite(row.tick) &&
+      // One session = one tick; per-item lines carry `position` and must not
+      // inflate the tick count.
+      row.position === undefined &&
+      (parseTime(row.ts) ?? 0) >= Date.now() - hours * 3_600_000,
   );
   return {
     ts: new Date().toISOString(),
@@ -1245,7 +1262,7 @@ export function healthInfo(dir, state, paths) {
     auth: 'csrf',
     version: 'v2',
     paths,
-    writable_sections: ['autonomy', 'heartbeat', 'scheduler', 'drain', 'mood', 'comms', 'idea', 'decisions', 'retrieval', 'browser', 'profile', 'soul', 'telemetry', 'backlog', 'memory', 'dashboard'],
+    writable_sections: ['autonomy', 'heartbeat', 'chron', 'consumer', 'scheduler', 'drain', 'mood', 'comms', 'idea', 'decisions', 'retrieval', 'browser', 'profile', 'soul', 'telemetry', 'backlog', 'memory', 'dashboard'],
   };
 }
 
@@ -1291,7 +1308,7 @@ export function overview(dir, paths, state, options = {}) {
     missions: {
       total: missions.length,
       enabled: missions.filter((m) => m.enabled).length,
-      ids: missions.map((m) => ({ id: m.id, enabled: m.enabled, level: m.min_level, frequency: m.frequency })),
+      ids: missions.map((m) => ({ id: m.id, enabled: m.enabled, level: m.min_level, schedule: m.schedule, priority: m.priority })),
     },
     cost: {
       total_24h: cost.total,

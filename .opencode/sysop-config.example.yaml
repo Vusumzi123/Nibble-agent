@@ -64,6 +64,7 @@ drain:
   trigger_max_age_hours: 2     # or the oldest pending turn is >= T hours old
   settle_seconds: 120          # a session idle this long is safe to consume
   poll_seconds: 60             # reschedule delay when below the trigger
+  producer_interval_minutes: 15  # min minutes between drain-pass intents (hot-read)
   max_wall_minutes: 15         # wall-clock ceiling per wake
   token_budget: 80000          # per pass; 0 = unlimited (ceiling, not a target)
   wake_token_budget: 250000    # per wake
@@ -242,10 +243,10 @@ autonomy:
     # `dream_missions` removed with the mission loader (card A)
   missions:                    # restrict-only overlay (missions-plan §6)
     # staleness:                # one block per mission id
-    #   enabled: false          # disable is always honoured
-    #   min_level: 3            # may only be raised above the file's value
-    #   frequency: low          # may only move toward low (rarer)
-    #   menus: [day]            # may only be narrowed, never widened
+  #   enabled: false          # disable is always honoured
+  #   min_level: 3            # may only be raised above the file's value
+  #   priority: 2             # may only be decreased below the file's value
+  #   menus: [day]            # may only be narrowed, never widened
 
 heartbeat:                      # in-process scheduler + per-tick ledger (§12, cards D+E)
   enabled: true                 # kill switch: false = the loop sleeps (hot, ≤60s)
@@ -271,6 +272,23 @@ heartbeat:                      # in-process scheduler + per-tick ledger (§12, 
   mission_summary_timeout_ms: 90000 # bound for the attempt summary (under the lock)
   mission_max_resumes: 3            # resumes before a timed-out mission drops
   user_task_retention_days: 30      # prune done/blocked/failed task files; 0 disables
+
+chron:                          # Production clock (docs/CHRON-SCHEDULER-PLAN.md)
+  enabled: true                 # false = no production at all (fail closed)
+  schedule_dir: .opencode/schedule  # markdown job files, hot-read
+  state_file: chron.json        # leaf under <state>
+  inbox_dir: inbox              # leaf under <state>; producer intent spool
+  max_sleep_seconds: 60         # timer cap so config/folder edits land within a minute
+  prompt_ttl_hours: 24          # expiry for a chron prompt -> user task
+  default_priority: 5           # 0-9 for chron-created user tasks
+  mission_scan: every 1m        # generic mission scan cadence
+  mission_max_per_scan: 5       # at most N mission intents per scan
+  defer_ttl_hours: 24           # drop an occurrence after this long deferred
+
+consumer:                       # Heartbeat consumer session caps
+  max_items_per_tick: 10        # executed items per session; 0 = unlimited
+  max_wall_minutes: 60          # wall ceiling per session; 0 = unlimited
+  token_budget: 250000          # summed item tokens per session; 0 = unlimited
 
 scheduler:                      # SWRR work-kind fairness (docs/swrr-work-scheduler-plan.md)
   weights:                      # relative shares; 0 disables a kind
