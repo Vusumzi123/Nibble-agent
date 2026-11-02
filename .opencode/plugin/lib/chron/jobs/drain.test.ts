@@ -607,3 +607,34 @@ test("two sequential scans in the same millisecond emit one intent", async () =>
   assert.equal(second.reason, "cooldown")
   assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
 })
+
+test("integration: emit, cooldown, queue dedupe, then disabled", async () => {
+  const dirs = await setup()
+  let now = NOW
+  const deps = (overrides: Partial<DrainScanDeps> = {}) =>
+    scanDeps(dirs, { now: () => now, due: async () => dueResult(true), ...overrides })
+
+  const first = await runDrainScan(deps())
+  assert.equal(first.reason, "emitted")
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: NOW,
+  })
+
+  const second = await runDrainScan(deps())
+  assert.equal(second.reason, "cooldown")
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+
+  now = NOW + 15 * 60_000 + 1
+  await seedQueue(dirs.stateDir)
+  const third = await runDrainScan(deps())
+  assert.equal(third.reason, "queued")
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+
+  await config(dirs.dir, ["drain:", "  enabled: false"])
+  now += 15 * 60_000
+  const fourth = await runDrainScan(deps())
+  assert.equal(fourth.reason, "disabled")
+  assert.equal((await readIntents(dirs.stateDir)).intents.length, 1)
+})
