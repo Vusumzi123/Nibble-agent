@@ -9,9 +9,63 @@
 import { join } from "node:path"
 import { loadWorkQueueState, WORK_QUEUE_FILE } from "../../work-queue.ts"
 import { drainDue } from "../../drain/step.ts"
-import { readDrainConfig } from "../../drain/config.ts"
+import { DEFAULT_DRAIN, readDrainConfig } from "../../drain/config.ts"
 import { writeIntent } from "../../production/intents.ts"
 import type { ChronLog } from "../types.ts"
+
+export type DrainReason =
+  | "emitted"
+  | "disabled"
+  | "config-error"
+  | "cooldown"
+  | "queued"
+  | "pending-intent"
+  | "unavailable"
+  | "empty"
+  | "below-trigger"
+  | "write-failed"
+
+/** Normalize the configured emission interval; invalid values use the default. */
+export function normalizeIntervalMs(minutes: number): number {
+  const n =
+    Number.isFinite(minutes) && minutes >= 1
+      ? Math.floor(minutes)
+      : DEFAULT_DRAIN.producer_interval_minutes
+  return n * 60_000
+}
+
+export type DrainDecisionInput = {
+  now_ms: number
+  interval_ms: number
+  last_emitted_ms: number
+  enabled: boolean
+  queued: boolean
+  intent_pending: boolean
+  due: boolean
+  pending: number | null
+  oldest_age_ms: number | null
+}
+
+export type DrainDecision = {
+  emit: boolean
+  reason: DrainReason
+}
+
+/** Pure gate ordering (plan §4.2). The caller supplies the due-check result. */
+export function decideDrainProduction(input: DrainDecisionInput): DrainDecision {
+  if (!input.enabled) return { emit: false, reason: "disabled" }
+  const cooling =
+    input.last_emitted_ms > 0 && input.now_ms - input.last_emitted_ms < input.interval_ms
+  if (cooling) return { emit: false, reason: "cooldown" }
+  if (input.queued) return { emit: false, reason: "queued" }
+  if (input.intent_pending) return { emit: false, reason: "pending-intent" }
+  if (!input.due) {
+    if (input.pending === null) return { emit: false, reason: "unavailable" }
+    if (input.pending === 0) return { emit: false, reason: "empty" }
+    return { emit: false, reason: "below-trigger" }
+  }
+  return { emit: true, reason: "emitted" }
+}
 
 export type DrainScanDeps = {
   directory: string

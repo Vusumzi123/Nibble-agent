@@ -2,7 +2,12 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
-import { runDrainScan } from "./drain.ts"
+import {
+  decideDrainProduction,
+  normalizeIntervalMs,
+  runDrainScan,
+  type DrainDecisionInput,
+} from "./drain.ts"
 import { readIntents } from "../../production/intents.ts"
 import { emptyScheduler, saveWorkQueueState, WORK_QUEUE_FILE } from "../../work-queue.ts"
 import { tempDir } from "../../test-utils.ts"
@@ -116,4 +121,76 @@ test("a due-check failure is logged and never emits", async () => {
   assert.deepEqual(report, { emitted: false, reason: "due-check-failed" })
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /due check failed/)
+})
+
+test("normalizeIntervalMs coerces invalid input to the shipped default", () => {
+  assert.equal(normalizeIntervalMs(15), 15 * 60_000)
+  assert.equal(normalizeIntervalMs(1), 60_000)
+  assert.equal(normalizeIntervalMs(15.9), 15 * 60_000)
+  assert.equal(normalizeIntervalMs(0), 15 * 60_000)
+  assert.equal(normalizeIntervalMs(-3), 15 * 60_000)
+  assert.equal(normalizeIntervalMs(Number.NaN), 15 * 60_000)
+  assert.equal(normalizeIntervalMs(Number.POSITIVE_INFINITY), 15 * 60_000)
+})
+
+function decisionInput(overrides: Partial<DrainDecisionInput> = {}): DrainDecisionInput {
+  return {
+    now_ms: 1_000_000,
+    interval_ms: 60_000,
+    last_emitted_ms: 0,
+    enabled: true,
+    queued: false,
+    intent_pending: false,
+    due: true,
+    pending: 20,
+    oldest_age_ms: 0,
+    ...overrides,
+  }
+}
+
+test("decideDrainProduction applies the gates in order", () => {
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ enabled: false })),
+    { emit: false, reason: "disabled" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 59_999 })),
+    { emit: false, reason: "cooldown" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ queued: true, last_emitted_ms: 0 })),
+    { emit: false, reason: "queued" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ intent_pending: true, last_emitted_ms: 0 })),
+    { emit: false, reason: "pending-intent" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ due: false, pending: null, oldest_age_ms: null })),
+    { emit: false, reason: "unavailable" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ due: false, pending: 0, oldest_age_ms: null })),
+    { emit: false, reason: "empty" },
+  )
+  assert.deepEqual(
+    decideDrainProduction(decisionInput({ due: false, pending: 5, oldest_age_ms: 1 })),
+    { emit: false, reason: "below-trigger" },
+  )
+  assert.deepEqual(decideDrainProduction(decisionInput()), { emit: true, reason: "emitted" })
+})
+
+test("decideDrainProduction treats the cooldown boundary as inclusive", () => {
+  assert.equal(
+    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 60_000 })).emit,
+    true,
+  )
+  assert.equal(
+    decideDrainProduction(decisionInput({ last_emitted_ms: 1_000_000 - 60_001 })).emit,
+    true,
+  )
+})
+
+test("decideDrainProduction lets a zero last_emitted_ms emit immediately", () => {
+  assert.equal(decideDrainProduction(decisionInput({ last_emitted_ms: 0 })).emit, true)
 })
