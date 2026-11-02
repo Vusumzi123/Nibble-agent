@@ -38,7 +38,11 @@ const baseTask = (over: Partial<UserTask> = {}): UserTask => ({
 })
 
 test("render → parse round-trips every field including the context section", () => {
-  const task = baseTask({ dedupe_key: "dashboard-queue-sort", expires_ms: 1_793_947_200_000 })
+  const task = baseTask({
+    dedupe_key: "dashboard-queue-sort",
+    expires_ms: 1_793_947_200_000,
+    agent: "chat",
+  })
   const parsed = parseTaskFile(renderTaskFile(task), task.id)
   assert.deepEqual(parsed.problems, [])
   assert.deepEqual(parsed.task, task)
