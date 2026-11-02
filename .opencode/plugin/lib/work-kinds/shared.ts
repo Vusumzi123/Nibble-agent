@@ -1,11 +1,11 @@
 // Shared producer/eligibility primitives for work-kind handlers.
 //
-// Kind modules own their own intent (produce) and eligibility (runnable /
-// stillDue); the values that more than one kind needs live here. The heartbeat
+// Kind modules own their eligibility (runnable / stillDue) and execution; the
+// values that more than one kind needs live here. The heartbeat
 // hook never imports a kind module directly — only `work-kinds/registry.ts`.
 //
 // Loaded via relative import only.
-import type { CandidacyContext, DigestCandidate, HeartbeatSignals } from "../heartbeat.ts"
+import type { CandidacyContext, HeartbeatSignals } from "../heartbeat.ts"
 import type { Mission, MissionCandidacy } from "../missions.ts"
 import { PRIMARY_TTL_MS, type WorkItem } from "../work-queue.ts"
 
@@ -17,16 +17,10 @@ export type ProducerCtx = {
   quiet: boolean
   signals: HeartbeatSignals
   missions: Mission[]
-  candidates: DigestCandidate[]
   /** Ids already in the pool; a producer never re-adds one. */
   queuedIds?: ReadonlySet<string>
-  /** Injectable randomness for the weighted draw (tests). */
+  /** Injectable randomness for stochastic candidacy (tests). */
   random?: () => number
-  /**
-   * Drain due-check, injected by the heartbeat so the drain handler owns the
-   * kind rule without importing I/O or config. Absent → no drain intent.
-   */
-  drainDue?: () => Promise<{ due: boolean }>
   /**
    * Retention window for settled user-task files (`heartbeat.
    * user_task_retention_days`); absent → the store default (30 days).
@@ -65,22 +59,6 @@ export function statusCandidacy(ctx: ProducerCtx): CandidacyContext {
     brainOldest: ctx.signals.brain_oldest,
     nowMs: ctx.nowMs,
   }
-}
-
-/** One weighted draw over a candidate list; null when the list is empty. */
-export function weightedPick<T extends { weight: number }>(
-  items: readonly T[],
-  random: () => number = Math.random,
-): T | null {
-  if (items.length === 0) return null
-  const total = items.reduce((sum, item) => sum + Math.max(0, item.weight), 0)
-  if (total <= 0) return items[Math.min(items.length - 1, Math.floor(random() * items.length))] ?? null
-  let roll = random() * total
-  for (const item of items) {
-    roll -= Math.max(0, item.weight)
-    if (roll <= 0) return item
-  }
-  return items[items.length - 1] ?? null
 }
 
 /** The mission TTL a producer stamps on an item it emits. */

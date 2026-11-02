@@ -1,27 +1,11 @@
-// `drain-pass` work kind: one bounded drain step per tick, and the intent
-// that enqueues it when the drain store says work is due.
+// `drain-pass` work kind: one bounded drain step per tick. Production moved to
+// chron (`lib/chron/jobs/drain.ts`); this module owns execution only.
 //
 // Loaded via relative import only.
-import type { WorkItem } from "../work-queue.ts"
-import type { ProducerCtx } from "./shared.ts"
 import type { WorkKindHandler } from "./types.ts"
 
 export const drainHandler: WorkKindHandler = {
   kind: "drain-pass",
-  async produce(ctx: ProducerCtx): Promise<WorkItem[]> {
-    if (!ctx.drainDue) return []
-    const due = await ctx.drainDue()
-    if (!due.due) return []
-    return [
-      {
-        id: "drain-pass",
-        kind: "drain-pass",
-        producer: "scheduler",
-        enqueued_ms: ctx.nowMs,
-        requeue_count: 0,
-      },
-    ]
-  },
   async run(ctx) {
     await ctx.setPhase("drain")
     const step = await ctx.runDrain()
