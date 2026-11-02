@@ -1,8 +1,9 @@
-// Drain producer (docs/CHRON-SCHEDULER-PLAN.md §6.4).
+// Drain producer (docs/DRAIN-PRODUCER-PLAN.md).
 //
-// A chron code job fires on `drain.producer_interval_minutes` and asks the
-// existing due-check whether a pass is warranted. It writes at most one
-// `drain-pass` intent per due window; it never runs a pass itself. Detection
+// A fixed one-minute chron clock fires this scan. Every scan hot-reads
+// `drain.producer_interval_minutes`, enforces it with a persisted cooldown, and
+// asks the existing due-check whether a pass is warranted. It writes at most
+// one `drain-pass` intent per interval; it never runs a pass itself. Detection
 // stays deterministic — the consumer session does the LLM work.
 //
 // Loaded via relative import only.
