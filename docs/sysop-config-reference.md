@@ -34,7 +34,9 @@ config warn-once behaviour).
 | `telemetry:` | `telemetry-hook.ts` → `lib/telemetry.ts`; also `web-scan-hook.ts` for inner fetches |
 | `autonomy:` | `lib/autonomy.ts` + `autonomy-gate.ts` |
 | `mood:` | `mood-hook.ts` → `lib/mood.ts` |
-| `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process scheduler + per-tick ledger) |
+| `heartbeat:` | `heartbeat-hook.ts` → `lib/heartbeat.ts` (in-process consumer + per-session ledger) |
+| `chron:` | `chron-hook.ts` → `lib/chron/*`; `lib/production/missions.ts`; `lib/chron-bridge.ts`; `lib/chron/jobs/drain.ts` |
+| `consumer:` | `heartbeat-hook.ts` → `lib/consumer-config.ts` |
 | `scheduler:` | `lib/scheduler-config.ts` → `lib/work-queue.ts` (SWRR weights) |
 | `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
@@ -140,6 +142,7 @@ fully-reported sessions.
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |
 | `settle_seconds` | A session idle for less than this is not consumed — the half-written-turn guard (default 120). |
 | `poll_seconds` | Legacy consumer dial; unused by the tick step. |
+| `producer_interval_minutes` | Chron drain-scan cadence (`every N m`); the scan emits a `drain-pass` intent only when `drainDue()` holds (default 15). |
 | `max_wall_minutes` | Legacy consumer dial; unused by the tick step. |
 | `token_budget` | Per-pass token ceiling, checked between units; `0` = unlimited (default 80 000). |
 | `wake_token_budget` | Per-wake token ceiling (default 250 000). |
@@ -516,7 +519,7 @@ Config may only RESTRICT what the mission file declares (D-M5):
 | --- | ---- |
 | `enabled` | `false` always honoured; `true` can never re-enable a file-disabled mission. |
 | `min_level` | may only be **raised** above the file's value; lower → rejected + logged, file stands. |
-| `frequency` | may only move toward `low` (rarer); higher → rejected + logged, file stands. |
+| `priority` | may only be **decreased** below the file's value; higher → rejected + logged, file stands. |
 | `menus` | may only be **narrowed**; adding a window → rejected + logged, file stands. |
 
 Rejected keys are logged once per process to `<log>/autonomy-config.log`.
@@ -541,7 +544,7 @@ anchors at column 0, so the two never collide.
 | `mission_summary_timeout_ms` | bound for the LLM attempt summary spawned under the lock after a timeout; on expiry the summarizer child is aborted and the deterministic fallback is used. |
 | `mission_max_resumes` | resume ceiling for a timed-out mission. Past the ceiling the item drops and the ledger journals `resume_abandoned` (no summarizer is spawned). **Not wired yet**: the shipped cap is the queue's `MAX_REQUEUES` (3), so changing this dial does not move the ceiling today. |
 | `user_task_retention_days` | days before a settled user-task file in `user-tasks/done/`, `blocked/`, or `failed/` is pruned by mtime (default `30`). `0` disables the prune; pending files are never touched. Hot-read at tick start. |
-| `log` | NDJSON ledger leaf under `<log>` — one line per tick: `ts, tick, pid, digest_hash, level, quiet, candidates, bias, verdict, mission, outcome, token_cost, mood_event` (+ `gate`/`reason` disambiguating every `no_reply`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
+| `log` | NDJSON ledger leaf under `<log>` — one line per executed item (handler fields + `position`) and one session line (`items_run, items_left, wall_ms, tokens, stopped`). The dream timer journals `event: "dream-tick"`, `source: "dream"` lines here too (card G, plan §17.8). |
 | `log_*` | shared rotation keys (`rotate_bytes`, `keep_generations`, `retention_days`, `compress`, `compress_after`, `compress_level`, `rotate_by`) — same shape as `audit:`. Read once at plugin init. |
 
 Behavioural dials (`enabled`, `long_silence_factor`) are hot-read on every
@@ -553,10 +556,54 @@ restores the legacy no-lock path. A timed-out child is aborted after a bounded
 idle confirm; its attempt is summarized and re-queued with `resume: true`, and
 the next brief carries the `=== RESUMED MISSION ===` block. A mission run also appends `source: "heartbeat"` to `<state>/backlog.ndjson`
 with `result.token_cost` filled and refreshes the derived view one-way.
-B7 day-side backoff (missions-plan §7): consecutive `no_reply` ticks on an
-identical `digest_hash` stretch the day cadence ×2 at streak 2 and ×4 at 3+
-(`noop_hash`/`noop_streak` in `<state>/heartbeat.json`); a mission execution or
-a changed digest resets it.
+The consumer no longer stretches the cadence: an idle wake is a file read, so
+backoff would only delay queued work. A session that hits a cap with work left
+wakes immediately; `empty` and `no-runnable` sleep to `autonomy.heartbeat.frequency`.
+
+---
+
+## `chron:`
+
+Production clock (`lib/chron/*`, `chron-hook.ts`; design:
+[CHRON-SCHEDULER-PLAN.md](CHRON-SCHEDULER-PLAN.md)). Producers write durable
+intents under `<state>/inbox/`; the heartbeat consumes them. Chron never reads
+`autonomy.*`, never loads missions, and never touches `work-queue.json`.
+
+| Key | Meaning |
+| --- | ------- |
+| `enabled` | master switch. `false` stops all chron production (fail closed; no inline fallback). |
+| `schedule_dir` | Markdown job directory (repo-relative), hot-read. The file is the schedule and the prompt body. |
+| `state_file` | Leaf under `<state>` → `.opencode/state/chron.json`. Holds per-job `last_fired_ms`, `next_due_ms`, `first_deferred_ms`. |
+| `inbox_dir` | Leaf under `<state>` → `.opencode/state/inbox/`. Producers write one JSON intent per work id. |
+| `max_sleep_seconds` | Timer cap (default 60) so folder/config edits land within a minute. |
+| `prompt_ttl_hours` | Expiry for a chron prompt job converted to a user task. |
+| `default_priority` | `0–9` priority for chron-created user tasks (default 5). |
+| `mission_scan` | Generic mission scan cadence (default `every 1m`). |
+| `mission_max_per_scan` | At most N mission intents per scan (default 5; `0` produces none). |
+| `defer_ttl_hours` | Drop a deferred occurrence after this long (default 24) so a full store cannot spin forever. |
+
+Chron uses its own lease (`<state>/chron.lock`) so production keeps running
+while the consumer drains and a second opencode instance cannot run a second
+clock. Schedule grammar: `every 1h` / `30m`, five-field cron (`0 9 * * *`),
+`@daily`, `daily 09:00`, `weekly mon 09:00`, `at <ISO>`, and `manual`.
+
+---
+
+## `consumer:`
+
+Heartbeat consumer session caps (`heartbeat-hook.ts` →
+`lib/consumer-config.ts`). Caps are checked **between** items, so the item that
+crosses a cap completes and settles. `0` disables a cap.
+
+| Key | Meaning |
+| --- | ------- |
+| `max_items_per_tick` | Executed items per session (default 10; `0` = unlimited). |
+| `max_wall_minutes` | Wall-clock ceiling per session (default 60; `0` = unlimited). |
+| `token_budget` | Summed item tokens per session (default 250 000; `0` = unlimited). |
+
+If a cap stops a session while runnable work remains, the next wake is
+immediate. `empty` and `no-runnable` sleep to `autonomy.heartbeat.frequency`
+(or the earliest `not_before_ms` if sooner), never wake 0.
 
 ---
 

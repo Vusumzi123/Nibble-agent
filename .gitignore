@@ -15,6 +15,7 @@ docs/*
 !docs/drain-consumer.md
 !docs/swrr-work-scheduler-plan.md
 !docs/user-task-queue.md
+!docs/CHRON-SCHEDULER-PLAN.md
 
 # Kanban board (personal project management, local only)
 Boards/

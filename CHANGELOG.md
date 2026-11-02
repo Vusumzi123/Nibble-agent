@@ -1,5 +1,62 @@
 # Changelog
 
+## 2026-11-01
+
+### Added
+
+- **Chron scheduler.** A plugin-owned clock (`chron-hook.ts`,
+  `lib/chron/*`) fires markdown jobs from `.opencode/schedule/*.md` and code
+  jobs on their own schedules, using `croner` for cron/DST. It writes durable
+  intents under `.opencode/state/inbox/` and never touches `work-queue.json`.
+  Chron has its own `state/chron.lock` and `log/chron.log`, so production keeps
+  running while the consumer drains. Schedule grammar: `every 1h` / `30m`,
+  five-field cron, `@daily`, `daily 09:00`, `weekly mon 09:00`, `at <ISO>`,
+  and `manual`. See [`docs/CHRON-SCHEDULER-PLAN.md`](docs/CHRON-SCHEDULER-PLAN.md)
+  and the `chron:` block in the config reference.
+- **Generic mission producer.** One chron scan evaluates every mission's
+  `schedule` once per occurrence (enabled/menu/level/candidacy/queued gates),
+  orders eligible work by `priority`, and writes one intent per mission. The
+  producer state is `state/missions.json` (`last_evaluated_ms`), separate from
+  the dispatch history. `candidacy: brain-stale*` still emits the `staleness`
+  kind; `producer: <name>` reserves a mission for a registered custom producer.
+- **Prompt bridge.** A markdown chron job becomes a normal user task
+  (`requested_by: chron`, `dedupe_key: chron:<id>`, TTL
+  `chron.prompt_ttl_hours`). User tasks gained an optional `agent` override,
+  and `runUserTaskItem` passes `task.agent ?? mission.agent` to the child.
+- **Drain producer.** A chron code job checks `drainDue()` on
+  `drain.producer_interval_minutes` (default 15) and emits at most one
+  `drain-pass` intent per due window.
+- **Consumer session loop + caps.** One heartbeat wake now merges the intent
+  inbox, ingests user tasks, and runs a bounded fair batch (SWRR re-run between
+  items, one attempt per item per session, `lease.refresh()` between items).
+  `consumer.max_items_per_tick` (10), `max_wall_minutes` (60), and
+  `token_budget` (250000) stop between items; `0` disables a cap. A capped
+  session with runnable work left wakes immediately; `empty`/`no-runnable`
+  sleep to `autonomy.heartbeat.frequency`. The ledger writes one line per item
+  (with `position`) plus one session line (`items_run`, `items_left`,
+  `wall_ms`, `tokens`, `stopped`).
+
+### Changed
+
+- **Mission frontmatter:** `frequency` is gone. Missions now declare
+  `schedule` (chron grammar) and `priority` (0–9, default 5); the shipped
+  built-ins were migrated (`notify` 1h/8, `research` 6h/5, `staleness` 6h/5,
+  `express` 12h/2, `idea-generate` 24h/2, `free-run` 6h/2, `dream` 1h/0,
+  `user-task` priority 2 + `enqueue: item`). The `autonomy.missions.<id>`
+  overlay may now only **decrease** `priority`.
+- **Mission production/digest:** the weighted `frequency × mood` draw is gone.
+  `buildCandidates` is a structural + candidacy filter; mood is telemetry /
+  tie-break only. The consumer's day-side no-op backoff (`noop_streak`
+  stretching) was removed.
+- **Dashboard:** per-item ledger lines carry `position`; performance tick
+  counts read session lines only.
+
+### Removed
+
+- `collectMissions` / `collectStaleness`, `FREQUENCY_WEIGHTS`,
+  `frequency_weight`, `DigestCandidate.weight`, `weightedPick`, and the inline
+  drain producer. `collectUserTasks` remains the file ingester.
+
 ## 2026-10-30
 
 ### Added

@@ -1083,7 +1083,13 @@ export function throughputReport(dir, paths, hours = 24) {
     }));
   const durations = runs.map((r) => r.duration_ms).filter((v) => typeof v === 'number');
   const ticks = parseLines(join(paths.logs, 'heartbeat.log'), 0).filter(
-    (row) => !row.raw && Number.isFinite(row.tick) && (parseTime(row.ts) ?? 0) >= Date.now() - hours * 3_600_000,
+    (row) =>
+      !row.raw &&
+      Number.isFinite(row.tick) &&
+      // One session = one tick; per-item lines carry `position` and must not
+      // inflate the tick count.
+      row.position === undefined &&
+      (parseTime(row.ts) ?? 0) >= Date.now() - hours * 3_600_000,
   );
   return {
     ts: new Date().toISOString(),
@@ -1245,7 +1251,7 @@ export function healthInfo(dir, state, paths) {
     auth: 'csrf',
     version: 'v2',
     paths,
-    writable_sections: ['autonomy', 'heartbeat', 'scheduler', 'drain', 'mood', 'comms', 'idea', 'decisions', 'retrieval', 'browser', 'profile', 'soul', 'telemetry', 'backlog', 'memory', 'dashboard'],
+    writable_sections: ['autonomy', 'heartbeat', 'chron', 'consumer', 'scheduler', 'drain', 'mood', 'comms', 'idea', 'decisions', 'retrieval', 'browser', 'profile', 'soul', 'telemetry', 'backlog', 'memory', 'dashboard'],
   };
 }
 
