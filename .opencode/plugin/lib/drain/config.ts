@@ -11,6 +11,8 @@ export type DrainConfig = {
   enabled: boolean
   cursor_file: string
   writer_model: string
+  /** Drain-only writer agent; rag-brain stays the interactive writer. */
+  writer_agent: string
   summarize_model: string
   batch_sessions: number
   /** Concurrent summarizer children per pass (1..batch_sessions). */
@@ -59,6 +61,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   enabled: true,
   cursor_file: "drain-cursor.json",
   writer_model: "",
+  writer_agent: "drain-writer",
   summarize_model: "",
   batch_sessions: 5,
   summarize_concurrency: 2,
@@ -66,7 +69,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   max_turns_per_session: 40,
   max_session_bytes: 24000,
   max_items_per_session: 6,
-  max_items_per_batch: 8,
+  max_items_per_batch: 4,
   child_stall_ms: 240_000,
   prefetch_candidates: 3,
   continuity_turns: 6,
@@ -247,6 +250,9 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     cfg.cursor_file = DEFAULT_DRAIN.cursor_file
   }
   if (typeof cfg.writer_model !== "string") cfg.writer_model = DEFAULT_DRAIN.writer_model
+  if (typeof cfg.writer_agent !== "string" || !cfg.writer_agent.trim()) {
+    cfg.writer_agent = DEFAULT_DRAIN.writer_agent
+  }
   if (typeof cfg.summarize_model !== "string") cfg.summarize_model = DEFAULT_DRAIN.summarize_model
   if (cfg.cursor_migration !== "recover") cfg.cursor_migration = "carry"
   cfg.exclude_missions =

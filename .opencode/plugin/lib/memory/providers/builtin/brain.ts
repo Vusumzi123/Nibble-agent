@@ -153,6 +153,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
       const spawned = await spawnConsolidationChild(ctx.client, {
         directory: ctx.directory,
         prompt,
+        agent: cfg.writer_agent,
         model: cfg.writer_model,
         waitForIdle: ctx.waitForIdle,
         registerChild: ctx.registerChild,
@@ -214,7 +215,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
             ctx,
             spawned.sessionID,
             items.length,
-            "rag-brain",
+            cfg.writer_agent,
             cfg.writer_model,
           )
           if (corrected?.valid) report = corrected

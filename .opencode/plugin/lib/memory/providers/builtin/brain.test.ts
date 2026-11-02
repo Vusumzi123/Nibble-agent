@@ -101,7 +101,33 @@ test("consolidate owns the prompt/spawn/report contract", async () => {
   assert.equal(result.session, "ses_writer")
   assert.match(writes[0].body.parts[0].text, /^Consolidation mode\./)
   assert.match(writes[0].body.parts[0].text, /### Knowledge item #1/)
-  assert.equal(writes[0].body.agent, "rag-brain")
+  assert.equal(writes[0].body.agent, "drain-writer")
+})
+
+test("the drain path spawns drain-writer and a 4-item prompt stays lean", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const writes: any[] = []
+  const c = client({ reply: report(["#1", "#2", "#3", "#4"]) })
+  const original = c.session.promptAsync
+  c.session.promptAsync = async (args: any) => {
+    writes.push(args)
+    return original(args)
+  }
+  const items = Array.from({ length: 4 }, (_, i) => ({
+    ...ITEM,
+    title: `${ITEM.title} ${i + 1}`,
+    summary: `${ITEM.summary} Copy ${i + 1}.`,
+  }))
+
+  const result = await provider.consolidate!(items, ctx(ws, c))
+
+  assert.equal(result.ok, true)
+  assert.equal(writes[0].body.agent, "drain-writer")
+  assert.ok(
+    Buffer.byteLength(writes[0].body.parts[0].text, "utf8") < 12_000,
+    "a default batch prompt stays under 12 KB",
+  )
 })
 
 test("an invalid report is a permanent error that does not consume items", async () => {

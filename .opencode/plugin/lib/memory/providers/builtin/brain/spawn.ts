@@ -23,6 +23,8 @@ export type ConsolidationClient = {
 export type SpawnOptions = {
   directory: string
   prompt: string
+  /** Writer agent; defaults to rag-brain for interactive-compatible callers. */
+  agent?: string
   /** Model from `drain.writer_model`; "" = the agent default. */
   model?: string
   /** Bounded wait for the child to go idle; false = timeout. */
@@ -194,7 +196,7 @@ export async function spawnConsolidationChild(
     const res = await client.session.promptAsync({
       path: { id: sessionID },
       body: {
-        agent: "rag-brain",
+        agent: opts.agent ?? "rag-brain",
         ...(opts.model ? { model: opts.model } : {}),
         parts: [{ type: "text", text: opts.prompt }],
       },

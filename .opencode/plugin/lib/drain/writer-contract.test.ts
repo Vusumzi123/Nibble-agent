@@ -44,13 +44,22 @@ test("the tool matrix and cheat sheet live in the on-demand reference", async ()
   assert.match(reference, /markdown-vault_edit/)
 })
 
-test("no agent file declares a predefined model", async () => {
+test("only the vault writers declare a predefined model", async () => {
   // No hidden pin may drift from the deployed harness: model selection comes
   // from config (drain.writer_model / drain.summarize_model) or inheritance.
+  // The two vault writers are the exception: drain-writer's pin is the live
+  // rag-brain default and exists so drain cost comparisons stay on the same
+  // substrate. A deployed rag-brain may carry the same pin.
   const dir = new URL("../../../agents/", import.meta.url)
+  const mayPin = new Set(["drain-writer.md", "rag-brain.md"])
   for (const name of await readdir(dir)) {
-    if (!name.endsWith(".md")) continue
+    if (!name.endsWith(".md") || mayPin.has(name)) continue
     const text = await readFile(new URL(name, dir), "utf8")
     assert.equal(/^model:/m.test(text), false, `${name} must not declare model:`)
   }
+  const drainWriter = await readFile(new URL("drain-writer.md", dir), "utf8")
+  assert.match(drainWriter, /^model:\s*\S+$/m)
+  assert.match(drainWriter, /^steps:\s*20$/m)
+  assert.match(drainWriter, /```consolidated/)
+  assert.match(drainWriter, /```skipped/)
 })

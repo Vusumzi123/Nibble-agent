@@ -15,6 +15,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  max_items_per_batch: 5",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
+      "  writer_agent: custom-writer",
       "  poison_attempts: 0",
       "  exclude_missions: [drain, staleness]",
       "  trigger_pending: 20",
@@ -38,6 +39,7 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.max_items_per_batch, 5)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
+  assert.equal(parsed.writer_agent, "custom-writer")
   assert.equal(parsed.poison_attempts, 0)
   assert.deepEqual(parsed.exclude_missions, ["drain", "staleness"])
   assert.equal(parsed.trigger_pending, 20)
@@ -174,5 +176,7 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.poison_attempts, DEFAULT_DRAIN.poison_attempts)
   assert.equal(cfg.cursor_file, DEFAULT_DRAIN.cursor_file)
   assert.equal(cfg.writer_model, "")
+  assert.equal(cfg.writer_agent, DEFAULT_DRAIN.writer_agent)
   assert.equal(cfg.summarize_model, "")
+  assert.equal(cfg.max_items_per_batch, 4, "the writer batch default is four items")
 })

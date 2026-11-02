@@ -272,7 +272,7 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.equal(cursor.watermark_ts, 1000)
   assert.match(cursor.sessions["top-1"].summary, /Restart wg0/)
 
-  const writerPrompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
+  const writerPrompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
   assert.match(writerPrompt, /^Consolidation mode\./)
   assert.match(writerPrompt, /### Knowledge item #1/)
   const summarizerPrompt = prompts.find((p) => p.body.agent === "session-summarizer")?.body.parts[0].text
@@ -375,7 +375,7 @@ test("a valid empty summary advances the cursor without spawning a writer", asyn
   assert.equal(result.degraded, undefined)
   assert.equal(result.cursorAfter, 1000)
   assert.equal(
-    prompts.some((p) => p.body.agent === "rag-brain"),
+    prompts.some((p) => p.body.agent === "drain-writer"),
     false,
     "no writer spawn for an empty batch",
   )
@@ -444,7 +444,7 @@ test("summarizer fallback still runs the writer and degrades the result", async 
   assert.equal(result.degraded, "summarizer-fallback")
   assert.match(result.error ?? "", /malformed summarizer reply/)
   assert.equal(result.consolidated, 1)
-  assert.ok(prompts.some((p) => p.body.agent === "rag-brain"))
+  assert.ok(prompts.some((p) => p.body.agent === "drain-writer"))
 })
 
 test("schema mismatch degrades to the SDK lane and still completes", async () => {
@@ -486,7 +486,7 @@ test("candidate prefetch is included when the vault has a matching note", async 
   const { client, prompts } = fakeClient({ writerReply: report(["#1"]) })
   await runDrainPipe(deps(base, client))
 
-  const prompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
+  const prompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
   assert.match(prompt, /Candidate existing notes/)
   assert.match(prompt, /Wireguard Setup/)
 })
@@ -1021,7 +1021,7 @@ test("a budget stop during summarization launches no later child and reports the
     "the budget blocks the second and third launches",
   )
   assert.equal(
-    prompts.some((p) => p.body.agent === "rag-brain"),
+    prompts.some((p) => p.body.agent === "drain-writer"),
     false,
     "the budget is already spent before the writer chunk",
   )
@@ -1042,7 +1042,7 @@ test("one malformed update under concurrency degrades once and still writes the 
   assert.equal(result.degraded, "sdk-fallback", "the SDK lane already marked the source")
   assert.match(result.error ?? "", /malformed summarizer reply/)
   assert.equal(result.consolidated, 3, "the writer still received the surviving items")
-  const writerPrompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
+  const writerPrompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
   assert.match(writerPrompt, /Alpha Note/)
   assert.match(writerPrompt, /Gamma Note/)
 })

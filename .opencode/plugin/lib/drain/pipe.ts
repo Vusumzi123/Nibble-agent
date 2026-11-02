@@ -630,7 +630,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           source: "writer",
           outcome: chunkReport.ok ? "ok" : "error",
           model: cfg.writer_model || null,
-          agent: "rag-brain",
+          agent: cfg.writer_agent,
           pass_id: passId,
           chunk: chunkIndex,
           items: chunk.items.length,
