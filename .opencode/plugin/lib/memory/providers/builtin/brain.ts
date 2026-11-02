@@ -21,8 +21,63 @@ import type {
 } from "../../types.ts"
 import { extractTitlePhrases, findCandidateNotes, type CandidateNote } from "./brain/candidates.ts"
 import { buildConsolidationPrompt } from "./brain/prompt.ts"
-import { parseConsolidationReport } from "./brain/report.ts"
-import { spawnConsolidationChild } from "./brain/spawn.ts"
+import {
+  parseConsolidationReport,
+  type ConsolidationReport,
+} from "./brain/report.ts"
+import { assistantReplies, spawnConsolidationChild } from "./brain/spawn.ts"
+
+function fenceCorrection(itemCount: number): string {
+  return `Your previous reply did not end with the required report fences.
+Reply again with ONLY the two fenced blocks below: one line per item label (#
+plus its number), every item from #1 to #${itemCount} exactly once, no prose.
+
+\`\`\`consolidated
+#1
+\`\`\`
+\`\`\`skipped
+#2
+\`\`\``
+}
+
+/** Ask the same child for the missing fences once, then re-read its newest reply. */
+async function requestReportFences(
+  ctx: WriteContext,
+  sessionID: string,
+  itemCount: number,
+  agent: string,
+  model: string,
+): Promise<ConsolidationReport | null> {
+  const res = await ctx.client.session.promptAsync({
+    path: { id: sessionID },
+    body: {
+      agent,
+      ...(model ? { model } : {}),
+      parts: [{ type: "text", text: fenceCorrection(itemCount) }],
+    },
+    query: { directory: ctx.directory },
+  })
+  if (res?.error || (res?.response && !res.response.ok)) return null
+  if (!(await ctx.waitForIdle(sessionID))) {
+    // A correction child that outlives its wait must not keep running.
+    try {
+      await ctx.client.session.abort({
+        path: { id: sessionID },
+        query: { directory: ctx.directory },
+      })
+    } catch {
+      /* best effort */
+    }
+    return null
+  }
+  const messages = await ctx.client.session.messages({
+    path: { id: sessionID },
+    query: { directory: ctx.directory },
+  })
+  const rows = Array.isArray(messages?.data) ? messages.data : []
+  const newest = assistantReplies(rows)[0]
+  return newest ? parseConsolidationReport(newest, itemCount) : null
+}
 
 export const BRAIN_AGENTS = ["rag-search", "rag-brain"]
 
@@ -108,6 +163,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         cost: spawned.cost,
         promptBytes,
         session: spawned.sessionID || null,
+        ...(spawned.lateReply ? { late: true } : {}),
         spawnMs: spawned.spawnMs ?? null,
         queueMs: spawned.queueMs ?? null,
         runMs: spawned.runMs ?? null,
@@ -128,15 +184,44 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         }
       }
 
+      // A timed-out child was already aborted; its partial text is not a
+      // report. Retry the batch transiently instead of poisoning it.
+      if (spawned.aborted) {
+        return {
+          ok: false,
+          consumed: [],
+          skipped: [],
+          errorKind: "transient",
+          detail: "writer timed out",
+          ...telemetry,
+        }
+      }
+
       // Newest first: a trailing acknowledgement must not hide the report in
       // the preceding assistant message.
       const reports = spawned.replies.map((reply) =>
         parseConsolidationReport(reply, items.length),
       )
-      const report =
+      let report =
         reports.find((candidate) => candidate.valid) ??
         reports[0] ??
         parseConsolidationReport("", items.length)
+      // One correction turn for the only recoverable class: the writer forgot
+      // the fences. Everything else keeps the permanent/poison path.
+      if (!report.valid && report.error === "no report fence") {
+        try {
+          const corrected = await requestReportFences(
+            ctx,
+            spawned.sessionID,
+            items.length,
+            "rag-brain",
+            cfg.writer_model,
+          )
+          if (corrected?.valid) report = corrected
+        } catch (err) {
+          ctx.onWarn?.("memory brain: report-fence correction failed", err)
+        }
+      }
       if (!report.valid) {
         const missing = report.missing.length > 0 ? ` missing=${report.missing.join(",")}` : ""
         const excerpt = spawned.reply.replace(/\s+/g, " ").trim().slice(0, 500)

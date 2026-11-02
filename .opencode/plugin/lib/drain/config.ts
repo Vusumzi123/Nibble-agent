@@ -20,6 +20,8 @@ export type DrainConfig = {
   max_session_bytes: number
   max_items_per_session: number
   max_items_per_batch: number
+  /** Bounded idle wait for one child (summarizer or writer), in ms. */
+  child_stall_ms: number
   prefetch_candidates: number
   continuity_turns: number
   continuity_sessions: number
@@ -65,6 +67,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   max_session_bytes: 24000,
   max_items_per_session: 6,
   max_items_per_batch: 8,
+  child_stall_ms: 240_000,
   prefetch_candidates: 3,
   continuity_turns: 6,
   continuity_sessions: 20,
@@ -94,6 +97,7 @@ const INT_KEYS = new Set([
   "max_session_bytes",
   "max_items_per_session",
   "max_items_per_batch",
+  "child_stall_ms",
   "prefetch_candidates",
   "continuity_turns",
   "continuity_sessions",
@@ -191,6 +195,9 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     1,
     DEFAULT_DRAIN.max_items_per_batch,
   )
+  cfg.child_stall_ms = Number.isFinite(cfg.child_stall_ms)
+    ? Math.max(1000, Math.floor(cfg.child_stall_ms))
+    : DEFAULT_DRAIN.child_stall_ms
   cfg.prefetch_candidates = atLeast(
     cfg.prefetch_candidates,
     0,

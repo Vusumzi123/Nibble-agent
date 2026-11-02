@@ -119,6 +119,55 @@ test("an invalid report is a permanent error that does not consume items", async
   assert.match(warnings[0] ?? "", /reply: no fences here/)
 })
 
+test("an aborted child's partial reply is a transient timeout, never a report", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const c = { ...ctx(ws, client({ reply: report(["#1"]) })), waitForIdle: async () => false }
+
+  const result = await provider.consolidate!([ITEM], c)
+
+  assert.equal(result.ok, false)
+  assert.equal(result.errorKind, "transient", "the batch retries without poisoning")
+  assert.equal(result.detail, "writer timed out")
+  assert.deepEqual(result.consumed, [])
+  assert.equal(result.late, true)
+})
+
+test("a fence-less report gets exactly one correction turn in the same child", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const rows = (text: string): unknown[] => [
+    {
+      info: { role: "assistant", tokens: { input: 10, output: 2 }, cost: 0.01 },
+      parts: [{ type: "text", text }],
+    },
+  ]
+  let creates = 0
+  let prompts = 0
+  const c = client({})
+  const create = c.session.create
+  c.session.create = async (args: any) => {
+    creates++
+    return create(args)
+  }
+  const promptAsync = c.session.promptAsync
+  c.session.promptAsync = async (args: any) => {
+    prompts++
+    return promptAsync(args)
+  }
+  c.session.messages = async () => ({
+    data: prompts >= 2 ? rows(report(["#1"])) : rows("no fences here"),
+  })
+
+  const result = await provider.consolidate!([ITEM], ctx(ws, c))
+
+  assert.equal(creates, 1, "the correction reuses the child session")
+  assert.equal(prompts, 2, "exactly one follow-up prompt")
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.consumed, [1])
+  assert.deepEqual(result.skipped, [])
+})
+
 test("a spawn failure is transient", async () => {
   const ws = await workspace()
   const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })

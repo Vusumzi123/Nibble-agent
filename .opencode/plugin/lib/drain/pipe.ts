@@ -467,6 +467,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
             model_ms: summary.modelMs ?? null,
             tool_ms: summary.toolMs ?? null,
             tokens: summary.tokens ?? null,
+            ...(summary.lateReply ? { late: true } : {}),
             error: summary.error ?? null,
           })
         } catch {
@@ -647,6 +648,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursor_before: cursorBefore,
           cursor_after: cursorBefore,
           session: chunkReport.session ?? null,
+          ...(chunkReport.late ? { late: true } : {}),
           error: chunkReport.detail ?? null,
           ...(deps.trigger ? { trigger: deps.trigger } : {}),
           ...(deps.pass !== undefined ? { pass: deps.pass } : {}),

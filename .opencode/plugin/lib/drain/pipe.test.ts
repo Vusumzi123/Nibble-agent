@@ -87,6 +87,9 @@ function fakeClient(opts: {
         sent.set(args.path.id as string, args.body.parts?.[0]?.text ?? "")
         return { response: { ok: true } }
       },
+      async abort() {
+        return { response: { ok: true } }
+      },
       async messages(args) {
         const id = args.path.id as string
         if (opts.sdkTurns && opts.sdkTurns[id]) return { data: opts.sdkTurns[id] }
@@ -486,6 +489,54 @@ test("candidate prefetch is included when the vault has a matching note", async 
   const prompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
   assert.match(prompt, /Candidate existing notes/)
   assert.match(prompt, /Wireguard Setup/)
+})
+
+test("a late summarizer reply is marked in its ledger row", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const ledger = createDrainLedger({ logDir: join(base.stateDir, "logs") })
+
+  const result = await runDrainPipe(
+    deps(base, client, {
+      ledger,
+      waitForIdle: async (id) => !id.startsWith("ses_sum_"),
+    }),
+  )
+
+  assert.equal(result.outcome, "completed")
+  await ledger.flush()
+  const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  const summarizer = lines.find((line) => line.source === "summarizer")
+  assert.equal(summarizer.late, true, "the capped child's late reply is explainable")
+  assert.equal(lines.find((line) => line.source === "writer").late, undefined)
+})
+
+test("a late writer reply is telemetry only and never parsed as a report", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const ledger = createDrainLedger({ logDir: join(base.stateDir, "logs") })
+
+  const result = await runDrainPipe(
+    deps(base, client, {
+      ledger,
+      waitForIdle: async (id) => id !== "ses_writer",
+    }),
+  )
+
+  assert.equal(result.outcome, "error")
+  assert.match(result.error ?? "", /writer timed out/)
+  assert.equal(result.cursorAfter, 0, "a truncated reply cannot advance the cursor")
+  await ledger.flush()
+  const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  const writer = lines.find((line) => line.source === "writer")
+  assert.equal(writer.late, true)
+  assert.match(writer.error, /writer timed out/)
 })
 
 test("a completed batch is not reprocessed on the next run", async () => {

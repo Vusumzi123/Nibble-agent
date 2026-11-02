@@ -41,6 +41,8 @@ export type SpawnResult = {
   replies: string[]
   /** A reply arrived after the idle deadline but was used anyway. */
   lateReply: boolean
+  /** The child was aborted after the wait timed out; its reply is untrusted. */
+  aborted: boolean
   tokens: number | null
   cost: number | null
   error?: string
@@ -97,7 +99,7 @@ async function abortChild(
   }
 }
 
-function assistantReplies(rows: unknown[]): string[] {
+export function assistantReplies(rows: unknown[]): string[] {
   const replies: string[] = []
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i] as { info?: { role?: unknown }; parts?: unknown[] }
@@ -180,6 +182,7 @@ export async function spawnConsolidationChild(
         reply: "",
         replies: [],
         lateReply: false,
+        aborted: false,
         tokens: null,
         cost: null,
         error: "session.create returned no id",
@@ -205,6 +208,7 @@ export async function spawnConsolidationChild(
         reply: "",
         replies: [],
         lateReply: false,
+        aborted: false,
         tokens: null,
         cost: null,
         error: "promptAsync failed",
@@ -238,6 +242,7 @@ export async function spawnConsolidationChild(
           reply: lateReplies[0] ?? "",
           replies: lateReplies,
           lateReply: true,
+          aborted: true,
           tokens,
           cost,
           ...timing,
@@ -250,6 +255,7 @@ export async function spawnConsolidationChild(
           reply: "",
           replies: [],
           lateReply: false,
+          aborted: false,
           tokens: null,
           cost: null,
           error: `timeout; abort failed: ${abortError}`,
@@ -265,6 +271,7 @@ export async function spawnConsolidationChild(
           reply: "",
           replies: [],
           lateReply: false,
+          aborted: false,
           tokens: null,
           cost: null,
           error: `timeout; abort not confirmed within ${confirmMs}ms`,
@@ -277,6 +284,7 @@ export async function spawnConsolidationChild(
         reply: "",
         replies: [],
         lateReply: false,
+        aborted: false,
         tokens: null,
         cost: null,
         error: "timeout",
@@ -295,6 +303,7 @@ export async function spawnConsolidationChild(
       reply: replies[0] ?? "",
       replies,
       lateReply: false,
+      aborted: false,
       tokens,
       cost,
       ...timing,
@@ -306,6 +315,7 @@ export async function spawnConsolidationChild(
       reply: "",
       replies: [],
       lateReply: false,
+      aborted: false,
       tokens: null,
       cost: null,
       error: err instanceof Error ? err.message : String(err),

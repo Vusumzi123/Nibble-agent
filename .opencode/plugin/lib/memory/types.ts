@@ -35,6 +35,8 @@ export type WriteReport = {
   skipped: number[]
   /** A provider that extracted/wrote the whole batch atomically. */
   atomic?: boolean
+  /** The report came from a child that answered after its wait deadline. */
+  late?: boolean
   errorKind?: "transient" | "permanent"
   detail?: string
   /** Optional telemetry for the drain ledger. */
