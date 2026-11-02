@@ -127,6 +127,13 @@ drain-consumer pages are retained as history. Queue work for later with the
 archived under `done/`, `blocked/`, or `failed/`. An empty queue makes a wake a
 silent no-action wake with zero LLM calls. See [`AGENTS.md`](AGENTS.md).
 
+## Wiki
+
+The in-repo wiki starts at [`wiki/Home.md`](wiki/Home.md):
+
+- [Adding scheduled markdown jobs](wiki/Adding-Scheduled-Markdown-Jobs.md)
+- [Plugin event listeners](wiki/Plugin-Event-Listeners.md)
+
 ## Modes
 
 Build is the default. **Chat** (`Tab` to switch) is a read-only conversational
