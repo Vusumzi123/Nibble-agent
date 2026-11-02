@@ -11,6 +11,7 @@ test("parseDrainConfig overlays known keys", () => {
       "drain:",
       "  enabled: false",
       "  batch_sessions: 9",
+      "  summarize_concurrency: 3",
       "  max_items_per_batch: 5",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
@@ -33,6 +34,7 @@ test("parseDrainConfig overlays known keys", () => {
   )
   assert.equal(parsed.enabled, false)
   assert.equal(parsed.batch_sessions, 9)
+  assert.equal(parsed.summarize_concurrency, 3)
   assert.equal(parsed.max_items_per_batch, 5)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
@@ -116,6 +118,30 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
     "stale is lifted to 3 x refresh even when configured lower",
   )
   assert.equal(cfg.cursor_migration, "carry", "unknown migration mode falls back to carry")
+})
+
+test("summarize_concurrency defaults to 2 and clamps to 1..batch_sessions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  const write = (value: string) =>
+    writeFile(
+      join(dir, ".opencode", "sysop-config.yaml"),
+      ["drain:", "  batch_sessions: 3", `  summarize_concurrency: ${value}`].join("\n"),
+      "utf8",
+    )
+
+  await writeFile(join(dir, ".opencode", "sysop-config.yaml"), "drain:", "utf8")
+  assert.equal((await readDrainConfig(dir)).summarize_concurrency, 2, "default is 2")
+
+  await write("0")
+  assert.equal((await readDrainConfig(dir)).summarize_concurrency, 1, "zero clamps up to 1")
+
+  await write("99")
+  assert.equal(
+    (await readDrainConfig(dir)).summarize_concurrency,
+    3,
+    "values above the batch clamp to batch_sessions",
+  )
 })
 
 test("invalid values fall back and models may be empty", async () => {

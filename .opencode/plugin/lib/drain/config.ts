@@ -13,6 +13,8 @@ export type DrainConfig = {
   writer_model: string
   summarize_model: string
   batch_sessions: number
+  /** Concurrent summarizer children per pass (1..batch_sessions). */
+  summarize_concurrency: number
   initial_lookback_hours: number
   max_turns_per_session: number
   max_session_bytes: number
@@ -57,6 +59,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
   writer_model: "",
   summarize_model: "",
   batch_sessions: 5,
+  summarize_concurrency: 2,
   initial_lookback_hours: 24,
   max_turns_per_session: 40,
   max_session_bytes: 24000,
@@ -85,6 +88,7 @@ export const DEFAULT_DRAIN: DrainConfig = {
 const BOOL_KEYS = new Set(["enabled"])
 const INT_KEYS = new Set([
   "batch_sessions",
+  "summarize_concurrency",
   "initial_lookback_hours",
   "max_turns_per_session",
   "max_session_bytes",
@@ -161,6 +165,11 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   const cfg = await readSection(directory, "drain", DEFAULT_DRAIN, { coerce: DRAIN_COERCE })
 
   cfg.batch_sessions = atLeast(cfg.batch_sessions, 1, DEFAULT_DRAIN.batch_sessions)
+  // A pool wider than the discovery batch cannot be used; zero collapses to 1
+  // rather than silently reverting to the default.
+  cfg.summarize_concurrency = Number.isFinite(cfg.summarize_concurrency)
+    ? Math.min(cfg.batch_sessions, Math.max(1, Math.floor(cfg.summarize_concurrency)))
+    : DEFAULT_DRAIN.summarize_concurrency
   cfg.initial_lookback_hours = atLeast(
     cfg.initial_lookback_hours,
     0,
