@@ -105,6 +105,24 @@ chron.register({
 })
 ```
 
+> **What goes in `schedule`:** one string, not a list or object. It uses the
+> same grammar as `.opencode/schedule/*.md` jobs. An invalid value is rejected
+> at registration and never fires.
+>
+> | Form | Example |
+> | --- | --- |
+> | Interval | `every 6h`, `30m`, `every 90s` |
+> | Cron | `0 23 * * *`, `*/15 * * * *` |
+> | Cron macro | `@daily`, `@hourly` |
+> | Daily shorthand | `daily 23:00` |
+> | Weekly shorthand | `weekly mon 09:00` |
+> | One-shot | `at 2026-11-02T23:00:00-06:00` |
+> | Manual | `manual` — only `chron.emit(id)` fires it |
+>
+> Intervals use `s`, `m`, `h`, or `d`. Cron expressions need five fields.
+> `at` takes an ISO timestamp; a time already in the past at first sight will
+> not fire. Times are local unless the timestamp carries an offset.
+
 The first registration for an id wins. An invalid schedule is rejected at
 registration and never fires. A code job shadows a file job with the same id;
 the file job is ignored and chron warns. Code changes need a restart.
