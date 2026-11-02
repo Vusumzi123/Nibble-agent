@@ -3,9 +3,13 @@ import { test } from "node:test"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
+  DRAIN_PRODUCER_STATE_FILE,
   decideDrainProduction,
+  effectiveLastEmitted,
   normalizeIntervalMs,
+  readDrainProducerState,
   runDrainScan,
+  saveDrainProducerState,
   type DrainDecisionInput,
 } from "./drain.ts"
 import { readIntents } from "../../production/intents.ts"
@@ -193,4 +197,65 @@ test("decideDrainProduction treats the cooldown boundary as inclusive", () => {
 
 test("decideDrainProduction lets a zero last_emitted_ms emit immediately", () => {
   assert.equal(decideDrainProduction(decisionInput({ last_emitted_ms: 0 })).emit, true)
+})
+
+test("readDrainProducerState reads a valid state file", async () => {
+  const dirs = await setup()
+  await writeFile(
+    join(dirs.stateDir, DRAIN_PRODUCER_STATE_FILE),
+    JSON.stringify({ version: 1, last_emitted_ms: 1234 }),
+    "utf8",
+  )
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 1234,
+  })
+})
+
+test("readDrainProducerState treats missing, corrupt, and wrong-version files as empty", async () => {
+  const dirs = await setup()
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+  await writeFile(join(dirs.stateDir, DRAIN_PRODUCER_STATE_FILE), "{nope", "utf8")
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+  await writeFile(
+    join(dirs.stateDir, DRAIN_PRODUCER_STATE_FILE),
+    JSON.stringify({ version: 2, last_emitted_ms: 1234 }),
+    "utf8",
+  )
+  assert.deepEqual(await readDrainProducerState(dirs.stateDir), {
+    version: 1,
+    last_emitted_ms: 0,
+  })
+})
+
+test("saveDrainProducerState creates a missing state directory", async () => {
+  const dir = await tempDir("chron-drain-state-")
+  const stateDir = join(dir, "nested", "state")
+  assert.equal(await saveDrainProducerState(stateDir, { version: 1, last_emitted_ms: 42 }), true)
+  assert.deepEqual(await readDrainProducerState(stateDir), {
+    version: 1,
+    last_emitted_ms: 42,
+  })
+})
+
+test("saveDrainProducerState reports failure without throwing", async () => {
+  const dir = await tempDir("chron-drain-state-")
+  const notADir = join(dir, "state-file")
+  await writeFile(notADir, "x", "utf8")
+  assert.equal(await saveDrainProducerState(notADir, { version: 1, last_emitted_ms: 42 }), false)
+})
+
+test("effectiveLastEmitted clamps future and invalid timestamps to zero", () => {
+  const now = 1_000_000
+  assert.equal(effectiveLastEmitted(500, now, 60_000), 500)
+  assert.equal(effectiveLastEmitted(0, now, 60_000), 0)
+  assert.equal(effectiveLastEmitted(now + 1, now, 60_000), 0)
+  assert.equal(effectiveLastEmitted(-1, now, 60_000), 0)
+  assert.equal(effectiveLastEmitted(Number.NaN, now, 60_000), 0)
 })

@@ -7,6 +7,7 @@
 //
 // Loaded via relative import only.
 import { join } from "node:path"
+import { atomicRead, atomicWrite } from "../../fsx.ts"
 import { loadWorkQueueState, WORK_QUEUE_FILE } from "../../work-queue.ts"
 import { drainDue } from "../../drain/step.ts"
 import { DEFAULT_DRAIN, readDrainConfig } from "../../drain/config.ts"
@@ -65,6 +66,60 @@ export function decideDrainProduction(input: DrainDecisionInput): DrainDecision 
     return { emit: false, reason: "below-trigger" }
   }
   return { emit: true, reason: "emitted" }
+}
+
+export const DRAIN_PRODUCER_STATE_FILE = "drain-producer.json"
+
+export type DrainProducerState = {
+  version: 1
+  last_emitted_ms: number
+}
+
+function emptyProducerState(): DrainProducerState {
+  return { version: 1, last_emitted_ms: 0 }
+}
+
+/** Missing, corrupt, or unsupported state reads as empty; never throws. */
+export async function readDrainProducerState(stateDir: string): Promise<DrainProducerState> {
+  try {
+    const raw = JSON.parse(
+      await atomicRead(join(stateDir, DRAIN_PRODUCER_STATE_FILE)),
+    ) as Partial<DrainProducerState> | null
+    if (!raw || raw.version !== 1) return emptyProducerState()
+    const time = raw.last_emitted_ms
+    if (typeof time !== "number" || !Number.isFinite(time) || time < 0) {
+      return emptyProducerState()
+    }
+    return { version: 1, last_emitted_ms: time }
+  } catch {
+    return emptyProducerState()
+  }
+}
+
+/** Persist the producer state atomically; returns false on failure. */
+export async function saveDrainProducerState(
+  stateDir: string,
+  state: DrainProducerState,
+): Promise<boolean> {
+  try {
+    await atomicWrite(
+      join(stateDir, DRAIN_PRODUCER_STATE_FILE),
+      JSON.stringify(state, null, 2) + "\n",
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A future timestamp is invalid (clock rollback or corruption); read it as 0. */
+export function effectiveLastEmitted(
+  last_emitted_ms: number,
+  now_ms: number,
+  _interval_ms: number,
+): number {
+  if (!Number.isFinite(last_emitted_ms) || last_emitted_ms < 0) return 0
+  return last_emitted_ms > now_ms ? 0 : last_emitted_ms
 }
 
 export type DrainScanDeps = {
