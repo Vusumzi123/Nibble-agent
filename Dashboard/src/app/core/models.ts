@@ -113,6 +113,54 @@ export interface WorkItem {
   requeue_count: number;
   requeue_reason: string | null;
   payload: Record<string, unknown> | null;
+  /** Persisted work-store lifecycle. */
+  state?: 'queued' | 'running' | 'failed';
+  attempts?: number;
+  claimed_by?: string | null;
+  claimed_ms?: number | null;
+  failed_ms?: number | null;
+  failed_age_ms?: number | null;
+  last_error?: string | null;
+}
+
+export interface StoreCounts {
+  queued: number;
+  running: number;
+  failed: number;
+}
+
+export interface ProducerCount {
+  producer: string;
+  state: string;
+  count: number;
+  oldest_ms: number | null;
+  age_ms: number | null;
+}
+
+export interface LeaseInfo {
+  owner: string;
+  pid: number;
+  pid_start: string | null;
+  acquired_ms: number;
+  heartbeat_ms: number;
+  age_ms: number | null;
+  ttl_ms: number;
+  expired: boolean;
+}
+
+export interface InboxInfo {
+  dir: string;
+  pending: number;
+  bad: number;
+  migrated: boolean;
+  backups: number;
+}
+
+export interface StoreDbInfo {
+  file: string;
+  bytes: number;
+  user_version: number | null;
+  marker: string | null;
 }
 
 export interface DrainPass {
@@ -174,6 +222,12 @@ export interface Queues {
   drain: Drain;
   scheduler: SchedulerSnapshot | null;
   available: boolean;
+  state_counts?: StoreCounts;
+  producer_counts?: ProducerCount[];
+  failed?: WorkItem[];
+  lease?: LeaseInfo | null;
+  inbox?: InboxInfo;
+  db?: StoreDbInfo;
 }
 
 export interface RunRow {

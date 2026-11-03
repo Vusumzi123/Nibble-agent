@@ -4,7 +4,7 @@ import { provideRouter } from '@angular/router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ApiService } from '../core/api';
-import { MessageRow, RunRow } from '../core/models';
+import { MessageRow, Queues, RunRow } from '../core/models';
 import { DashboardStore } from '../core/store';
 import { QueuesPage } from './queues';
 
@@ -36,6 +36,49 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     stop_reason: null,
     stalled_for_ms: null,
     error: null,
+    ...overrides,
+  };
+}
+
+function makeQueues(overrides: Partial<Queues> = {}): Queues {
+  return {
+    ts: '2026-11-03T00:00:00Z',
+    items: [],
+    counts: {},
+    total: 0,
+    due: 0,
+    oldest_ms: 0,
+    running: null,
+    drain: {} as never,
+    scheduler: null,
+    available: true,
+    state_counts: { queued: 2, running: 1, failed: 1 },
+    producer_counts: [
+      { producer: 'chron:missions', state: 'queued', count: 2, oldest_ms: 1, age_ms: 1_000 },
+    ],
+    failed: [
+      {
+        id: 'mission:bad',
+        kind: 'mission',
+        title: 'Bad mission',
+        producer: 'chron:missions',
+        attempts: 3,
+        failed_age_ms: 5_000,
+        last_error: 'boom',
+      } as never,
+    ],
+    lease: {
+      owner: 'owner-test',
+      pid: 42,
+      pid_start: '1',
+      acquired_ms: 1,
+      heartbeat_ms: 2,
+      age_ms: 1_000,
+      ttl_ms: 90_000,
+      expired: false,
+    },
+    inbox: { dir: '/state/inbox', pending: 3, bad: 1, migrated: true, backups: 2 },
+    db: { file: '/state/work.db', bytes: 2_048, user_version: 1, marker: '1' },
     ...overrides,
   };
 }
@@ -82,6 +125,37 @@ function drawer(h: Harness): HTMLElement | null {
 }
 
 describe('QueuesPage drawer', () => {
+  it('renders the work store, lease, failed rows, and legacy inbox', () => {
+    const h = createFixture();
+    h.store.queues.set(makeQueues());
+    h.fixture.detectChanges();
+    const text = (h.fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('work store');
+    expect(text).toContain('chron:missions');
+    expect(text).toContain('3 pending');
+    expect(text).toContain('owner-test');
+    expect(text).toContain('boom');
+  });
+
+  it('shows the not-initialized state when work.db is missing', () => {
+    const h = createFixture();
+    h.store.queues.set(
+      makeQueues({
+        available: false,
+        state_counts: { queued: 0, running: 0, failed: 0 },
+        producer_counts: [],
+        failed: [],
+        lease: null,
+        inbox: { dir: '/state/inbox', pending: 0, bad: 0, migrated: false, backups: 0 },
+        db: { file: '/state/work.db', bytes: 0, user_version: null, marker: null },
+      }),
+    );
+    h.fixture.detectChanges();
+    const text = (h.fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('not initialized');
+    expect(text).toContain('state/work.db appears after the first heartbeat tick');
+  });
+
   it('renders the page with the run table', () => {
     const h = createFixture();
     const root = h.fixture.nativeElement as HTMLElement;

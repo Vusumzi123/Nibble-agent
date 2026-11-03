@@ -1,7 +1,7 @@
 import { Component, computed, inject, signal } from '@angular/core';
 
 import { ApiService, errorText } from '../core/api';
-import { fmtAge, fmtCost, fmtDuration, fmtTime, fmtTokens } from '../core/format';
+import { fmtAge, fmtBytes, fmtCost, fmtDuration, fmtTime, fmtTokens } from '../core/format';
 import { RunDetail, RunRow, TranscriptEntry } from '../core/models';
 import { DashboardStore } from '../core/store';
 import { mapSessionMessages } from '../core/transcript-map';
@@ -36,6 +36,7 @@ export class QueuesPage {
   protected readonly viewRun = computed(() => this.detail()?.run ?? this.selected());
 
   protected fmtAge = fmtAge;
+  protected fmtBytes = fmtBytes;
   protected fmtDuration = fmtDuration;
   protected fmtTime = fmtTime;
   protected fmtTokens = fmtTokens;
@@ -58,6 +59,22 @@ export class QueuesPage {
       .map(([kind, count]) => ({ kind, count }))
       .sort((a, b) => b.count - a.count),
   );
+
+  protected readonly stateCounts = computed(
+    () => this.store.queues()?.state_counts ?? { queued: 0, running: 0, failed: 0 },
+  );
+
+  protected readonly failedItems = computed(() => this.store.queues()?.failed ?? []);
+
+  protected readonly producerRows = computed(() => this.store.queues()?.producer_counts ?? []);
+
+  protected readonly lease = computed(() => this.store.queues()?.lease ?? null);
+
+  protected readonly inbox = computed(() => this.store.queues()?.inbox ?? null);
+
+  protected readonly storeDb = computed(() => this.store.queues()?.db ?? null);
+
+  protected readonly storeAvailable = computed(() => this.store.queues()?.available ?? false);
 
   protected readonly schedulerRows = computed(() => {
     const scheduler = this.store.queues()?.scheduler;
@@ -174,6 +191,31 @@ export class QueuesPage {
 
   protected kindRunnable(kind: string): boolean {
     return this.store.queues()?.scheduler?.runnable.includes(kind as never) ?? false;
+  }
+
+  protected leaseTone(): string {
+    const lease = this.lease();
+    if (!lease) return 'ghost';
+    return lease.expired ? 'danger' : 'success';
+  }
+
+  protected leaseLabel(): string {
+    const lease = this.lease();
+    if (!lease) return 'none';
+    return lease.expired ? 'stale' : 'held';
+  }
+
+  protected stateTone(state: string): string {
+    switch (state) {
+      case 'running':
+        return 'primary';
+      case 'failed':
+        return 'danger';
+      case 'queued':
+        return 'info';
+      default:
+        return 'ghost';
+    }
   }
 
   protected kindTone(kind: string): string {

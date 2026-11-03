@@ -60,6 +60,143 @@
         </section>
       </div>
 
+      <div class="grid-drain">
+        <section class="panel">
+          <header class="panel__head">
+            <span class="panel__title">work store</span>
+            <span class="tag" [class]="'tag tag--' + (storeAvailable() ? 'success' : 'ghost')">
+              {{ storeAvailable() ? 'sqlite' : 'not initialized' }}
+            </span>
+            <span class="head-meta mono ellipsis">{{ storeDb()?.file ?? 'state/work.db' }}</span>
+          </header>
+          <div class="panel__body">
+            @if (!storeAvailable()) {
+              <p class="empty pad">state/work.db appears after the first heartbeat tick; the legacy inbox counts below are pre-migration.</p>
+            }
+            <div class="mini-grid mini-grid--wide">
+              <div class="mini">
+                <span class="mini__label">queued</span>
+                <span class="mini__value mono">{{ stateCounts().queued }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">running</span>
+                <span class="mini__value mono">{{ stateCounts().running }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">failed</span>
+                <span class="mini__value mono" [class.warn]="stateCounts().failed > 0">{{ stateCounts().failed }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">db</span>
+                <span class="mini__value mono">{{ fmtBytes(storeDb()?.bytes) }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">schema</span>
+                <span class="mini__value mono">v{{ storeDb()?.user_version ?? '—' }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">legacy inbox</span>
+                <span class="mini__value mono">{{ inbox()?.pending ?? 0 }} pending · {{ inbox()?.bad ?? 0 }} bad</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">import</span>
+                <span class="mini__value mono">{{ inbox()?.migrated ? 'migrated' : 'pending' }}</span>
+              </div>
+              <div class="mini">
+                <span class="mini__label">backups</span>
+                <span class="mini__value mono">{{ inbox()?.backups ?? 0 }}</span>
+              </div>
+            </div>
+            @if (producerRows().length) {
+              <div class="table-wrap">
+                <table class="tbl tbl--tight">
+                  <thead>
+                    <tr><th>producer</th><th>state</th><th class="num">items</th><th class="num">oldest</th></tr>
+                  </thead>
+                  <tbody>
+                    @for (row of producerRows(); track row.producer + ':' + row.state) {
+                      <tr>
+                        <td class="mono">{{ row.producer }}</td>
+                        <td><span class="tag" [class]="'tag tag--' + stateTone(row.state)">{{ row.state }}</span></td>
+                        <td class="num mono">{{ row.count }}</td>
+                        <td class="num mono dim">{{ fmtDuration(row.age_ms) }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head">
+            <span class="panel__title">lease</span>
+            <span class="tag" [class]="'tag tag--' + leaseTone()">{{ leaseLabel() }}</span>
+            @if (lease()?.pid_start) {
+              <span class="head-meta mono">pid_start {{ lease()?.pid_start }}</span>
+            }
+          </header>
+          <div class="panel__body">
+            @if (lease(); as currentLease) {
+              <dl class="kv kv--dense">
+                <dt>owner</dt>
+                <dd class="mono ellipsis">{{ currentLease.owner }}</dd>
+                <dt>pid</dt>
+                <dd class="mono">{{ currentLease.pid }}</dd>
+                <dt>heartbeat</dt>
+                <dd class="mono">{{ fmtDuration(currentLease.age_ms) }} ago</dd>
+                <dt>ttl</dt>
+                <dd class="mono">{{ currentLease.expired ? 'expired' : fmtDuration(currentLease.ttl_ms) }}</dd>
+              </dl>
+            } @else {
+              <p class="empty pad">no lease row — the store has not been opened by a tick</p>
+            }
+          </div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <header class="panel__head">
+          <span class="panel__title">failed work</span>
+          <span class="tag" [class]="'tag tag--' + (stateCounts().failed > 0 ? 'danger' : 'ghost')">
+            {{ stateCounts().failed }} failed
+          </span>
+          <span class="head-meta mono">dead-letter rows at the attempt cap</span>
+        </header>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>kind</th>
+                <th>item</th>
+                <th>producer</th>
+                <th class="num">tries</th>
+                <th class="num">failed</th>
+                <th>error</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (item of failedItems(); track item.id) {
+                <tr>
+                  <td><span class="tag" [class]="'tag tag--' + kindTone(item.kind)">{{ item.kind }}</span></td>
+                  <td class="mission">
+                    <span>{{ item.title }}</span>
+                    <span class="sub">{{ item.id }}</span>
+                  </td>
+                  <td class="mono dim">{{ item.producer }}</td>
+                  <td class="num mono">{{ item.attempts ?? 0 }}</td>
+                  <td class="num mono">{{ fmtAge(item.failed_age_ms) }}</td>
+                  <td class="mono dim ellipsis">{{ item.last_error ?? '—' }}</td>
+                </tr>
+              } @empty {
+                <tr><td colspan="6" class="empty">no failed work</td></tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       @if (store.queues()?.scheduler; as scheduler) {
         <section class="panel">
           <header class="panel__head">
@@ -116,8 +253,10 @@
               <tr>
                 <th class="num">pri</th>
                 <th>kind</th>
+                <th>state</th>
                 <th>item</th>
                 <th>producer</th>
+                <th class="num">try</th>
                 <th class="num">age</th>
                 <th>schedule</th>
                 <th class="num">ttl</th>
@@ -129,11 +268,13 @@
                 <tr [class.stale]="!item.due">
                   <td class="num mono dim">{{ item.priority }}</td>
                   <td><span class="tag" [class]="'tag tag--' + kindTone(item.kind)">{{ item.kind }}</span></td>
+                  <td><span class="tag" [class]="'tag tag--' + stateTone(item.state ?? 'queued')">{{ item.state ?? 'queued' }}</span></td>
                   <td class="mission">
                     <span>{{ item.title }}</span>
                     <span class="sub">{{ item.id }}{{ item.mission ? ' · ' + item.mission : '' }}</span>
                   </td>
                   <td class="mono dim">{{ item.producer }}</td>
+                  <td class="num mono dim">{{ item.attempts ?? 0 }}</td>
                   <td class="num mono">{{ fmtAge(item.age_ms) }}</td>
                   <td class="mono">
                     @if (item.due) {
@@ -149,7 +290,7 @@
                   </td>
                 </tr>
               } @empty {
-                <tr><td colspan="8" class="empty">queue empty</td></tr>
+                <tr><td colspan="10" class="empty">queue empty</td></tr>
               }
             </tbody>
           </table>

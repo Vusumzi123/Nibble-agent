@@ -93,9 +93,9 @@ const error = (res, status, code, message) => json(res, status, { error: code, m
 function ctx() {
   const config = readConfig(DIR);
   const paths = loadPaths(DIR);
-  const state = readState(paths);
+  const state = readState(DIR, paths);
   const missions = readMissions(DIR);
-  return { config, paths, state, missions, now: Date.now() };
+  return { config, paths, state, missions, now: Date.now(), dir: DIR };
 }
 
 function loopbackHost(req) {
@@ -260,7 +260,7 @@ const routes = {
 
   'GET /api/queues': async (req, res) => {
     const c = ctx();
-    const queue = readQueue(c.paths, c.missions);
+    const queue = readQueue(c.dir, c.paths, c.missions);
     json(res, 200, {
       ts: new Date().toISOString(),
       items: queue.items,
@@ -269,9 +269,15 @@ const routes = {
       due: queue.due,
       oldest_ms: queue.oldest_ms,
       scheduler: queue.scheduler,
+      state_counts: queue.state_counts,
+      producer_counts: queue.producer_counts,
+      failed: queue.failed,
+      lease: queue.lease,
+      inbox: queue.inbox,
+      db: queue.db,
       running: readHeartbeat(DIR, c.state).current,
       drain: readDrain(DIR, c.paths, c.state),
-      available: true,
+      available: queue.available,
     });
   },
 
@@ -329,7 +335,7 @@ const routes = {
 
   'GET /api/metrics/queue-wait': async (req, res) => {
     const c = ctx();
-    json(res, 200, queueWaitReport(c.paths, c.missions));
+    json(res, 200, queueWaitReport(c.dir, c.paths, c.missions));
   },
 
   'GET /api/models': async (req, res, url) => {
@@ -471,5 +477,5 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}`;
   console.log(`[dashboard] ${url} · dir=${DIR} · dist=${existsSync(join(DIST, 'index.html')) ? 'yes' : 'missing'}`);
-  console.log(`[dashboard] opencode serve → ${serveUrlFrom(readState(loadPaths(DIR)), readConfig(DIR)) ?? 'unknown'}`);
+  console.log(`[dashboard] opencode serve → ${serveUrlFrom(readState(DIR, loadPaths(DIR)), readConfig(DIR)) ?? 'unknown'}`);
 });
