@@ -10,9 +10,78 @@
 //
 // Loaded via relative import only.
 import { textOf } from "../sessions.ts"
+import { lastToolCall } from "../tools/tool-call.ts"
 import { extractKeywords, sessionAccounting } from "../transcript.ts"
 import { hashContent, extractAtoms, type RenderedSession } from "./render.ts"
 import { SUMMARIZER_SESSION_TITLE } from "./automation.ts"
+
+export const SUMMARY_ITEMS_TOOL = "summary_items"
+
+/** The typed item shape the `summary_items` tool accepts. */
+export type RawSummaryItem = {
+  title: string
+  summary: string
+  tags: string[]
+  atoms: string[]
+}
+
+export type SummaryItemsValidation =
+  | { ok: true; items: RawSummaryItem[] }
+  | { ok: false; error: string }
+
+function stringList(value: unknown): string[] | null {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return null
+  const out: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== "string") return null
+    const text = entry.trim()
+    if (text) out.push(text)
+  }
+  return out
+}
+
+/** Validate the `summary_items` arguments. An empty array is the no-items case. */
+export function validateSummaryItems(raw: unknown): SummaryItemsValidation {
+  let value: unknown = raw
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return { ok: false, error: "summary_items arguments must be an object" }
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "summary_items arguments must be an object" }
+  }
+  const items = (value as { items?: unknown }).items
+  if (!Array.isArray(items)) return { ok: false, error: "items must be an array" }
+
+  const out: RawSummaryItem[] = []
+  for (const [index, entry] of items.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: `item ${index + 1} must be an object` }
+    }
+    const item = entry as Record<string, unknown>
+    const title = typeof item.title === "string" ? item.title.trim() : ""
+    if (!title) return { ok: false, error: `item ${index + 1}: title must be a non-empty string` }
+    const summary = typeof item.summary === "string" ? item.summary.trim() : ""
+    const tags = stringList(item.tags)
+    if (tags === null) return { ok: false, error: `item ${index + 1}: tags must be a string array` }
+    const atoms = stringList(item.atoms)
+    if (atoms === null) return { ok: false, error: `item ${index + 1}: atoms must be a string array` }
+    out.push({ title, summary, tags, atoms })
+  }
+  return { ok: true, items: out }
+}
+
+/** Last valid `summary_items` call in the child transcript, or null. */
+export function parseSummaryItems(rows: unknown[]): RawSummaryItem[] | null {
+  const raw = lastToolCall(rows, SUMMARY_ITEMS_TOOL)
+  if (raw === null) return null
+  const result = validateSummaryItems(raw)
+  return result.ok ? result.items : null
+}
 
 export type SummaryItem = {
   title: string
