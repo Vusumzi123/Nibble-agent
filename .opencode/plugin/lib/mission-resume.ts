@@ -9,6 +9,7 @@
 // Loaded via relative import only.
 import { textOf } from "./sessions.ts"
 import { truncateToBytes } from "./drain/render.ts"
+import { modelField } from "./prompt-model.ts"
 
 export const TRANSCRIPT_MAX_BYTES = 24 * 1024
 export const MISSION_SUMMARY_TIMEOUT_MS = 90_000
@@ -307,7 +308,7 @@ export async function summarizeMissionAttempt(
         path: { id: childID },
         body: {
           agent: SUMMARIZER_AGENT,
-          ...(deps.model ? { model: deps.model } : {}),
+          ...modelField(deps.model),
           parts: [{ type: "text", text }],
         },
         query: { directory: deps.directory },
