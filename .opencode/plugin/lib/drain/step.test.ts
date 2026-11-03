@@ -9,7 +9,7 @@ import { childIdleWait } from "./step.ts"
 test("the drain step injects child_stall_ms into every idle wait", async () => {
   const calls: Array<[string, number | undefined]> = []
   const wait = childIdleWait(
-    { child_stall_ms: 240_000 },
+    { child_stall_ms: 600_000 },
     async (sessionID, timeoutMs) => {
       calls.push([sessionID, timeoutMs])
       return true
@@ -19,13 +19,13 @@ test("the drain step injects child_stall_ms into every idle wait", async () => {
   assert.equal(await wait("ses_sum_1"), true)
   assert.equal(await wait("ses_writer"), true)
   assert.deepEqual(calls, [
-    ["ses_sum_1", 240_000],
-    ["ses_writer", 240_000],
+    ["ses_sum_1", 600_000],
+    ["ses_writer", 600_000],
   ])
 })
 
-test("child_stall_ms defaults to 240 s and never drops below 1 s", async () => {
-  assert.equal(DEFAULT_DRAIN.child_stall_ms, 240_000)
+test("child_stall_ms defaults to 600 s and never drops below 1 s", async () => {
+  assert.equal(DEFAULT_DRAIN.child_stall_ms, 600_000)
 
   const dir = await mkdtemp(join(tmpdir(), "drain-step-config-"))
   await mkdir(join(dir, ".opencode"), { recursive: true })

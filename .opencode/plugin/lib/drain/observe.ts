@@ -35,6 +35,8 @@ export type ObserveOptions = {
   now?: () => number
   /** Sleep seam for tests; timers are unref'd by default. */
   sleep?: (ms: number) => Promise<void>
+  /** Cancels the poll promptly on coordinator disposal. */
+  signal?: AbortSignal
 }
 
 type Row = {
@@ -191,10 +193,16 @@ function evaluate(
   }
 }
 
-function defaultSleep(ms: number): Promise<void> {
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
+    if (signal?.aborted) return resolve()
+    const timer = setTimeout(done, ms)
     timer.unref?.()
+    function done(): void {
+      signal?.removeEventListener("abort", done)
+      resolve()
+    }
+    signal?.addEventListener("abort", done, { once: true })
   })
 }
 
@@ -212,7 +220,8 @@ export async function observeSession(
 ): Promise<Observation> {
   const pollMs = Math.max(1, Math.floor(opts.pollMs ?? 1000))
   const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? defaultSleep
+  const sleep = (ms: number) =>
+    opts.sleep ? opts.sleep(ms) : defaultSleep(ms, opts.signal)
   const promptUserID = opts.promptUserID ?? null
   const timeoutMs = Math.max(0, opts.timeoutMs)
   const deadline = now() + timeoutMs
@@ -237,5 +246,9 @@ export async function observeSession(
 
     const remaining = deadline - now()
     await sleep(Math.max(1, Math.min(pollMs, remaining)))
+    if (opts.signal?.aborted) {
+      const finalRows = await read()
+      return evaluate(finalRows, promptUserID, true)
+    }
   }
 }
