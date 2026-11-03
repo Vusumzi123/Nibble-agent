@@ -126,6 +126,7 @@ test("collectUserTasks emits one prioritized item per pending task", async () =>
   assert.ok(items.some((i) => i.payload?.task_ref === (low as any).id))
 
   const queued = new Set(items.map((i) => i.id))
+  assert.deepEqual(await collectUserTasks(producerCtx(dir, { has: (id) => queued.has(id) })), [])
   assert.deepEqual(await collectUserTasks(producerCtx(dir, { queuedIds: queued })), [])
   assert.deepEqual(await collectUserTasks(producerCtx(dir, { nowMs: 0, stateDir: undefined })), [])
 })

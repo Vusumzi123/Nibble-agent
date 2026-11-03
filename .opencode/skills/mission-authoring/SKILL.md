@@ -204,8 +204,9 @@ overlay may write `enabled: false`; it cannot re-enable a file-disabled mission.
    `verdict`, `mission`, `outcome`, `token_cost`, `result_status`,
    `result_missing`, `over_budget`, and `reason`.
 3. Check `.opencode/state/heartbeat.json` for the no-op streak and
-   `.opencode/state/work-queue.json` for the pool. A mission that never appears
-   in `candidates:` is failing `enabled`, `menus`, `min_level`, or `candidacy`.
+   `.opencode/state/work.db` (`work_items`) for the pool. A mission that never
+   appears in `candidates:` is failing `enabled`, `menus`, `min_level`, or
+   `candidacy`.
 
 ## Pitfalls
 

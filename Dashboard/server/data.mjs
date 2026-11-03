@@ -98,11 +98,13 @@ export function resolveLeaf(root, value) {
 export function loadPaths(dir) {
   const { data } = readConfig(dir);
   const p = data?.paths ?? {};
+  const state = resolveLeaf(dir, p.state ?? DEFAULT_PATHS.state);
   return {
     vault: resolveLeaf(dir, p.vault ?? DEFAULT_PATHS.vault),
     diagrams: resolveLeaf(dir, p.diagrams ?? DEFAULT_PATHS.diagrams),
     logs: resolveLeaf(dir, p.log ?? DEFAULT_PATHS.log),
-    state: resolveLeaf(dir, p.state ?? DEFAULT_PATHS.state),
+    state,
+    workDb: resolveLeaf(state, data?.storage?.path ?? 'work.db'),
   };
 }
 
@@ -370,6 +372,69 @@ export function pendingTurns(dir, watermark, excludeMissions = [], cursor = null
 
 /* ------------------------------------------------------------------- state */
 
+function parseJsonRecord(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function mapStoreRow(row) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    producer: row.producer,
+    enqueued_ms: row.enqueued_ms,
+    priority: row.priority,
+    not_before_ms: row.not_before_ms,
+    expires_ms: row.expires_ms,
+    requeue_count: row.requeue_count,
+    requeue_reason: row.requeue_reason,
+    payload: typeof row.payload === 'string' ? parseJsonRecord(row.payload) : row.payload,
+    state: row.state,
+    attempts: row.attempts,
+  };
+}
+
+// Read the live work store. The server is Node-only (`node --no-warnings
+// server/index.mjs`), so the built-in SQLite binding is available.
+export function readQueueState(paths) {
+  const file = paths.workDb ?? join(paths.state, 'work.db');
+  if (!existsSync(file)) return { items: [], scheduler: null };
+  let db = null;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 5000');
+    const rows = db
+      .prepare(
+        "SELECT * FROM work_items WHERE state IN ('queued','running') ORDER BY enqueued_ms ASC, id ASC",
+      )
+      .all();
+    const schedulerRow = db.prepare('SELECT * FROM scheduler_state WHERE id = 1').get();
+    const scheduler = schedulerRow
+      ? {
+          fair: Number(schedulerRow.fair) !== 0,
+          weights: parseJsonRecord(schedulerRow.weights),
+          credits: parseJsonRecord(schedulerRow.credits),
+          served: parseJsonRecord(schedulerRow.served),
+          last_kind: schedulerRow.last_kind ?? null,
+          updated_ms: schedulerRow.updated_ms ?? null,
+        }
+      : null;
+    return { items: rows.map(mapStoreRow), scheduler };
+  } catch {
+    return { items: [], scheduler: null };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 export function readState(paths) {
   return {
     heartbeat: safeJson(join(paths.state, 'heartbeat.json')),
@@ -379,24 +444,15 @@ export function readState(paths) {
     idea: safeJson(join(paths.state, 'idea.json')),
     drain: safeJson(join(paths.state, 'drain.current.json')),
     cursor: safeJson(join(paths.state, 'drain-cursor.json')),
-    queue: safeJson(join(paths.state, 'work-queue.json')),
+    queue: readQueueState(paths),
     runtime: safeJson(join(paths.state, 'runtime.json')),
     serveUrl: safeText(join(paths.state, 'serve-url')).trim(),
   };
 }
 
 export function readQueue(paths, missions) {
-  const raw = safeJson(join(paths.state, 'work-queue.json'));
-  const list = Array.isArray(raw)
-    ? raw
-    : Array.isArray(raw?.items)
-      ? raw.items
-      : Array.isArray(raw?.primary) || Array.isArray(raw?.side)
-        ? [
-            ...(Array.isArray(raw.primary) ? raw.primary : []),
-            ...(Array.isArray(raw.side) ? raw.side.map((item) => ({ ...item, kind: 'staleness' })) : []),
-          ]
-        : [];
+  const raw = readQueueState(paths);
+  const list = raw.items;
   const byId = new Map(missions.map((m) => [m.id, m]));
   const now = Date.now();
 
@@ -448,7 +504,7 @@ export function readQueue(paths, missions) {
     total: items.length,
     oldest_ms: items.reduce((max, item) => Math.max(max, item.age_ms ?? 0), 0),
     due: items.filter((item) => item.due).length,
-    scheduler: schedulerSnapshot(raw, items, now),
+    scheduler: schedulerSnapshot(raw.scheduler ? { scheduler: raw.scheduler } : null, items, now),
   };
 }
 

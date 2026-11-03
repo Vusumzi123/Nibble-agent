@@ -17,6 +17,7 @@ docs/*
 !docs/user-task-queue.md
 !docs/CHRON-SCHEDULER-PLAN.md
 !docs/DRAIN-PRODUCER-PLAN.md
+!docs/SQLITE-WORK-STORE-PLAN.md
 
 # Kanban board (personal project management, local only)
 Boards/

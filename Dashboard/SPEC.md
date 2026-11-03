@@ -27,9 +27,9 @@ Angular 22 SPA (Dashboard/) ── same origin ──► Node server (Dashboard/
 - No demo fallback. If the backend is down the SPA shows an offline banner and
   retries every 4 s; the backend itself retries nothing.
 - Scheduler: [`../docs/swrr-work-scheduler-plan.md`](../docs/swrr-work-scheduler-plan.md).
-  SWRR is live in `.opencode/plugin/lib/work-queue.ts`; the QUEUE panel,
+  SWRR and the queue are live in `.opencode/plugin/lib/work-store/sqlite.ts`; the QUEUE panel,
   METRICS service share, FLIGHT next-kind and SETTINGS weights read the
-  persisted `{version, items, scheduler}` state.
+  persisted `work_items` + `scheduler_state` rows.
 
 ## What is monitored
 
@@ -37,7 +37,7 @@ Angular 22 SPA (Dashboard/) ── same origin ──► Node server (Dashboard/
 | --- | --- |
 | `heartbeat.current.json`, `heartbeat.json` | current flight, lock/stale, tick counters, next-tick schedule |
 | `mood.json`, `sleep.json`, `idea.json` | mood valence/arousal, quiet-hours state, daily idea draw |
-| `work-queue.json` | unified queue + SWRR scheduler: kind, priority, age, due/not-before, TTL, requeues, weights/credits/served |
+| `work.db` (read-only) | `work_items` queued/running rows + `scheduler_state` (weights/credits/served); the server opens WAL with a 5 s busy timeout |
 | `drain.current.json`, `drain-cursor.json`, `drain.log` | drain lag, pending turns/sessions, passes, last outcome (no cursor ⇒ pending 0) |
 | `backlog.ndjson` | open/total counts and entries |
 | `heartbeat.log` + `drain.log` + `opencode.db` | runs with mission, kind, outcome, tokens, cost, model, duration, abort reason; drain pipe passes included |

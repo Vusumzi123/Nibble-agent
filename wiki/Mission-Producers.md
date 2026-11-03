@@ -1,27 +1,26 @@
 # How mission producers work
 
 Production and execution are separate. A **producer** decides that a mission
-should run and writes durable work. The **heartbeat consumer** later merges that
-work and runs it. A mission producer never writes `work-queue.json` and never
-starts a child session.
+should run and inserts a durable `queued` row into `state/work.db`. The
+**heartbeat consumer** later claims, runs, and settles it. A mission producer
+never mutates an item's state and never starts a child session.
 
 The generic producer is a chron code job. It scans every mission's `schedule`,
-applies the gates once per occurrence, and writes one intent per selected
-mission. Custom producers use the same intent rail but own their own trigger.
+applies the gates once per occurrence, and enqueues one row per selected
+mission. Custom producers use the same store API but own their own trigger.
 
 Drain is a dedicated work producer, not a `MissionProducer`: it owns the
-`drain-pass` kind and emits one intent from its own cooldown gate. Custom
+`drain-pass` kind and enqueues one row from its own cooldown gate. Custom
 mission producers are only for mission files.
 
 ```
 chron mission scan (default every 1m)
-  -> load missions + queue snapshot
+  -> load missions; store.has for dedupe
   -> occurrence + gates
   -> priority sort + per-scan cap
-  -> intent under state/inbox/
-  -> consumer merges under its lease
-  -> work-queue.json
-  -> fair session -> mission child
+  -> store.enqueue (queued rows)
+  -> consumer recovers/prunes under the DB lease
+  -> claim -> fair session -> mission child -> settle
 ```
 
 ## The generic scan
@@ -34,8 +33,8 @@ Each scan:
 
 1. Reads the `chron:` config and gathers the heartbeat context. If
    `autonomy.level` is `0`, it returns without producing anything.
-2. Loads `.opencode/missions/*.md` and the current work queue. The queue is read
-   only to build a `queuedIds` set.
+2. Loads `.opencode/missions/*.md` and checks each candidate with
+   `store.has("mission:<id>")` (queued or running; failed rows are ignored).
 3. Builds the candidacy context from heartbeat signals, sleep state, the idea
    day, and last-run/gap state. Mood is not a production input.
 4. For each mission, skips `enqueue: item` missions, skips missions owned by a
@@ -46,8 +45,9 @@ Each scan:
 6. Sorts eligible missions by `priority` descending, then occurrence ascending,
    then id.
 7. Takes up to `chron.mission_max_per_scan` (default `5`; `0` produces none).
-8. Writes one intent per selected mission. On success, advances that mission's
-   `last_evaluated_ms` to the occurrence.
+8. Enqueues one row per selected mission. An accepted or duplicate id advances
+   that mission's `last_evaluated_ms`; a rejected id (queue full) does not, so
+   the next scan retries the occurrence.
 
 The first time a mission is seen, the scan seeds `last_evaluated_ms = now` and
 moves on. A new mission waits for its next occurrence instead of firing on the
@@ -61,7 +61,7 @@ A due occurrence is eligible only when all of these hold:
 - the current window is in `menus` (`day` when awake, `night` when quiet)
 - `autonomy.level >= min_level`
 - the `candidacy` predicate passes
-- `mission:<id>` is not already in the queue
+- `store.has("mission:<id>")` is false (not queued or running)
 
 If any gate fails, or the mission is already queued, the scan advances
 `last_evaluated_ms` to the occurrence. The occurrence is consumed. The next
@@ -129,22 +129,21 @@ A selected mission becomes an intent under the state inbox:
 - The payload records the decision context. Execution rebuilds the brief from
   live state; the payload is not the prompt.
 
-If an intent file for the same id already exists, the write is deduped and the
-scan treats it as success. That is why a second scan before the consumer merges
-cannot stack the same occurrence.
+If the store already has the id, `enqueue` reports a duplicate and the scan
+treats it as success. That is why a second scan before the consumer claims the
+row cannot stack the same occurrence.
 
 ## The handoff
 
-The heartbeat consumer calls `mergeIntents` under its own lease. The merge:
+The legacy file inbox is read once by the SQLite importer on first open and
+moved to `state/backup/pre-sqlite-<ts>/`. At every tick the consumer:
 
-1. Reads the inbox and quarantines malformed files under `inbox/bad/`.
-2. Prunes expired queue items and expired intents.
-3. Dedupes by work id.
-4. Accepts only up to the free queue capacity (`MAX_QUEUE_DEPTH`, 50). Overflow
-   stays in the inbox for a later session.
-5. Saves the queue with the checked writer.
-6. Deletes accepted files only after a successful save; duplicate and expired
-   files are removed either way.
+1. Acquires the DB lease and calls `recover(owner)` (another owner's `running`
+   rows go back to `queued`; rows at the attempt cap become `failed`).
+2. Prunes expired queued rows and drops work whose handler says
+   `stillDue = false`.
+3. Ingests `state/user-tasks/*.md` and enqueues the batch.
+4. Snapshots queued rows + scheduler for the fair session.
 
 The consumer then runs the work in a bounded fair session. A `mission` or
 `staleness` item assembles the brief, records the dispatch, runs the child,
@@ -222,8 +221,10 @@ The `autonomy.missions.<id>` overlay is restrict-only:
 
 - `.opencode/state/missions.json` — `last_evaluated_ms` per mission. This is
   producer state, separate from the dispatch history.
-- `.opencode/state/inbox/` — pending intents. A full queue leaves them here.
-- `.opencode/state/work-queue.json` — the merged queue.
+- `.opencode/state/work.db` — queued/running/failed rows, scheduler state, and
+  the heartbeat lease.
+- `.opencode/state/backup/pre-sqlite-<ts>/` — the one-time imported inbox and
+  legacy queue (copy, never delete).
 - `.opencode/logs/chron.log` — code-job fire events and warn-once issues.
 - `.opencode/state/heartbeat.json` — `last_runs`, used by `min-gap`
   candidacy.
@@ -231,8 +232,11 @@ The `autonomy.missions.<id>` overlay is restrict-only:
 
 Failure behavior:
 
-- Intent write fails: the occurrence is not marked, so the next scan retries.
-- Queue is full: the intent stays in the inbox and is retried after space frees.
+- `store.enqueue` fails or rejects (queue full): the occurrence is not marked,
+  so the next scan retries.
+- A duplicate id advances the occurrence (the work is already represented).
+- A crash between claim and settle is recovered on the next tick; the attempt
+  counter caps at three and then the row becomes `failed`.
 - State save fails: the scan is logged; occurrences may repeat.
 - Bad intent: quarantined, never blocks the merge.
 - Consumer lease is held: the merge waits for the next session; the inbox is

@@ -68,9 +68,11 @@ export async function collectUserTasks(ctx: ProducerCtx): Promise<WorkItem[]> {
   })
   if (!userTaskEnabled(ctx)) return []
   const pending = await listPendingTasks(ctx.stateDir)
+  const alreadyQueued = (id: string): boolean =>
+    ctx.has ? ctx.has(id) : (ctx.queuedIds?.has(id) ?? false)
   return pending
     .filter((task) => !task.expires_ms || ctx.nowMs < task.expires_ms)
-    .filter((task) => !ctx.queuedIds?.has(`user-task:${task.id}`))
+    .filter((task) => !alreadyQueued(`user-task:${task.id}`))
     .map((task) => taskItem(task, ctx.nowMs))
 }
 

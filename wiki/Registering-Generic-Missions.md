@@ -105,8 +105,9 @@ node --test .opencode/plugin/lib/production/missions.test.ts
 Useful paths:
 
 - `.opencode/state/missions.json` — per-mission `last_evaluated_ms`.
-- `.opencode/state/inbox/` — intents waiting for the consumer.
-- `.opencode/state/work-queue.json` — merged work.
+- `.opencode/state/work.db` — queued/running/failed work and scheduler state.
+- `.opencode/state/backup/pre-sqlite-<ts>/` — one-time imported legacy inbox
+  and queue.
 - `.opencode/logs/chron.log` — scan fires and warn-once issues.
 - `.opencode/logs/autonomy-config.log` — mission parse and overlay rejects.
 

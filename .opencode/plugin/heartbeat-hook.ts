@@ -15,7 +15,11 @@ import {
 } from "./lib/backlog.ts"
 import { openDecisionGate } from "./lib/decision-gate.ts"
 import type { BridgeSpawner } from "./lib/decisions.ts"
-import { acquireOwnership, ownershipFile, type OwnershipHandle } from "./lib/ownership.ts"
+import { acquireLease } from "./lib/lease.ts"
+import { readStorageConfig } from "./lib/storage-config.ts"
+import { openWorkStore } from "./lib/work-store/sqlite.ts"
+import { probeReadWriteSqlite } from "./lib/sqlite/open.ts"
+import { StoreError, type LeaseHandle, type WorkStore } from "./lib/work-store.ts"
 import {
   DEFAULT_HEARTBEAT_CONFIG,
   HEARTBEAT_CURRENT_FILE,
@@ -62,17 +66,11 @@ import { createDiagnostics, getLogger, logSettingsFrom, LOG_DEFAULTS } from "./l
 import { loadMissions, type Mission } from "./lib/missions.ts"
 import {
   DEFAULT_WORK_WEIGHTS,
-  WORK_QUEUE_FILE,
   type SchedulerState,
   type WorkItem,
-  dequeueById,
-  enqueueWork,
   isDue,
-  loadWorkQueueState,
   pickFair,
-  pruneWork,
   queueDepth,
-  saveWorkQueueState,
 } from "./lib/work-queue.ts"
 import { readSchedulerConfig } from "./lib/scheduler-config.ts"
 import {
@@ -81,7 +79,6 @@ import {
   itemRunnable,
   itemStillDue,
 } from "./lib/work-producers.ts"
-import { mergeIntents } from "./lib/production/intents.ts"
 import { readConsumerConfig, type ConsumerConfig } from "./lib/consumer-config.ts"
 import { readChronConfig } from "./lib/chron/config.ts"
 import { parseMissionResult } from "./lib/mission-result.ts"
@@ -125,14 +122,14 @@ const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
 //      HEARTBEAT_WAKE_CAP_MS so a dial flip re-enables within ≤ 60 s).
 //   3. Due check via the shared pure math (`computeWakeDelayMs`) —
 //      `now − last_tick ≥ frequency`; missed ticks coalesce, never replay.
-//   4. Acquire the in-process single-flight flag + the cross-instance
-//      ownership lease `.opencode/state/ownership.lock` (short TTL, renewed
-//      while held; a stale lease is stealable). A live lease skips the tick —
-//      one mission at a time even when a TUI-embedded server and a separate
-//      `opencode serve` both load this plugin.
-//   5. Producers: chron writes durable intents under `state/inbox/` and the
-//      tick merges them (dedupe, capacity, checked save); user-task files are
-//      ingested in the same step. Decisions happen in the producer (schedule,
+//   4. Acquire the in-process single-flight flag + the cross-instance lease
+//      (`lease` row in `state/work.db`; short TTL, renewed while held, stale
+//      leases stealable). A live lease skips the tick — one mission at a time
+//      even when a TUI-embedded server and a separate `opencode serve` both
+//      load this plugin.
+//   5. Producers: chron inserts `queued` rows into the work store and
+//      user-task files are ingested at tick start; the tick recovers, prunes,
+//      enqueues, and snapshots. Decisions happen in the producer (schedule,
 //      gates, priority); there is no model gate.
 //   6. Consumer: run a bounded fair session — one item at a time, SWRR
 //      re-run between items, `lease.refresh()` checked between items — under
@@ -154,9 +151,9 @@ const HEARTBEAT_ABORT_CONFIRM_MS = 10_000
 // opencode instance (the accepted D-M9 tradeoff) and must never keep a
 // process — or the test runner — alive on its account.
 //
-// Tick lines land in `<log>/heartbeat.log`; scheduler state in
-// `.opencode/state/heartbeat.json`, the cross-instance lease in
-// `.opencode/state/ownership.lock`.
+// Tick lines land in `<log>/heartbeat.log`; dispatch state in
+// `.opencode/state/heartbeat.json`, the queue and scheduler in
+// `.opencode/state/work.db`.
 
 /** A mission child session that never idles is abandoned after this budget
  *  unless `heartbeat.mission_timeout_minutes` overrides it (hot-read per tick;
@@ -176,6 +173,19 @@ export default (async ({ client, directory, ...rest }) => {
   })
   const diag = createDiagnostics({ logDir, home: homedir(), channel: "heartbeat-hook" })
 
+  // Read-write SQLite probe: the store stays off unless the real plugin runtime
+  // can open a DB, create a table, and read a value back.
+  let storeReady = false
+  const probe = await probeReadWriteSqlite()
+  if (probe.ok) {
+    storeReady = true
+    void diag.info(`[heartbeat-hook] sqlite: ok (${probe.backend})`)
+  } else {
+    void diag.warn(
+      `[heartbeat-hook] sqlite probe failed (${probe.backend}): ${probe.error}; work path disabled`,
+    )
+  }
+
   // Stale-code guard: a long-lived `opencode serve` can keep ticking with
   // plugin code that predates the latest edits (the pre-warrant digest bug).
   // Refuse to schedule until the process is restarted on current code.
@@ -191,8 +201,7 @@ export default (async ({ client, directory, ...rest }) => {
   // One short-lease ownership guard (deconcurrency plan, Phase 1): the only
   // cross-instance exclusion. A live holder that stops refreshing is
   // stealable after the TTL, so a hung instance cannot stall the project.
-  const ownershipPath = ownershipFile(stateDir)
-  const workQueueFile = join(stateDir, WORK_QUEUE_FILE)
+  // The lease row lives in the work store.
   // Live status marker for the UI (§9.2, card 16): written on every
   // phase transition so `idle | in-flight` + the in-flight mission are
   // observable without reading in-process state. Best-effort, single writer.
@@ -850,14 +859,15 @@ export default (async ({ client, directory, ...rest }) => {
   }
 
   type TickResult = {
-    status: "fired" | "lock-held" | "sleeping" | "backlog"
+    status: "fired" | "lock-held" | "sleeping" | "backlog" | "store-unavailable"
     wakeMs?: number
   }
 
   const runTick = async (): Promise<TickResult> => {
     if (ticking) return { status: "lock-held" } // in-process single-flight
     ticking = true
-    let ownership: OwnershipHandle | null = null
+    let lease: LeaseHandle | null = null
+    let store: WorkStore | null = null
     // Troubleshooting trail: which stage the tick is in, and the ledger
     // closure once it exists — so ANY failure below leaves one
     // `outcome: "error"` ledger line with a phase-tagged error, never silent.
@@ -901,12 +911,33 @@ export default (async ({ client, directory, ...rest }) => {
           })
       if (wake > 0) return { status: "sleeping" }
 
-      // 4. Cross-instance lease; a live holder means another instance is
-      // inside a tick (overrun semantics) — skip, retry next wake.
-      const lease = await acquireOwnership(ownershipPath, { nowMs })
-      if (!lease) return { status: "lock-held" }
+      // 4. Open the work store, then take the cross-instance lease in it. A
+      // live holder means another instance is inside a tick — skip and retry.
+      if (!storeReady) return { status: "store-unavailable", wakeMs: wakeCapMs }
+      const storage = await readStorageConfig(dir)
+      const chronCfg = await readChronConfig(dir)
+      try {
+        store = await openWorkStore({
+          stateDir,
+          path: storage.path,
+          busyTimeoutMs: storage.busy_timeout_ms,
+          synchronous: storage.synchronous,
+          failedRetryMs: storage.failed_retry_ms,
+          failedRetentionDays: storage.failed_retention_days,
+          legacyInboxDir: chronCfg.inbox_dir,
+        })
+      } catch (err) {
+        void diag.error("[heartbeat-hook] work store unavailable:", err)
+        store = null
+        return { status: "store-unavailable", wakeMs: wakeCapMs }
+      }
+      lease = acquireLease(store, { nowMs })
+      if (!lease) {
+        store.close()
+        store = null
+        return { status: "lock-held" }
+      }
       backlogPending = false
-      ownership = lease
       const prevState = state
       const nextState = await stateStore.update((s) => ({
         ...s,
@@ -1016,19 +1047,15 @@ export default (async ({ client, directory, ...rest }) => {
       const schedulerCfg = await readSchedulerConfig(dir).catch(() => ({
         weights: { ...DEFAULT_WORK_WEIGHTS },
       }))
-      const queueState = await loadWorkQueueState(workQueueFile)
-      const chronCfg = await readChronConfig(dir)
-      const intentMerge = await mergeIntents({
-        stateDir,
-        inboxDir: chronCfg.inbox_dir,
-        queueFile: workQueueFile,
-        queue: queueState.items,
-        scheduler: queueState.scheduler,
-        nowMs,
-      })
-      for (const bad of intentMerge.bad) {
-        void diag.warn(`[heartbeat-hook] bad intent ${bad.path}: ${bad.reason}`)
+      // Recover crashed rows, prune expired work, then ingest the file-backed
+      // user tasks. Mission and drain producers insert into the same store.
+      const recovered = store.recover(lease.owner, nowMs)
+      if (recovered.failed.length > 0) {
+        void diag.warn(
+          `[heartbeat-hook] work rows failed at the attempt cap: ${recovered.failed.join(", ")}`,
+        )
       }
+      store.prune(nowMs)
       const producerCtx: ProducerCtx = {
         nowMs,
         stateDir,
@@ -1037,15 +1064,26 @@ export default (async ({ client, directory, ...rest }) => {
         quiet: digest.quiet,
         signals: digest.signals,
         missions: allMissions,
-        queuedIds: new Set(intentMerge.queue.map((i) => i.id)),
+        has: (id) => store!.has(id),
         random: Math.random,
       }
-      // Mission/drain intents arrive through the inbox; user tasks are still
-      // ingested from their files here.
+      const beforeIngest = store.snapshot()
+      const staleIds = beforeIngest.items
+        .filter((item) => !itemStillDue(producerCtx, item))
+        .map((item) => item.id)
+      if (staleIds.length > 0) store.dropStale(staleIds)
       const produced = await collectUserTasks(producerCtx)
-      let work = enqueueWork(intentMerge.queue, produced)
-      work = pruneWork(work, nowMs, (item) => itemStillDue(producerCtx, item)).queue
-      let scheduler: SchedulerState = queueState.scheduler
+      if (produced.length > 0) {
+        const outcome = store.enqueue(produced, nowMs)
+        if (outcome.rejected.length > 0) {
+          void diag.warn(
+            `[heartbeat-hook] user tasks rejected by capacity: ${outcome.rejected.join(", ")}`,
+          )
+        }
+      }
+      const pool = store.snapshot()
+      let work = pool.items
+      let scheduler: SchedulerState = pool.scheduler
 
       // 7. Consumer session: a bounded, fair batch from the durable snapshot.
       // SWRR decides the order between items; caps are checked between items,
@@ -1198,12 +1236,13 @@ export default (async ({ client, directory, ...rest }) => {
           break
         }
 
+        const poolNow = store.snapshot()
+        work = poolNow.items
         const fairPick = pickFair(work, scheduler, nowMs, pickable, schedulerCfg.weights)
         if (!fairPick) {
           stopped = queueDepth(work) === 0 ? "empty" : "no-runnable"
           break
         }
-        scheduler = fairPick.scheduler
         schedulerFields = {
           scheduler_fair: true,
           scheduled_kind: fairPick.kind,
@@ -1211,33 +1250,61 @@ export default (async ({ client, directory, ...rest }) => {
           scheduler_credit_before: fairPick.credit_before,
           scheduler_credit_after: fairPick.credit_after,
         }
-        const picked = dequeueById(work, fairPick.item.id)
-        if (!picked) {
-          stopped = "no-runnable"
-          break
-        }
-        work = picked.rest
-        seen.add(picked.item.id)
-        await saveWorkQueueState(workQueueFile, work, scheduler)
 
-        const handler = handlerFor(fairPick.kind)
+        let claimed: Awaited<ReturnType<typeof store.claim>> = null
+        try {
+          claimed = store.claim(fairPick.item.id, fairPick.scheduler, lease.owner, nowMs)
+        } catch (err) {
+          if (err instanceof StoreError && (err.code === "lease-lost" || err.code === "busy")) {
+            stopped = "lease-lost"
+            break
+          }
+          throw err
+        }
+        if (!claimed) {
+          seen.add(fairPick.item.id)
+          continue
+        }
+        scheduler = fairPick.scheduler
+        seen.add(claimed.id)
+
+        const handler = handlerFor(claimed.kind)
         if (!handler) {
           await ledger({
             verdict: "no_reply",
             mission: null,
             outcome: "silent",
             token_cost: 0,
-            gate: fairPick.kind,
+            gate: claimed.kind,
             reason: "missing-handler",
             position: itemsRun + 1,
-            queues: queueDepth(work),
+            attempt: claimed.attempts,
+            queues: queueDepth(store.snapshot().items),
           })
+          try {
+            store.settle(claimed.id, lease.owner, null, Date.now())
+          } catch {
+            stopped = "lease-lost"
+            break
+          }
           continue
         }
 
-        const result = await handler.run(dispatchCtx, picked.item)
-        if (result.requeue) work = enqueueWork(work, [result.requeue])
-        await saveWorkQueueState(workQueueFile, work, scheduler)
+        const result = await handler.run(dispatchCtx, claimed)
+        let settled = false
+        try {
+          settled = store.settle(claimed.id, lease.owner, result.requeue ?? null, Date.now())
+        } catch (err) {
+          if (err instanceof StoreError && (err.code === "lease-lost" || err.code === "busy")) {
+            stopped = "lease-lost"
+            break
+          }
+          throw err
+        }
+        if (!settled) {
+          stopped = "lease-lost"
+          break
+        }
 
         if (result.session_id) sessionId = result.session_id
         if (result.mood) {
@@ -1254,11 +1321,14 @@ export default (async ({ client, directory, ...rest }) => {
           ...result.ledger,
           position: itemsRun,
           items_run: itemsRun,
+          attempt: claimed.attempts,
           ...(sessionId ? { session: sessionId } : {}),
-          queues: queueDepth(work),
+          queues: queueDepth(store.snapshot().items),
         })
       }
 
+      const finalPool = store.snapshot()
+      work = finalPool.items
       const itemsLeft = work.filter(
         (item) => !seen.has(item.id) && itemRunnable(producerCtx, item) && isDue(item, nowMs),
       ).length
@@ -1316,8 +1386,9 @@ export default (async ({ client, directory, ...rest }) => {
       return { status: "fired" }
     } finally {
       ticking = false
-      // The ownership lease is the only release left (Phase 1).
-      if (ownership) await ownership.release().catch(() => {})
+      // Release the lease before closing the store; both are best-effort.
+      lease?.release()
+      store?.close()
       // Close the live marker: idle once the tick ends (success, error, or a
       // lock-held skip) — the UI never shows a stale in-flight state.
       await setCurrent({
@@ -1365,7 +1436,7 @@ export default (async ({ client, directory, ...rest }) => {
     } catch (err) {
       void diag.error("[heartbeat-hook] loop error:", err)
     }
-    if (outcome.status === "lock-held") {
+    if (outcome.status === "lock-held" || outcome.status === "store-unavailable") {
       scheduleWake(wakeCapMs)
       return
     }
