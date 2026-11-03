@@ -322,6 +322,8 @@ export function createDrainCoordinator(deps: DrainCoordinatorDeps): DrainCoordin
     }
 
     const kind = jobs[0].kind
+    phase = "starting"
+    await emit()
     phase = kind === "summarize" ? "summarizing" : "writing"
     await emit()
 

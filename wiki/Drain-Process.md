@@ -93,29 +93,26 @@ continuity summary as context.
 
 ### 4. Summarize
 
-Each rendered session goes to the tool-free `session-summarizer` agent
-(`drain.summarize_model`, empty = the agent default). The prompt asks for
-plain-text blocks:
+Each rendered session goes to the `session-summarizer` agent
+(`drain.summarize_model`, empty = the agent default). The prompt asks it to call
+`summary_items` once with one item per durable topic: `title`, `tags`,
+`summary`, and `atoms`.
 
-```
-=== ITEM ===
-TITLE: ...
-TAGS: ...
-SUMMARY: ...
-ATOMS:
-- ...
-```
-
-The reply is parsed and normalized: unique titles, lowercase tags,
-`max_items_per_session` (default 6), stable content hashes, and every
-deterministic atom preserved. A malformed reply gets one correction attempt,
-then the deterministic per-turn fallback.
+The tool arguments are read from the child transcript and normalized: unique
+titles, lowercase tags, `max_items_per_session` (default 6), stable content
+hashes, and every deterministic atom preserved. A missing call gets one
+correction prompt; a still-missing call degrades to the deterministic per-turn
+fallback.
 
 Summarizers fan out. `summarize_concurrency` (default 2, clamped to
 `1..batch_sessions`) bounds the pool; launches and the result fold stay in
 discovery order, so the first degraded/error and the last reply size are
-deterministic. The token budget is checked before each launch, never mid-unit.
-A budget hit stops new launches and lets in-flight children finish and report.
+deterministic. A per-pass `DrainCoordinator` owns the pool, the token-budget
+gate, and every child deadline. It polls `client.session.messages` for
+completion — `time.completed` set and `finish` not `tool-calls` — so the pass
+never depends on `session.idle`. The token budget is checked before each
+launch, never mid-unit. A budget hit stops new launches and lets in-flight
+children finish and report.
 
 ### 5. Dedupe
 
@@ -134,27 +131,19 @@ handed serially to the active memory provider's writer. The Brain provider
 prefetches candidate notes deterministically, builds a consolidation prompt
 labelled `#1..N` per chunk, and spawns the `drain-writer` agent
 (`drain.writer_agent`; `rag-brain` remains the interactive writer). The writer
-creates or updates byte-preserving vault notes and reports its outcome with two
-fences:
+creates or updates byte-preserving vault notes and calls `drain_report` once
+with `item_count`, the consolidated labels, and the skipped labels.
 
-````
-```consolidated
-#1
-#3
-```
-```skipped
-#2
-```
-````
+Every item must appear exactly once across the two lists. The coordinator reads
+the last `drain_report` call from the transcript and re-validates it against the
+real batch. The pipe maps the chunk-local labels back to run-wide labels and
+advances only the sessions whose items were all reported.
 
-Every item must appear exactly once across the two blocks. The pipe maps the
-chunk-local labels back to run-wide labels and advances only the sessions whose
-items were all reported.
-
-A completed reply with no fence at all gets one correction turn in the same
-child session. Missing, duplicate, or unknown labels are a permanent failure;
-a child that timed out and was aborted is a transient failure, and its partial
-text is never parsed as a report.
+A completed reply with no `drain_report` call gets one correction turn in the
+same child session. Missing, duplicate, or unknown labels are a permanent
+failure; a child that hit its deadline and was aborted is a transient failure
+unless its late rows contain a valid report, in which case the report is
+accepted with `late: true`.
 
 ### 7. Advance
 
@@ -180,13 +169,14 @@ Failure accounting is layered:
 | --- | --- | --- |
 | `token_budget` | 80 000 (`0` = unlimited) | Per-pass ceiling, checked between units — never mid-unit. A ceiling, not a target. |
 | `summarize_concurrency` | 2 | Concurrent summarizer children, clamped to `1..batch_sessions`. Writer chunks stay serial. |
-| `child_stall_ms` | 240 000 | Bounded idle wait for one child, summarizer or writer. A child that outlives it is read once for a late reply, then aborted. |
+| `child_stall_ms` | 600 000 | Hard deadline for one child. Completion is polled from message state; on the deadline the child is read once for a late report, then aborted. |
+| `max_attempts` | 2 | Task attempts per pass. Summarizers respawn; writers retry only when no work could have started. |
 | `settle_seconds` | 120 | A session idle for less than this is not consumed. |
 | `poll_seconds` | 60 | Base for the failure backoff (`× 4`). |
 
-The 240 s child budget replaces the 600 s mission stall for drain children.
-Baseline writer spans are 83–118 s, so a healthy writer is never truncated,
-while a stuck child can no longer hold a pass for ten minutes.
+The deadline is a backstop, not the scheduling mechanism: a healthy child
+finishes in seconds, and the coordinator accepts a valid late report instead of
+discarding it. A stuck child costs one unit, never the pass.
 
 ## Outcomes and stops
 
@@ -217,7 +207,8 @@ drain:
   batch_sessions: 5
   summarize_concurrency: 2
   max_items_per_batch: 4
-  child_stall_ms: 240000
+  child_stall_ms: 600000
+  max_attempts: 2
   token_budget: 80000
   trigger_pending: 12
   trigger_max_age_hours: 2

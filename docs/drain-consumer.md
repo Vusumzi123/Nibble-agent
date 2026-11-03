@@ -126,7 +126,10 @@ The loop condition, in full:
   (`passes`, `wall_ms`, `wake_tokens`, `pending_before/after`, `stopped`).
   A lock-held wake writes only the consumer line (`passes: 0`).
 - `state/drain.current.json`: the live marker — `state`, `trigger`, `pass`,
-  `pending`, `oldest_pending_age_ms`, `next_due`. Separate from
+  `pending`, `oldest_pending_age_ms`, `next_due`, plus the additive
+  `pass_id`, `phase`, `started_at`, `finished_at`, `outcome`, `counts`,
+  `tasks`, and `tasks_updated_at`. `updated_at` moves only at pass
+  boundaries; task transitions move `tasks_updated_at`. Separate from
   `heartbeat.current.json` so the two loops never race on one file.
 - `logs/heartbeat.log`: each tick line carries
   `drain: { pending, oldest_age_ms, last_wake_age_ms }` read from the marker.

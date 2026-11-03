@@ -289,8 +289,9 @@ test("coordinator transitions reach the status callback and the ledger", async (
   await coordinator.dispose()
   await ledger.flush()
 
-  assert.equal(snapshots[0].phase, "summarizing")
+  assert.equal(snapshots[0].phase, "starting")
   assert.equal(snapshots[0].counts.queued, 1)
+  assert.equal(snapshots[1].phase, "summarizing")
   assert.equal(snapshots.at(-1)?.tasks[0].state, "complete")
 
   const lines = (await readFile(join(dir, DRAIN_LEDGER_FILE), "utf8"))
