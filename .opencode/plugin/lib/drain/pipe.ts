@@ -330,6 +330,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         oldest_pending_age_ms: oldestAgeMs ?? result.oldestPendingAgeMs ?? null,
         next_due: new Date(Date.now() + Math.max(1, cfg.poll_seconds) * 1000).toISOString(),
         pass_id: result.passId ?? passId,
+        phase: "idle",
         outcome: result.outcome,
         finished_at: new Date().toISOString(),
       })
