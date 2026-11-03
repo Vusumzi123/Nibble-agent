@@ -6,6 +6,7 @@
 //
 // Loaded via relative import only.
 import type { DrainConfig } from "../drain/config.ts"
+import type { ChildExecutor } from "../drain/child.ts"
 
 export type MemoryProfile = "both" | "rag-brain" | "memory-explorer" | "none"
 
@@ -37,6 +38,10 @@ export type WriteReport = {
   atomic?: boolean
   /** The report came from a child that answered after its wait deadline. */
   late?: boolean
+  /** Work may have started (the child prompt was accepted). */
+  started?: boolean
+  /** The child hit its deadline and was aborted. */
+  timedOut?: boolean
   errorKind?: "transient" | "permanent"
   detail?: string
   /** Optional telemetry for the drain ledger. */
@@ -78,7 +83,9 @@ export type WriteContext = {
   vaultDir: string
   config: DrainConfig
   client: MemoryWriteClient
-  waitForIdle: (sessionID: string) => Promise<boolean>
+  waitForIdle?: (sessionID: string) => Promise<boolean>
+  /** Drain-only child seam; created per pass by the coordinator. */
+  executor?: ChildExecutor
   registerChild?: (sessionID: string) => void
   onWarn?: (message: string, err?: unknown) => void
   dbFile?: string

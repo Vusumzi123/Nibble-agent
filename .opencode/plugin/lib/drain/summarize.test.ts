@@ -1,14 +1,14 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import type { ChildExecutor, ChildOutcome, ChildRequest } from "./child.ts"
 import type { DrainTurn } from "./db.ts"
 import type { RenderedSession } from "./render.ts"
 import { hashContent } from "./render.ts"
 import {
+  SUMMARY_ITEMS_TOOL,
   buildSummarizerPrompt,
   deterministicItems,
-  parseSummaryReply,
   summarizeSession,
-  type SummarizerClient,
 } from "./summarize.ts"
 
 const TURNS: DrainTurn[] = [
@@ -26,130 +26,99 @@ function rendered(): RenderedSession {
   }
 }
 
-type FakeOptions = {
-  reply?: string
-  /** Sequenced replies: one per summarizer attempt (last one repeats). */
-  replies?: string[]
-  /** A final acknowledgement after the block reply (newest message). */
-  trailingReply?: string
-  failCreate?: boolean
-  failPrompt?: boolean
-  /** Sequenced promptAsync errors: each entry is returned by that call. */
-  promptErrors?: unknown[]
-  failMessages?: boolean
-  failAbort?: boolean
-  tokens?: { input?: number; output?: number; reasoning?: number }
+function toolRows(input: unknown, text = "done"): unknown[] {
+  return [
+    {
+      info: { role: "assistant", time: { created: 1, completed: 2 }, finish: "stop" },
+      parts: [
+        { type: "text", text },
+        { type: "tool", tool: SUMMARY_ITEMS_TOOL, state: { input } },
+      ],
+    },
+  ]
 }
 
-function fakeClient(opts: FakeOptions = {}): {
-  client: SummarizerClient
-  calls: { create: any[]; prompt: any[]; messages: any[]; abort: any[] }
+type FakeResult = Partial<ChildOutcome>
+
+function childOutcome(request: ChildRequest, overrides: FakeResult = {}): ChildOutcome {
+  return {
+    jobId: request.id ?? "ses_sum",
+    sessionID: "ses_sum",
+    phase: "complete",
+    ok: true,
+    started: true,
+    rows: [],
+    replies: [],
+    late: false,
+    timedOut: false,
+    attempts: 1,
+    tokens: 16,
+    spawnMs: 1,
+    runMs: 2,
+    queueMs: null,
+    steps: 1,
+    spanMs: 5,
+    modelMs: 4,
+    toolMs: 1,
+    cost: 0,
+    ...overrides,
+  }
+}
+
+function fakeExecutor(opts: {
+  spawn?: FakeResult
+  prompt?: FakeResult
+  failSpawn?: boolean
+} = {}): {
+  executor: ChildExecutor
+  calls: { spawn: ChildRequest[]; prompt: Array<{ sessionID: string; request: ChildRequest }>; abort: string[] }
 } {
-  const calls = { create: [] as any[], prompt: [] as any[], messages: [] as any[], abort: [] as any[] }
-  let replyIndex = 0
-  let promptIndex = 0
-  const client: SummarizerClient = {
-    session: {
-      async create(args) {
-        calls.create.push(args)
-        if (opts.failCreate) throw new Error("create failed")
-        return { data: { id: "ses_sum" } }
-      },
-      async promptAsync(args) {
-        calls.prompt.push(args)
-        if (opts.failPrompt) throw new Error("prompt failed")
-        const error = opts.promptErrors?.[promptIndex++]
-        if (error !== undefined) return { error }
-        return { response: { ok: true } }
-      },
-      async messages(args) {
-        calls.messages.push(args)
-        if (opts.failMessages) throw new Error("messages failed")
-        const text = opts.replies
-          ? opts.replies[Math.min(replyIndex++, opts.replies.length - 1)] ?? ""
-          : opts.reply ?? ""
-        const rows = [
-          {
-            info: { role: "assistant", tokens: opts.tokens ?? { input: 10, output: 5, reasoning: 1 } },
-            parts: [{ type: "text", text }],
-          },
-        ]
-        if (opts.trailingReply) {
-          rows.push({
-            info: { role: "assistant", tokens: { input: 1, output: 1, reasoning: 0 } },
-            parts: [{ type: "text", text: opts.trailingReply }],
-          })
-        }
-        return { data: rows }
-      },
-      async abort(args) {
-        calls.abort.push(args)
-        if (opts.failAbort) return { error: { message: "abort rejected" } }
-        return { response: { ok: true } }
-      },
+  const calls = {
+    spawn: [] as ChildRequest[],
+    prompt: [] as Array<{ sessionID: string; request: ChildRequest }>,
+    abort: [] as string[],
+  }
+  const executor: ChildExecutor = {
+    async spawn(request) {
+      calls.spawn.push(request)
+      if (opts.failSpawn) throw new Error("spawn boom")
+      return childOutcome(request, opts.spawn)
+    },
+    async prompt(sessionID, request) {
+      calls.prompt.push({ sessionID, request })
+      return childOutcome(request, opts.prompt ?? opts.spawn)
+    },
+    async abort(sessionID) {
+      calls.abort.push(sessionID)
     },
   }
-  return { client, calls }
+  return { executor, calls }
 }
 
-const REPLY = [
-  "=== ITEM ===",
-  "TITLE: Wireguard Setup",
-  "TAGS: Linux/Network, linux/network",
-  "SUMMARY: Configure wg0 with wg-quick.",
-  "ATOMS:",
-  "- /etc/wireguard/wg0.conf",
-  "",
-  "=== ITEM ===",
-  "TITLE: wireguard setup",
-  "TAGS:",
-  "SUMMARY: Duplicate title.",
-  "ATOMS:",
-].join("\n")
+const ITEMS = {
+  items: [
+    { title: "Wireguard Setup", tags: ["Linux/Network", "linux/network"], summary: "Configure wg0 with wg-quick.", atoms: ["/etc/wireguard/wg0.conf"] },
+    { title: "wireguard setup", tags: [], summary: "Duplicate title.", atoms: [] },
+  ],
+}
 
-test("prompt carries the block contract, prior summary, and delta", () => {
+test("prompt carries the tool contract, prior summary, and delta", () => {
   const prompt = buildSummarizerPrompt(null, "## User\nhello")
-  assert.match(prompt, /=== ITEM ===/)
-  assert.match(prompt, /^ATOMS:$/m)
-  assert.match(prompt, /NO_ITEMS/)
+  assert.match(prompt, /summary_items/)
   assert.match(prompt, /## Prior summary\nnone/)
   assert.match(prompt, /## Session delta\n## User\nhello/)
-  assert.doesNotMatch(prompt, /STRICT JSON/)
+  assert.equal(/=== ITEM ===/.test(prompt), false)
+  assert.equal(/NO_ITEMS/.test(prompt), false)
 
   const withPrior = buildSummarizerPrompt("earlier context", "delta")
   assert.match(withPrior, /## Prior summary\nearlier context/)
 })
 
-test("parseSummaryReply reads blocks, wrapped summaries, and NO_ITEMS", () => {
-  const items = parseSummaryReply(REPLY)
-  assert.equal(items?.length, 2)
-  assert.equal(items?.[0]?.title, "Wireguard Setup")
-  assert.deepEqual(items?.[0]?.tags, ["Linux/Network", "linux/network"])
-  assert.deepEqual(items?.[0]?.atoms, ["/etc/wireguard/wg0.conf"])
-
-  const wrapped = parseSummaryReply(
-    "```text\n=== ITEM ===\nTITLE: T\nSUMMARY: one\nline two\nATOMS:\n- a\n```",
-  )
-  assert.equal(wrapped?.[0]?.summary, "one line two")
-  assert.deepEqual(wrapped?.[0]?.atoms, ["a"])
-
-  assert.deepEqual(parseSummaryReply("NO_ITEMS"), [])
-  assert.equal(parseSummaryReply("no blocks here"), null)
-  assert.equal(parseSummaryReply("=== ITEM ===\nSUMMARY: titleless"), null)
-})
-
 test("successful summarization normalizes items and preserves atoms", async () => {
-  const { client, calls } = fakeClient({ reply: REPLY })
+  const { executor, calls } = fakeExecutor({ spawn: { rows: toolRows(ITEMS) } })
   const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered(), priorSummary: "earlier" },
-    {
-      client,
-      directory: "/work/project-a",
-      model: "test/model",
-      maxItems: 6,
-      waitForIdle: async () => true,
-      registerChild: () => {},
-    },
+    { executor, model: "test/model", maxItems: 6 },
   )
 
   assert.equal(result.degraded, undefined)
@@ -158,70 +127,78 @@ test("successful summarization normalizes items and preserves atoms", async () =
   assert.equal(result.model, "test/model")
   assert.equal(result.sessionID, "ses_sum")
   assert.equal(result.steps, 1)
-  assert.equal(typeof result.spawnMs, "number")
-  assert.equal(typeof result.runMs, "number")
-  assert.equal(result.queueMs, null, "the fake rows carry no time.created")
+  assert.equal(result.queueMs, null)
 
   assert.deepEqual(result.items[0].tags, ["linux/network"])
   assert.equal(result.items[1].title, "wireguard setup (2)")
   assert.ok(result.items[0].atoms.includes("--no-cache"), "missing atom must be attached")
-
   assert.equal(result.items[0].hash, hashContent(result.items[0].summary, result.items[0].atoms))
   assert.match(result.items[0].hash, /^[0-9a-f]{40}$/)
 
-  assert.equal(calls.create[0].body.title, "drain-summarize")
-  assert.equal(calls.create[0].query.directory, "/work/project-a")
-  assert.equal(calls.prompt[0].body.agent, "session-summarizer")
-  assert.equal(calls.prompt[0].body.model, "test/model")
-  assert.ok(calls.prompt[0].body.parts[0].text.includes("## Prior summary"))
-  assert.equal("format" in calls.prompt[0].body, false)
+  assert.equal(calls.spawn[0].kind, "summarize")
+  assert.equal(calls.spawn[0].agent, "session-summarizer")
+  assert.equal(calls.spawn[0].model, "test/model")
+  assert.ok(calls.spawn[0].prompt.includes("## Prior summary"))
+  assert.equal(calls.prompt.length, 0)
 })
 
 test("the model key is omitted when no summarize model is configured", async () => {
-  const { client, calls } = fakeClient({ reply: REPLY })
-  await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
-  )
-  assert.equal("model" in calls.prompt[0].body, false)
+  const { executor, calls } = fakeExecutor({ spawn: { rows: toolRows(ITEMS) } })
+  await summarizeSession({ sessionID: "ses_1", rendered: rendered() }, { executor, maxItems: 6 })
+  assert.equal("model" in calls.spawn[0], false)
 })
 
 test("maxItems caps the batch", async () => {
-  const { client } = fakeClient({ reply: REPLY })
+  const { executor } = fakeExecutor({ spawn: { rows: toolRows(ITEMS) } })
   const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    { client, directory: "/work", maxItems: 1, waitForIdle: async () => true },
+    { executor, maxItems: 1 },
   )
   assert.equal(result.items.length, 1)
 })
 
-test("malformed replies fall back deterministically without throwing", async () => {
-  const { client } = fakeClient({ reply: "I could not summarize that." })
+test("a missing tool call gets one correction prompt and then falls back", async () => {
+  const warnings: string[] = []
+  const { executor, calls } = fakeExecutor({
+    spawn: { rows: toolRows(undefined), replies: ["I could not summarize that."] },
+    prompt: { rows: toolRows(undefined), replies: ["still no tool"] },
+  })
   const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
+    { executor, maxItems: 6, onWarn: (message) => warnings.push(message) },
   )
 
+  assert.equal(calls.prompt.length, 1, "exactly one correction turn")
+  assert.match(calls.prompt[0].request.prompt, /summary_items/)
   assert.equal(result.degraded, "summarizer-fallback")
-  assert.match(result.error ?? "", /malformed|no valid/i)
+  assert.match(result.error ?? "", /did not call summary_items|no valid/i)
   assert.equal(result.items.length, TURNS.length)
   assert.ok(result.items.every((item) => item.title.length > 0))
-  assert.ok(result.items[0].atoms.length > 0)
-  assert.equal(result.items[0].hash, hashContent(result.items[0].summary, result.items[0].atoms))
+  assert.ok(warnings.length > 0)
 })
 
-test("NO_ITEMS is a clean no-op, not a malformed reply", async () => {
-  const warnings: string[] = []
-  const { client } = fakeClient({ reply: "NO_ITEMS" })
+test("a correction that calls the tool recovers the items", async () => {
+  const { executor, calls } = fakeExecutor({
+    spawn: { rows: toolRows(undefined), replies: ["I forgot the tool."] },
+    prompt: { rows: toolRows(ITEMS) },
+  })
   const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    {
-      client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => true,
-      onWarn: (message) => warnings.push(message),
-    },
+    { executor, maxItems: 6 },
+  )
+
+  assert.equal(calls.prompt.length, 1)
+  assert.equal(calls.prompt[0].sessionID, "ses_sum")
+  assert.equal(result.degraded, undefined)
+  assert.equal(result.items.length, 2)
+})
+
+test("an empty items array is a clean no-op", async () => {
+  const warnings: string[] = []
+  const { executor } = fakeExecutor({ spawn: { rows: toolRows({ items: [] }) } })
+  const result = await summarizeSession(
+    { sessionID: "ses_1", rendered: rendered() },
+    { executor, maxItems: 6, onWarn: (message) => warnings.push(message) },
   )
 
   assert.equal(result.degraded, undefined)
@@ -230,90 +207,50 @@ test("NO_ITEMS is a clean no-op, not a malformed reply", async () => {
   assert.deepEqual(warnings, [])
 })
 
-test("a malformed reply is retried once with a correction note", async () => {
-  const warnings: string[] = []
-  const { client, calls } = fakeClient({ replies: ["not blocks", REPLY] })
+test("a late reply with a valid tool call is used", async () => {
+  const { executor, calls } = fakeExecutor({
+    spawn: {
+      rows: toolRows(ITEMS),
+      timedOut: true,
+      late: true,
+      phase: "timeout",
+      ok: false,
+    },
+  })
   const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    {
-      client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => true,
-      onWarn: (message) => warnings.push(message),
-    },
+    { executor, maxItems: 6 },
   )
 
   assert.equal(result.degraded, undefined)
+  assert.equal(result.lateReply, true)
   assert.equal(result.items.length, 2)
-  assert.equal(calls.create.length, 2, "one fresh summarizer session per attempt")
-  assert.equal(calls.prompt.length, 2)
-  assert.match(calls.prompt[1].body.parts[0].text, /did not follow the block format/)
-  assert.deepEqual(warnings, [])
+  assert.equal(calls.prompt.length, 0, "an aborted child is not prompted again")
 })
 
-test("a late reply is used instead of discarding it on timeout", async () => {
-  const timedOutClient = fakeClient({ reply: REPLY })
-  const late = await summarizeSession(
+test("a timeout without a reply falls back without a correction path", async () => {
+  const { executor, calls } = fakeExecutor({
+    spawn: { rows: [], timedOut: true, phase: "timeout", ok: false },
+  })
+  const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    {
-      client: timedOutClient.client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => false,
-    },
+    { executor, maxItems: 6 },
   )
-  assert.equal(late.degraded, undefined)
-  assert.equal(late.lateReply, true)
-  assert.equal(late.items.length, 2)
-  assert.equal(timedOutClient.calls.abort.length, 1, "timed-out child is still aborted")
-  assert.equal(timedOutClient.calls.abort[0].path.id, "ses_sum")
+
+  assert.equal(calls.prompt.length, 0)
+  assert.equal(result.degraded, "summarizer-fallback")
+  assert.equal(result.errorCode, "timeout")
 })
 
-test("timeouts without a reply and spawn errors degrade to the fallback", async () => {
-  const timedOutClient = fakeClient({ reply: "" })
-  const timedOut = await summarizeSession(
+test("a spawn error falls back deterministically", async () => {
+  const { executor } = fakeExecutor({ failSpawn: true })
+  const result = await summarizeSession(
     { sessionID: "ses_1", rendered: rendered() },
-    {
-      client: timedOutClient.client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => false,
-    },
+    { executor, maxItems: 6 },
   )
-  assert.equal(timedOut.degraded, "summarizer-fallback")
-  assert.equal(timedOut.errorCode, "timeout")
-  assert.match(timedOut.error ?? "", /timed out/)
-  assert.equal(timedOutClient.calls.abort.length, 1, "timed-out child is aborted")
-  assert.equal(timedOutClient.calls.abort[0].path.id, "ses_sum")
-  assert.equal(timedOutClient.calls.messages.length, 1, "the reply is read before abort")
-
-  const failedAbort = fakeClient({ reply: "", failAbort: true })
-  const abortResult = await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    {
-      client: failedAbort.client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => false,
-    },
-  )
-  assert.equal(abortResult.degraded, "summarizer-fallback")
-  assert.equal(abortResult.errorCode, "timeout")
-  assert.match(abortResult.error ?? "", /abort failed: abort rejected/)
-
-  const crashed = await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    {
-      client: fakeClient({ failCreate: true }).client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => true,
-    },
-  )
-  assert.equal(crashed.degraded, "summarizer-fallback")
-  assert.equal(crashed.errorCode, "spawn")
-  assert.match(crashed.error ?? "", /create failed/)
+  assert.equal(result.degraded, "summarizer-fallback")
+  assert.equal(result.errorCode, "spawn")
+  assert.match(result.error ?? "", /spawn boom/)
 })
 
 test("deterministic items dedupe identical titles and keep all atoms", () => {
@@ -331,48 +268,4 @@ test("deterministic items dedupe identical titles and keep all atoms", () => {
   assert.equal(items.length, 2)
   assert.notEqual(items[0].title, items[1].title)
   assert.ok(items.some((item) => item.atoms.includes("--flag")))
-})
-
-test("registered child id is the spawned summarizer session", async () => {
-  const registered: string[] = []
-  await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    {
-      client: fakeClient({ reply: REPLY }).client,
-      directory: "/work",
-      maxItems: 6,
-      waitForIdle: async () => true,
-      registerChild: (id) => registered.push(id),
-    },
-  )
-  assert.deepEqual(registered, ["ses_sum"])
-})
-
-test("a prompt error degrades to the fallback without a second child", async () => {
-  const { client, calls } = fakeClient({
-    reply: REPLY,
-    promptErrors: [{ message: "model overloaded" }],
-  })
-  const result = await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
-  )
-
-  assert.equal(result.degraded, "summarizer-fallback")
-  assert.match(result.error ?? "", /model overloaded/)
-  assert.equal(calls.create.length, 1)
-  assert.equal(calls.prompt.length, 1)
-})
-
-
-test("the last valid block wins when the final message is an acknowledgement", async () => {
-  const { client } = fakeClient({ reply: REPLY, trailingReply: "Done — all set." })
-  const result = await summarizeSession(
-    { sessionID: "ses_1", rendered: rendered() },
-    { client, directory: "/work", maxItems: 6, waitForIdle: async () => true },
-  )
-
-  assert.equal(result.degraded, undefined)
-  assert.equal(result.items.length, 2)
-  assert.match(result.items[0].title, /wireguard/i)
 })

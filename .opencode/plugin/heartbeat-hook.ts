@@ -566,9 +566,8 @@ export default (async ({ client, directory, ...rest }) => {
       stateDir,
       vaultDir,
       client: client as unknown as DrainPipeClient,
-      waitForIdle: (sid, ms) =>
-        waitForChildIdle(sid, ms !== undefined ? { confirmMs: Math.max(1, ms) } : {}),
       registerChild: (sid) => automationChildSessions.add(sid),
+      unregisterChild: (sid) => automationChildSessions.delete(sid),
       ...(drainDbFile === undefined ? {} : { dbFile: drainDbFile }),
       ledger: drainLedger,
       resolveProvider: async () => {

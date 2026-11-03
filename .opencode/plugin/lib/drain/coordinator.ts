@@ -88,6 +88,8 @@ export type DrainCoordinatorDeps = {
   /** Checked before every launch; a hit launches no later child. */
   budgetExhausted?: () => boolean
   now?: () => string
+  /** Test seam: lower the child poll interval. */
+  pollMs?: number
 }
 
 export type DrainCoordinator = {
@@ -248,6 +250,7 @@ export function createDrainCoordinator(deps: DrainCoordinatorDeps): DrainCoordin
       task.timed_out = outcome.timedOut
       task.error = outcome.error
     },
+    ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
   })
 
   const runTask = async (job: ChildJob): Promise<ChildOutcome> => {

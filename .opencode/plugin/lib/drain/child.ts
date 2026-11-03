@@ -79,6 +79,8 @@ export type ChildExecutorDeps = {
   onStart?: (sessionID: string, request: ChildRequest) => void
   onEnd?: (outcome: ChildOutcome) => void
   titles?: Partial<Record<ChildKind, string>>
+  /** Poll interval; tests lower it to avoid real-second deadlines. */
+  pollMs?: number
 }
 
 const DEFAULT_TITLES: Record<ChildKind, string> = {
@@ -196,6 +198,7 @@ export function createChildExecutor(deps: ChildExecutorDeps): ChildExecutorHandl
         promptUserID,
         timeoutMs: request.deadlineMs,
         signal: controller.signal,
+        ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
       })
     } catch (err) {
       await abort(sessionID)
