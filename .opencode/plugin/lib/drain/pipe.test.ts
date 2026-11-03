@@ -1122,3 +1122,41 @@ test("one malformed update under concurrency degrades once and still writes the 
   assert.match(writerPrompt, /Alpha Note/)
   assert.match(writerPrompt, /Gamma Note/)
 })
+
+test("the pass status file keeps its pass-level fields and adds the live task table", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient()
+  await runDrainPipe(deps(base, client, { config: { trigger_pending: 12 } }))
+
+  const status = JSON.parse(
+    await readFile(join(base.stateDir, "drain.current.json"), "utf8"),
+  )
+  assert.equal(status.state, "idle")
+  assert.equal(status.outcome, "completed")
+  assert.equal(status.pending, 0, "drainHealth keeps a numeric pending")
+  assert.ok(
+    status.oldest_pending_age_ms === null ||
+      typeof status.oldest_pending_age_ms === "number",
+    "drainHealth tolerates a null oldest age",
+  )
+  assert.match(status.updated_at, /^\d{4}-/)
+  assert.equal(status.pass_id, status.pass_id, "the pass id is recorded")
+  assert.equal(status.counts.total, 2, "one summarize task and one write task")
+  assert.deepEqual(
+    status.tasks.map((task: any) => task.state).sort(),
+    ["complete", "complete"],
+  )
+  assert.match(status.tasks_updated_at, /^\d{4}-/)
+
+  const disabled = await runDrainPipe(
+    deps({ ...base, stateDir: join(base.stateDir, "disabled") }, client, {
+      config: { enabled: false },
+    }),
+  )
+  assert.equal(disabled.outcome, "nothing")
+  const idle = JSON.parse(
+    await readFile(join(base.stateDir, "disabled", "drain.current.json"), "utf8"),
+  )
+  assert.equal(idle.state, "idle")
+  assert.equal(idle.outcome, "nothing")
+})

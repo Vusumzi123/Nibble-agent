@@ -210,7 +210,7 @@ export function createDrainCoordinator(deps: DrainCoordinatorDeps): DrainCoordin
       await deps.ledger?.write({
         source: "coordinator",
         outcome:
-          task.state === "complete"
+          task.state === "complete" || task.state === "running"
             ? "ok"
             : task.state === "timeout"
               ? "timeout"
@@ -220,6 +220,7 @@ export function createDrainCoordinator(deps: DrainCoordinatorDeps): DrainCoordin
         pass_id: deps.passId,
         task_id: task.id,
         kind: task.kind,
+        state: task.state,
         attempt: task.attempt,
         session: outcome.sessionID,
         stall_ms: task.stall_ms,

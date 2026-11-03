@@ -50,6 +50,7 @@ import type { ChildOutcome } from "./child.ts"
 import { openDrainSource, type DrainSource } from "./db.ts"
 import type { DrainLedger } from "./ledger.ts"
 import { renderSession, type RenderedSession } from "./render.ts"
+import { writeDrainStatus } from "./status.ts"
 import {
   summarizeSession,
   type SummarizeResult,
@@ -313,9 +314,51 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
   let pendingAfter: number | null = null
   let oldestAgeMs: number | null = null
   let stopped: DrainStopReason | null = null
+  let coordinator: ReturnType<typeof createDrainCoordinator> | null = null
+  let finalStatus: DrainPipeResult | null = null
 
   const budgetRemaining = (): number | null =>
     Number.isFinite(budget) ? Math.max(0, Math.floor(budget - totalTokens)) : null
+
+  const writeFinalStatus = async (result: DrainPipeResult): Promise<void> => {
+    try {
+      await writeDrainStatus(deps.stateDir, {
+        state: "idle",
+        trigger: deps.trigger ?? null,
+        pass: deps.pass ?? null,
+        pending: pendingAfter ?? result.pendingAfter ?? null,
+        oldest_pending_age_ms: oldestAgeMs ?? result.oldestPendingAgeMs ?? null,
+        next_due: new Date(Date.now() + Math.max(1, cfg.poll_seconds) * 1000).toISOString(),
+        pass_id: result.passId ?? passId,
+        outcome: result.outcome,
+        finished_at: new Date().toISOString(),
+      })
+    } catch (err) {
+      deps.onWarn?.("drain pipe: status write failed", err)
+    }
+  }
+
+  const coordinatorStatus = async (snapshot: CoordinatorSnapshot): Promise<void> => {
+    try {
+      await writeDrainStatus(deps.stateDir, {
+        state: snapshot.phase,
+        trigger: deps.trigger ?? null,
+        pass: deps.pass ?? null,
+        pending: pendingBefore,
+        oldest_pending_age_ms: oldestAgeMs,
+        next_due: null,
+        pass_id: passId,
+        phase: snapshot.phase,
+        started_at: snapshot.started_at,
+        ...(snapshot.finished_at ? { finished_at: snapshot.finished_at } : {}),
+        counts: snapshot.counts,
+        tasks: snapshot.tasks,
+        tasks_updated_at: snapshot.tasks_updated_at,
+      })
+    } catch (err) {
+      deps.onWarn?.("drain pipe: live status write failed", err)
+    }
+  }
 
   const emit = async (result: DrainPipeResult): Promise<DrainPipeResult> => {
     const elapsed = Math.round(clock() - started)
@@ -328,6 +371,9 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       passId,
       phaseMs: roundedPhases,
       overheadMs: Math.max(0, Math.round(elapsed - accounted)),
+      ...(pendingBefore !== null ? { pendingBefore } : {}),
+      ...(pendingAfter !== null ? { pendingAfter } : {}),
+      ...(oldestAgeMs !== null ? { oldestPendingAgeMs: oldestAgeMs } : {}),
     }
     try {
       await deps.ledger?.write({
@@ -359,6 +405,8 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     } catch {
       /* fail-open */
     }
+    finalStatus = enriched
+    if (!coordinator) await writeFinalStatus(enriched)
     return enriched
   }
 
@@ -425,7 +473,6 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     return oldest
   }
 
-  let coordinator: ReturnType<typeof createDrainCoordinator> | null = null
   try {
     coordinator = createDrainCoordinator({
       client: deps.client,
@@ -433,7 +480,10 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       config: cfg,
       passId,
       ...(deps.ledger ? { ledger: deps.ledger } : {}),
-      ...(deps.status ? { status: deps.status } : {}),
+      status: async (snapshot) => {
+        await coordinatorStatus(snapshot)
+        await deps.status?.(snapshot)
+      },
       ...(deps.registerChild ? { registerChild: deps.registerChild } : {}),
       ...(deps.unregisterChild ? { unregisterChild: deps.unregisterChild } : {}),
       budgetExhausted: () => totalTokens >= budget,
@@ -1049,6 +1099,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     } catch (err) {
       deps.onWarn?.("drain pipe: coordinator dispose failed", err)
     }
+    if (finalStatus) await writeFinalStatus(finalStatus)
     try {
       await source.close()
     } catch {
