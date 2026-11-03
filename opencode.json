@@ -5,8 +5,8 @@
   "permission": {
     "edit": {
       "*": "ask",
-      "**/Projects/**": "allow",
-      "**/projects/**": "allow"
+      "Projects/**": "allow",
+      "projects/**": "allow"
     },
     "bash": {
       "*": "allow"

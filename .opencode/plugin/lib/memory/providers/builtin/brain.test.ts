@@ -101,7 +101,33 @@ test("consolidate owns the prompt/spawn/report contract", async () => {
   assert.equal(result.session, "ses_writer")
   assert.match(writes[0].body.parts[0].text, /^Consolidation mode\./)
   assert.match(writes[0].body.parts[0].text, /### Knowledge item #1/)
-  assert.equal(writes[0].body.agent, "rag-brain")
+  assert.equal(writes[0].body.agent, "drain-writer")
+})
+
+test("the drain path spawns drain-writer and a 4-item prompt stays lean", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const writes: any[] = []
+  const c = client({ reply: report(["#1", "#2", "#3", "#4"]) })
+  const original = c.session.promptAsync
+  c.session.promptAsync = async (args: any) => {
+    writes.push(args)
+    return original(args)
+  }
+  const items = Array.from({ length: 4 }, (_, i) => ({
+    ...ITEM,
+    title: `${ITEM.title} ${i + 1}`,
+    summary: `${ITEM.summary} Copy ${i + 1}.`,
+  }))
+
+  const result = await provider.consolidate!(items, ctx(ws, c))
+
+  assert.equal(result.ok, true)
+  assert.equal(writes[0].body.agent, "drain-writer")
+  assert.ok(
+    Buffer.byteLength(writes[0].body.parts[0].text, "utf8") < 12_000,
+    "a default batch prompt stays under 12 KB",
+  )
 })
 
 test("an invalid report is a permanent error that does not consume items", async () => {
@@ -117,6 +143,55 @@ test("an invalid report is a permanent error that does not consume items", async
   assert.match(result.detail ?? "", /invalid report/)
   assert.match(warnings[0] ?? "", /invalid report \(no report fence\)/)
   assert.match(warnings[0] ?? "", /reply: no fences here/)
+})
+
+test("an aborted child's partial reply is a transient timeout, never a report", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const c = { ...ctx(ws, client({ reply: report(["#1"]) })), waitForIdle: async () => false }
+
+  const result = await provider.consolidate!([ITEM], c)
+
+  assert.equal(result.ok, false)
+  assert.equal(result.errorKind, "transient", "the batch retries without poisoning")
+  assert.equal(result.detail, "writer timed out")
+  assert.deepEqual(result.consumed, [])
+  assert.equal(result.late, true)
+})
+
+test("a fence-less report gets exactly one correction turn in the same child", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const rows = (text: string): unknown[] => [
+    {
+      info: { role: "assistant", tokens: { input: 10, output: 2 }, cost: 0.01 },
+      parts: [{ type: "text", text }],
+    },
+  ]
+  let creates = 0
+  let prompts = 0
+  const c = client({})
+  const create = c.session.create
+  c.session.create = async (args: any) => {
+    creates++
+    return create(args)
+  }
+  const promptAsync = c.session.promptAsync
+  c.session.promptAsync = async (args: any) => {
+    prompts++
+    return promptAsync(args)
+  }
+  c.session.messages = async () => ({
+    data: prompts >= 2 ? rows(report(["#1"])) : rows("no fences here"),
+  })
+
+  const result = await provider.consolidate!([ITEM], ctx(ws, c))
+
+  assert.equal(creates, 1, "the correction reuses the child session")
+  assert.equal(prompts, 2, "exactly one follow-up prompt")
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.consumed, [1])
+  assert.deepEqual(result.skipped, [])
 })
 
 test("a spawn failure is transient", async () => {

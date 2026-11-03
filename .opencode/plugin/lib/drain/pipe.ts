@@ -405,61 +405,90 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
 
     const planned: PlannedItem[] = []
     const sessionMaxTs = new Map<string, number>()
-    for (const rendered of renderings) {
-      // Budget check BEFORE the next unit (§2.2) — never mid-unit.
+
+    // Bounded worker pool: summarizers overlap, but launches and the result
+    // slots stay in discovery order. The budget is checked before each launch,
+    // never mid-unit — a hit stops new launches and lets in-flight children
+    // settle so their work and ledger rows are kept.
+    const summaries: Array<Awaited<ReturnType<typeof summarizeSession>> | null> = new Array(
+      renderings.length,
+    ).fill(null)
+    let nextLaunch = 0
+    const launchNext = (): number | null => {
+      if (nextLaunch >= renderings.length) return null
       if (totalTokens >= budget) {
         stopped = "token-budget"
-        break
+        return null
       }
-      const summarizeAt = clock()
-      const summary = await summarizeSession(
-        {
-          sessionID: rendered.sessionID,
-          rendered,
-          priorSummary: cursor.sessions[rendered.sessionID]?.summary || null,
-        },
-        {
-          client: deps.client,
-          directory: deps.directory,
-          model: cfg.summarize_model,
-          maxItems: cfg.max_items_per_session,
-          waitForIdle: deps.waitForIdle,
-          registerChild: deps.registerChild,
-          onWarn: deps.onWarn,
-        },
-      )
-      phaseMs.summarize += clock() - summarizeAt
+      return nextLaunch++
+    }
+    const summarizeWorker = async (): Promise<void> => {
+      for (;;) {
+        const index = launchNext()
+        if (index === null) return
+        const rendered = renderings[index]
+        const summary = await summarizeSession(
+          {
+            sessionID: rendered.sessionID,
+            rendered,
+            priorSummary: cursor.sessions[rendered.sessionID]?.summary || null,
+          },
+          {
+            client: deps.client,
+            directory: deps.directory,
+            model: cfg.summarize_model,
+            maxItems: cfg.max_items_per_session,
+            waitForIdle: deps.waitForIdle,
+            registerChild: deps.registerChild,
+            onWarn: deps.onWarn,
+          },
+        )
+        totalTokens += summary.tokens ?? 0
+        summaries[index] = summary
+
+        try {
+          await deps.ledger?.write({
+            source: "summarizer",
+            outcome: summary.degraded ? "degraded" : summary.error ? "error" : "ok",
+            model: cfg.summarize_model || null,
+            agent: "session-summarizer",
+            session: summary.sessionID ?? null,
+            pass_id: passId,
+            item: rendered.sessionID,
+            attempt: summary.attempts ?? null,
+            prompt_bytes: summary.promptBytes,
+            reply_bytes: summary.replyBytes,
+            wall_ms: summary.wallMs,
+            spawn_ms: summary.spawnMs ?? null,
+            queue_ms: summary.queueMs ?? null,
+            run_ms: summary.runMs ?? null,
+            steps: summary.steps ?? null,
+            span_ms: summary.spanMs ?? null,
+            model_ms: summary.modelMs ?? null,
+            tool_ms: summary.toolMs ?? null,
+            tokens: summary.tokens ?? null,
+            ...(summary.lateReply ? { late: true } : {}),
+            error: summary.error ?? null,
+          })
+        } catch {
+          /* fail-open */
+        }
+      }
+    }
+
+    const summarizeStarted = clock()
+    const poolSize = Math.max(1, Math.min(cfg.summarize_concurrency, renderings.length))
+    await Promise.all(Array.from({ length: poolSize }, () => summarizeWorker()))
+    phaseMs.summarize += clock() - summarizeStarted
+
+    // Fold in discovery order, not completion order: the first degraded/error
+    // and the last reply size stay deterministic under any interleaving.
+    for (const [index, rendered] of renderings.entries()) {
+      const summary = summaries[index]
+      if (!summary) continue
       if (summary.degraded) degraded ??= summary.degraded
       if (summary.error) error ??= summary.error
       summarizeReplyBytes = summary.replyBytes ?? summarizeReplyBytes
-      totalTokens += summary.tokens ?? 0
-
-      try {
-        await deps.ledger?.write({
-          source: "summarizer",
-          outcome: summary.degraded ? "degraded" : summary.error ? "error" : "ok",
-          model: cfg.summarize_model || null,
-          agent: "session-summarizer",
-          session: summary.sessionID ?? null,
-          pass_id: passId,
-          item: rendered.sessionID,
-          attempt: summary.attempts ?? null,
-          prompt_bytes: summary.promptBytes,
-          reply_bytes: summary.replyBytes,
-          wall_ms: summary.wallMs,
-          spawn_ms: summary.spawnMs ?? null,
-          queue_ms: summary.queueMs ?? null,
-          run_ms: summary.runMs ?? null,
-          steps: summary.steps ?? null,
-          span_ms: summary.spanMs ?? null,
-          model_ms: summary.modelMs ?? null,
-          tool_ms: summary.toolMs ?? null,
-          tokens: summary.tokens ?? null,
-          error: summary.error ?? null,
-        })
-      } catch {
-        /* fail-open */
-      }
 
       const ts = Math.max(...rendered.turns.map((turn) => turn.time))
       sessionMaxTs.set(rendered.sessionID, Math.max(sessionMaxTs.get(rendered.sessionID) ?? 0, ts))
@@ -601,7 +630,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           source: "writer",
           outcome: chunkReport.ok ? "ok" : "error",
           model: cfg.writer_model || null,
-          agent: "rag-brain",
+          agent: cfg.writer_agent,
           pass_id: passId,
           chunk: chunkIndex,
           items: chunk.items.length,
@@ -619,6 +648,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
           cursor_before: cursorBefore,
           cursor_after: cursorBefore,
           session: chunkReport.session ?? null,
+          ...(chunkReport.late ? { late: true } : {}),
           error: chunkReport.detail ?? null,
           ...(deps.trigger ? { trigger: deps.trigger } : {}),
           ...(deps.pass !== undefined ? { pass: deps.pass } : {}),

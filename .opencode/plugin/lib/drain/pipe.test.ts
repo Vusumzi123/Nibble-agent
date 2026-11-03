@@ -87,6 +87,9 @@ function fakeClient(opts: {
         sent.set(args.path.id as string, args.body.parts?.[0]?.text ?? "")
         return { response: { ok: true } }
       },
+      async abort() {
+        return { response: { ok: true } }
+      },
       async messages(args) {
         const id = args.path.id as string
         if (opts.sdkTurns && opts.sdkTurns[id]) return { data: opts.sdkTurns[id] }
@@ -269,7 +272,7 @@ test("a valid run advances the cursor, stores continuity, and ledgers both spawn
   assert.equal(cursor.watermark_ts, 1000)
   assert.match(cursor.sessions["top-1"].summary, /Restart wg0/)
 
-  const writerPrompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
+  const writerPrompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
   assert.match(writerPrompt, /^Consolidation mode\./)
   assert.match(writerPrompt, /### Knowledge item #1/)
   const summarizerPrompt = prompts.find((p) => p.body.agent === "session-summarizer")?.body.parts[0].text
@@ -372,7 +375,7 @@ test("a valid empty summary advances the cursor without spawning a writer", asyn
   assert.equal(result.degraded, undefined)
   assert.equal(result.cursorAfter, 1000)
   assert.equal(
-    prompts.some((p) => p.body.agent === "rag-brain"),
+    prompts.some((p) => p.body.agent === "drain-writer"),
     false,
     "no writer spawn for an empty batch",
   )
@@ -441,7 +444,7 @@ test("summarizer fallback still runs the writer and degrades the result", async 
   assert.equal(result.degraded, "summarizer-fallback")
   assert.match(result.error ?? "", /malformed summarizer reply/)
   assert.equal(result.consolidated, 1)
-  assert.ok(prompts.some((p) => p.body.agent === "rag-brain"))
+  assert.ok(prompts.some((p) => p.body.agent === "drain-writer"))
 })
 
 test("schema mismatch degrades to the SDK lane and still completes", async () => {
@@ -483,9 +486,57 @@ test("candidate prefetch is included when the vault has a matching note", async 
   const { client, prompts } = fakeClient({ writerReply: report(["#1"]) })
   await runDrainPipe(deps(base, client))
 
-  const prompt = prompts.find((p) => p.body.agent === "rag-brain")?.body.parts[0].text
+  const prompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
   assert.match(prompt, /Candidate existing notes/)
   assert.match(prompt, /Wireguard Setup/)
+})
+
+test("a late summarizer reply is marked in its ledger row", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const ledger = createDrainLedger({ logDir: join(base.stateDir, "logs") })
+
+  const result = await runDrainPipe(
+    deps(base, client, {
+      ledger,
+      waitForIdle: async (id) => !id.startsWith("ses_sum_"),
+    }),
+  )
+
+  assert.equal(result.outcome, "completed")
+  await ledger.flush()
+  const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  const summarizer = lines.find((line) => line.source === "summarizer")
+  assert.equal(summarizer.late, true, "the capped child's late reply is explainable")
+  assert.equal(lines.find((line) => line.source === "writer").late, undefined)
+})
+
+test("a late writer reply is telemetry only and never parsed as a report", async () => {
+  const base = { ...(await workspace()), dbFile: await seedDb() }
+  const { client } = fakeClient({ writerReply: report(["#1"]) })
+  const ledger = createDrainLedger({ logDir: join(base.stateDir, "logs") })
+
+  const result = await runDrainPipe(
+    deps(base, client, {
+      ledger,
+      waitForIdle: async (id) => id !== "ses_writer",
+    }),
+  )
+
+  assert.equal(result.outcome, "error")
+  assert.match(result.error ?? "", /writer timed out/)
+  assert.equal(result.cursorAfter, 0, "a truncated reply cannot advance the cursor")
+  await ledger.flush()
+  const lines = (await readFile(join(base.stateDir, "logs", DRAIN_LEDGER_FILE), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+  const writer = lines.find((line) => line.source === "writer")
+  assert.equal(writer.late, true)
+  assert.match(writer.error, /writer timed out/)
 })
 
 test("a completed batch is not reprocessed on the next run", async () => {
@@ -791,4 +842,207 @@ test("a rerun after a completed pass is a no-op", async () => {
   assert.equal(second.sessions, 0)
   assert.equal(second.items, 0)
   assert.equal(prompts.length, spawned, "no summarizer or writer spawn on a rerun")
+})
+
+type PoolSession = { id: string; text: string; time: number }
+
+function poolDb(opts: {
+  sessions: PoolSession[]
+  summaryReplyFor: (prompt: string) => string
+  writerReply: string
+  waitForIdle?: (id: string) => Promise<boolean>
+}): { client: DrainPipeClient; prompts: any[] } {
+  const sdkSessions = opts.sessions.map((session) => ({
+    id: session.id,
+    directory: PROJECT,
+    title: session.id,
+    time: { created: 0, updated: session.time },
+  }))
+  const sdkTurns = Object.fromEntries(
+    opts.sessions.map((session) => [
+      session.id,
+      [
+        {
+          info: {
+            id: `${session.id}:1`,
+            sessionID: session.id,
+            role: "user",
+            time: { created: session.time },
+          },
+          parts: [{ type: "text", text: session.text }],
+        },
+      ],
+    ]),
+  )
+  return fakeClient({
+    sdkSessions,
+    sdkTurns,
+    summaryReplyFor: opts.summaryReplyFor,
+    writerReply: opts.writerReply,
+    ...(opts.waitForIdle ? { waitForIdle: opts.waitForIdle } : {}),
+  })
+}
+
+function itemReply(title: string, summary: string): string {
+  return [
+    "=== ITEM ===",
+    `TITLE: ${title}`,
+    "TAGS: ops",
+    `SUMMARY: ${summary}`,
+    "ATOMS:",
+  ].join("\n")
+}
+
+const POOL_SESSIONS: PoolSession[] = [
+  { id: "ses_a", text: "alpha topic: restart the tunnel", time: 1000 },
+  { id: "ses_b", text: "beta topic: rotate backups", time: 2000 },
+  { id: "ses_c", text: "gamma topic: renew certificates", time: 3000 },
+]
+
+function poolSummary(prompt: string): string {
+  if (prompt.includes("alpha topic")) return itemReply("Alpha Note", "Alpha knowledge.")
+  if (prompt.includes("beta topic")) return itemReply("Beta Note", "Beta knowledge.")
+  return itemReply("Gamma Note", "Gamma knowledge.")
+}
+
+function pooledDeps(
+  base: { stateDir: string; vaultDir: string },
+  client: DrainPipeClient,
+  opts: {
+    concurrency: number
+    waitForIdle?: (id: string) => Promise<boolean>
+    tokenBudget?: number
+  },
+): DrainPipeDeps {
+  return deps(
+    { ...base, dbFile: join(base.stateDir, "missing.db") },
+    client,
+    {
+      config: {
+        summarize_concurrency: opts.concurrency,
+        ...(opts.tokenBudget !== undefined ? { token_budget: opts.tokenBudget } : {}),
+      },
+      ...(opts.waitForIdle ? { waitForIdle: opts.waitForIdle } : {}),
+    },
+  )
+}
+
+async function waitUntil(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (cond()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error("waitUntil timed out")
+}
+
+test("summarizers overlap up to summarize_concurrency and fold in discovery order", async () => {
+  const base = await workspace()
+  const started: string[] = []
+  const gates = new Map<string, (idle: boolean) => void>()
+  let inFlight = 0
+  let maxInFlight = 0
+  const waitForIdle = (id: string): Promise<boolean> => {
+    if (!id.startsWith("ses_sum_")) return Promise.resolve(true)
+    started.push(id)
+    inFlight++
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    if (id === "ses_sum_1" || id === "ses_sum_2") {
+      return new Promise<boolean>((resolve) => {
+        gates.set(id, (idle) => {
+          inFlight--
+          resolve(idle)
+        })
+      })
+    }
+    inFlight--
+    return Promise.resolve(true)
+  }
+  const { client, prompts } = poolDb({
+    sessions: POOL_SESSIONS,
+    summaryReplyFor: poolSummary,
+    writerReply: report(["#1", "#2", "#3"]),
+    waitForIdle,
+  })
+
+  const running = runDrainPipe(pooledDeps(base, client, { concurrency: 2, waitForIdle }))
+  await waitUntil(() => started.length >= 2)
+  assert.equal(started.length, 2, "the second child starts before the first settles")
+  assert.equal(maxInFlight, 2, "two summarizers run at once")
+
+  gates.get("ses_sum_1")!(true)
+  gates.get("ses_sum_2")!(true)
+  const pooled = await running
+
+  assert.equal(pooled.outcome, "degraded")
+  assert.equal(pooled.items, 3)
+  assert.equal(pooled.consolidated, 3)
+  assert.equal(pooled.cursorAfter, 3000)
+  assert.equal(
+    prompts.filter((p) => p.body.agent === "session-summarizer").length,
+    3,
+    "each discovered session is summarized exactly once",
+  )
+
+  const sequentialBase = await workspace()
+  const sequentialClient = poolDb({
+    sessions: POOL_SESSIONS,
+    summaryReplyFor: poolSummary,
+    writerReply: report(["#1", "#2", "#3"]),
+  })
+  const sequential = await runDrainPipe(
+    pooledDeps(sequentialBase, sequentialClient.client, { concurrency: 1 }),
+  )
+  assert.equal(sequential.items, pooled.items)
+  assert.equal(sequential.consolidated, pooled.consolidated)
+  assert.equal(sequential.skipped, pooled.skipped)
+  assert.equal(sequential.cursorAfter, pooled.cursorAfter)
+  assert.equal(sequential.outcome, pooled.outcome)
+})
+
+test("a budget stop during summarization launches no later child and reports the one that ran", async () => {
+  const base = await workspace()
+  const { client, prompts } = poolDb({
+    sessions: POOL_SESSIONS,
+    summaryReplyFor: poolSummary,
+    writerReply: report(["#1"]),
+  })
+
+  const result = await runDrainPipe(
+    pooledDeps(base, client, { concurrency: 1, tokenBudget: 7 }),
+  )
+
+  assert.equal(result.stopped, "token-budget")
+  assert.equal(result.outcome, "degraded")
+  assert.equal(result.degraded, "budget-exhausted")
+  assert.equal(result.items, 1, "the summary that completed is still reported")
+  assert.equal(
+    prompts.filter((p) => p.body.agent === "session-summarizer").length,
+    1,
+    "the budget blocks the second and third launches",
+  )
+  assert.equal(
+    prompts.some((p) => p.body.agent === "drain-writer"),
+    false,
+    "the budget is already spent before the writer chunk",
+  )
+})
+
+test("one malformed update under concurrency degrades once and still writes the rest", async () => {
+  const base = await workspace()
+  const { client, prompts } = poolDb({
+    sessions: POOL_SESSIONS,
+    summaryReplyFor: (prompt) =>
+      prompt.includes("beta topic") ? "not a block reply" : poolSummary(prompt),
+    writerReply: report(["#1", "#2", "#3"]),
+  })
+
+  const result = await runDrainPipe(pooledDeps(base, client, { concurrency: 2 }))
+
+  assert.equal(result.outcome, "degraded")
+  assert.equal(result.degraded, "sdk-fallback", "the SDK lane already marked the source")
+  assert.match(result.error ?? "", /malformed summarizer reply/)
+  assert.equal(result.consolidated, 3, "the writer still received the surviving items")
+  const writerPrompt = prompts.find((p) => p.body.agent === "drain-writer")?.body.parts[0].text
+  assert.match(writerPrompt, /Alpha Note/)
+  assert.match(writerPrompt, /Gamma Note/)
 })

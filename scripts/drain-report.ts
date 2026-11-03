@@ -113,7 +113,12 @@ for (const entry of entries) {
 const agents: Record<string, AgentStats> = {}
 for (const entry of entries) {
   if (entry.source !== "summarizer" && entry.source !== "writer") continue
-  const name = entry.source === "summarizer" ? "session-summarizer" : "rag-brain (writer)"
+  const name =
+    typeof entry.agent === "string" && entry.agent
+      ? entry.agent
+      : entry.source === "summarizer"
+        ? "session-summarizer"
+        : "rag-brain (writer)"
   const stats = (agents[name] ??= {
     calls: 0,
     errors: 0,

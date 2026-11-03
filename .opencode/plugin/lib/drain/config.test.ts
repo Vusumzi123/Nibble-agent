@@ -11,9 +11,11 @@ test("parseDrainConfig overlays known keys", () => {
       "drain:",
       "  enabled: false",
       "  batch_sessions: 9",
+      "  summarize_concurrency: 3",
       "  max_items_per_batch: 5",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
+      "  writer_agent: custom-writer",
       "  poison_attempts: 0",
       "  exclude_missions: [drain, staleness]",
       "  trigger_pending: 20",
@@ -33,9 +35,11 @@ test("parseDrainConfig overlays known keys", () => {
   )
   assert.equal(parsed.enabled, false)
   assert.equal(parsed.batch_sessions, 9)
+  assert.equal(parsed.summarize_concurrency, 3)
   assert.equal(parsed.max_items_per_batch, 5)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
+  assert.equal(parsed.writer_agent, "custom-writer")
   assert.equal(parsed.poison_attempts, 0)
   assert.deepEqual(parsed.exclude_missions, ["drain", "staleness"])
   assert.equal(parsed.trigger_pending, 20)
@@ -118,6 +122,30 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
   assert.equal(cfg.cursor_migration, "carry", "unknown migration mode falls back to carry")
 })
 
+test("summarize_concurrency defaults to 2 and clamps to 1..batch_sessions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  const write = (value: string) =>
+    writeFile(
+      join(dir, ".opencode", "sysop-config.yaml"),
+      ["drain:", "  batch_sessions: 3", `  summarize_concurrency: ${value}`].join("\n"),
+      "utf8",
+    )
+
+  await writeFile(join(dir, ".opencode", "sysop-config.yaml"), "drain:", "utf8")
+  assert.equal((await readDrainConfig(dir)).summarize_concurrency, 2, "default is 2")
+
+  await write("0")
+  assert.equal((await readDrainConfig(dir)).summarize_concurrency, 1, "zero clamps up to 1")
+
+  await write("99")
+  assert.equal(
+    (await readDrainConfig(dir)).summarize_concurrency,
+    3,
+    "values above the batch clamp to batch_sessions",
+  )
+})
+
 test("invalid values fall back and models may be empty", async () => {
   const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
   await mkdir(join(dir, ".opencode"), { recursive: true })
@@ -148,5 +176,7 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.poison_attempts, DEFAULT_DRAIN.poison_attempts)
   assert.equal(cfg.cursor_file, DEFAULT_DRAIN.cursor_file)
   assert.equal(cfg.writer_model, "")
+  assert.equal(cfg.writer_agent, DEFAULT_DRAIN.writer_agent)
   assert.equal(cfg.summarize_model, "")
+  assert.equal(cfg.max_items_per_batch, 4, "the writer batch default is four items")
 })

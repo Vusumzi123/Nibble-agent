@@ -129,14 +129,17 @@ fully-reported sessions.
 | --- | ------- |
 | `enabled` | Master switch (`false` = no `drain-pass` item is enqueued). |
 | `cursor_file` | Leaf under `<state>` → `.opencode/state/drain-cursor.json`. Holds the v2 watermark, per-session marks + continuity summaries, and the blocked/backoff counter. |
-| `writer_model` | `rag-brain` writer model; `""` = the agent default. |
+| `writer_model` | Drain writer model; `""` = the agent default. |
+| `writer_agent` | Drain-only writer agent (default `drain-writer`); `rag-brain` stays the interactive writer. Agent files are read at init, not hot-reloaded. |
 | `summarize_model` | `session-summarizer` model; `""` = the agent default. |
 | `batch_sessions` | Max top-level sessions per pass. |
+| `summarize_concurrency` | Concurrent `session-summarizer` children per pass (default 2, clamped to `1..batch_sessions`). Writer chunks stay serial. |
 | `initial_lookback_hours` | Fresh-cursor start: only consolidate sessions active in the last N hours (`0` = whole history). |
 | `max_turns_per_session` | Cap on fetched text parts per session. |
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
-| `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 8). |
+| `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 4). |
+| `child_stall_ms` | Bounded idle wait for one child, summarizer or writer (default 240 000 ms, floor 1 000). Replaces the 600 s mission stall for drain children. |
 | `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness, dream]`. |
 | `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |

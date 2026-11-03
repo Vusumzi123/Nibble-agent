@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Drain-only writer agent.** `.opencode/agents/drain-writer.md` is a lean
+  consolidation writer (7.4 KB, `steps: 20`, model pinned to the live
+  `rag-brain` default) used only by the drain pipe. `rag-brain` stays the
+  interactive writer. The agent gets the same anchored `Brain/**` edit scope
+  through `applyVaultScope`, and `drain.writer_agent` selects it.
+- **Drain process guide.** `wiki/Drain-Process.md` documents the producer,
+  consumer, stage-by-stage pass, budgets, outcomes, configuration, and
+  troubleshooting, with the intent-to-tick flow diagram.
 - **Flight sleep cooldown ring.** The Vitals panel replaces the plain `sleep`
   row with a 20px ring plus `woken · Nm left` while the agent is woken during
   quiet hours. `readSleep` now reports `cooldown_total_ms` (from
@@ -14,6 +22,38 @@
   warning under 25% and danger at zero, where it shows `due` until the next
   heartbeat tick reconciles `woken → dreaming`. Reusable as
   `db-cooldown-ring` for a later top-strip cell.
+
+### Changed
+
+- **Drain throughput.** Summarizers now run concurrently:
+  `drain.summarize_concurrency` (default 2, clamped to `1..batch_sessions`)
+  bounds the fan-out, while launches and the result fold stay in discovery
+  order and writer chunks stay serial. Every summarizer and writer wait is
+  bounded by `drain.child_stall_ms` (default 240 s) instead of the 600 s
+  mission stall; a timed-out child is still read for a late reply and then
+  aborted. An aborted child's text is never parsed as a report — the batch
+  fails transiently and retries. A completed reply with no report fence gets
+  one correction turn in the same child session. The writer defaults to
+  `drain-writer` and `max_items_per_batch` dropped from 8 to 4. Writer ledger
+  rows and `scripts/drain-report.ts` now use the actual agent name.
+- **Drain ledger attribution.** Summarizer and writer rows carry `late: true`
+  when the reply arrived after the idle deadline, so a capped wait is
+  explainable from the ledger without guessing from `wall_ms`.
+- **RAG-brain prompt slimmed.** `rag-brain.md` is now storage-only: 7.6 KB
+  (from 25.4 KB). Retrieval guidance was removed because `rag-search` owns it;
+  Kanban, the drain report contract, and the changelog format moved to
+  on-demand pages in `reference/`. `writer-contract.test.ts` now enforces the
+  size cap and keeps the drain contract on `drain-writer` and
+  `reference/consolidation.md`.
+
+### Fixed
+
+- **README test command.** The development block now runs the recursive glob
+  `node --test '.opencode/plugin/lib/**/*.test.ts'`; the old two-glob form
+  missed nested test directories.
+- **Project edit permission globs.** `opencode.json` now matches `Projects/**`
+  and `projects/**` directly instead of `**/Projects/**`, so the documented
+  project roots receive the intended edit permission.
 
 ## 2026-11-01
 

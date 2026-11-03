@@ -134,6 +134,7 @@ The in-repo wiki starts at [`wiki/Home.md`](wiki/Home.md):
 - [Adding scheduled markdown jobs](wiki/Adding-Scheduled-Markdown-Jobs.md)
 - [Chron fire listeners](wiki/Chron-Fire-Listeners.md)
 - [How mission producers work](wiki/Mission-Producers.md)
+- [The drain process](wiki/Drain-Process.md)
 - [Registering generic missions](wiki/Registering-Generic-Missions.md)
 - [Registering user tasks](wiki/Registering-User-Tasks.md)
 
@@ -215,7 +216,7 @@ Ships fully deterministic out of the box; two features are opt-in:
 
 ```bash
 npm --prefix .opencode ci                          # test-only dependency
-node --test .opencode/plugin/lib/*.test.ts .opencode/plugin/lib/drain/*.test.ts
+node --test '.opencode/plugin/lib/**/*.test.ts'
 python3 scripts/tests/test_provider_resolve.py     # decision-provider resolver
 ```
 

@@ -2,9 +2,10 @@
 // These take ALREADY-RESOLVED absolute root dirs (see lib/paths.ts) so the
 // logic is deterministic and unit-testable without file I/O.
 //
-// Vault scope  (rag-brain edits + markdown-vault MCP path + MCP write tools):
-//               <vaultDir>   e.g. .../Nibble/Brain
-//               Granted ONLY to the rag-brain sub-agent. The main agent and
+// Vault scope  (rag-brain/drain-writer edits + markdown-vault MCP path + write
+//               tools): <vaultDir>   e.g. .../Nibble/Brain
+//               Granted ONLY to the two vault-writer sub-agents: rag-brain
+//               (interactive) and drain-writer (drain pipe). The main agent and
 //               every other sub-agent keep `edit: ask` on the vault — they
 //               have no legitimate silent vault-write need, so a rogue write
 //               stops at the prompt (least privilege). The MCP write tools are
@@ -102,17 +103,20 @@ export const VAULT_MCP_WRITE_TOOLS = [
   "markdown-vault_system",
 ] as const
 
-// Apply the vault scope: rag-brain edit allow + MCP VAULT_PATH + MCP write
+// Apply the vault scope: vault-writer edit allow + MCP VAULT_PATH + MCP write
 // tools. The top-level `permission.edit` is deliberately left untouched — the
 // main agent must stay on `ask` for vault writes.
+export const VAULT_WRITER_AGENTS = ["rag-brain", "drain-writer"] as const
+
 export function applyVaultScope(cfg: any, vaultDirAbs: string, worktreeAbs?: string): void {
   if (!vaultDirAbs) return
 
-  const ragBrain = cfg.agent?.["rag-brain"]
-  if (ragBrain) {
-    ragBrain.permission = ragBrain.permission ?? {}
-    ragBrain.permission.edit = vaultEditRules(vaultDirAbs, worktreeAbs)
-    for (const tool of VAULT_MCP_WRITE_TOOLS) ragBrain.permission[tool] = "allow"
+  for (const name of VAULT_WRITER_AGENTS) {
+    const writer = cfg.agent?.[name]
+    if (!writer) continue
+    writer.permission = writer.permission ?? {}
+    writer.permission.edit = vaultEditRules(vaultDirAbs, worktreeAbs)
+    for (const tool of VAULT_MCP_WRITE_TOOLS) writer.permission[tool] = "allow"
   }
 
   const vaultMcp = cfg.mcp?.["markdown-vault"]

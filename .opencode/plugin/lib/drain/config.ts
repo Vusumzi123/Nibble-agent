@@ -11,13 +11,19 @@ export type DrainConfig = {
   enabled: boolean
   cursor_file: string
   writer_model: string
+  /** Drain-only writer agent; rag-brain stays the interactive writer. */
+  writer_agent: string
   summarize_model: string
   batch_sessions: number
+  /** Concurrent summarizer children per pass (1..batch_sessions). */
+  summarize_concurrency: number
   initial_lookback_hours: number
   max_turns_per_session: number
   max_session_bytes: number
   max_items_per_session: number
   max_items_per_batch: number
+  /** Bounded idle wait for one child (summarizer or writer), in ms. */
+  child_stall_ms: number
   prefetch_candidates: number
   continuity_turns: number
   continuity_sessions: number
@@ -55,13 +61,16 @@ export const DEFAULT_DRAIN: DrainConfig = {
   enabled: true,
   cursor_file: "drain-cursor.json",
   writer_model: "",
+  writer_agent: "drain-writer",
   summarize_model: "",
   batch_sessions: 5,
+  summarize_concurrency: 2,
   initial_lookback_hours: 24,
   max_turns_per_session: 40,
   max_session_bytes: 24000,
   max_items_per_session: 6,
-  max_items_per_batch: 8,
+  max_items_per_batch: 4,
+  child_stall_ms: 240_000,
   prefetch_candidates: 3,
   continuity_turns: 6,
   continuity_sessions: 20,
@@ -85,11 +94,13 @@ export const DEFAULT_DRAIN: DrainConfig = {
 const BOOL_KEYS = new Set(["enabled"])
 const INT_KEYS = new Set([
   "batch_sessions",
+  "summarize_concurrency",
   "initial_lookback_hours",
   "max_turns_per_session",
   "max_session_bytes",
   "max_items_per_session",
   "max_items_per_batch",
+  "child_stall_ms",
   "prefetch_candidates",
   "continuity_turns",
   "continuity_sessions",
@@ -161,6 +172,11 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
   const cfg = await readSection(directory, "drain", DEFAULT_DRAIN, { coerce: DRAIN_COERCE })
 
   cfg.batch_sessions = atLeast(cfg.batch_sessions, 1, DEFAULT_DRAIN.batch_sessions)
+  // A pool wider than the discovery batch cannot be used; zero collapses to 1
+  // rather than silently reverting to the default.
+  cfg.summarize_concurrency = Number.isFinite(cfg.summarize_concurrency)
+    ? Math.min(cfg.batch_sessions, Math.max(1, Math.floor(cfg.summarize_concurrency)))
+    : DEFAULT_DRAIN.summarize_concurrency
   cfg.initial_lookback_hours = atLeast(
     cfg.initial_lookback_hours,
     0,
@@ -182,6 +198,9 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     1,
     DEFAULT_DRAIN.max_items_per_batch,
   )
+  cfg.child_stall_ms = Number.isFinite(cfg.child_stall_ms)
+    ? Math.max(1000, Math.floor(cfg.child_stall_ms))
+    : DEFAULT_DRAIN.child_stall_ms
   cfg.prefetch_candidates = atLeast(
     cfg.prefetch_candidates,
     0,
@@ -231,6 +250,9 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     cfg.cursor_file = DEFAULT_DRAIN.cursor_file
   }
   if (typeof cfg.writer_model !== "string") cfg.writer_model = DEFAULT_DRAIN.writer_model
+  if (typeof cfg.writer_agent !== "string" || !cfg.writer_agent.trim()) {
+    cfg.writer_agent = DEFAULT_DRAIN.writer_agent
+  }
   if (typeof cfg.summarize_model !== "string") cfg.summarize_model = DEFAULT_DRAIN.summarize_model
   if (cfg.cursor_migration !== "recover") cfg.cursor_migration = "carry"
   cfg.exclude_missions =

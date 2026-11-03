@@ -116,6 +116,27 @@ test("applyVaultScope allows the vault-confined MCP write tools for rag-brain on
   )
 })
 
+test("applyVaultScope gives drain-writer the same anchored Brain edit scope", () => {
+  const cfg: any = {
+    agent: {
+      "drain-writer": {
+        permission: { task: "deny", edit: { "*": "deny" } },
+      },
+    },
+    mcp: { "markdown-vault": { environment: {} } },
+  }
+  applyVaultScope(cfg, vaultDir(), DIR)
+
+  const edit = cfg.agent["drain-writer"].permission.edit
+  assert.equal(edit["*"], "ask")
+  assert.equal(edit[`${vaultDir()}/**`], "allow")
+  assert.equal(edit[`${strip(vaultDir())}/**`], "allow")
+  assert.equal(edit[`${DEFAULT_PATHS.vault}/**`], "allow", "worktree-relative form")
+  assert.equal(cfg.agent["drain-writer"].permission.task, "deny", "existing denies are kept")
+  assert.equal(cfg.agent["drain-writer"].permission["markdown-vault_vault"], "allow")
+  assert.equal(cfg.agent["drain-writer"].permission["markdown-vault_edit"], undefined)
+})
+
 test("applyLogScope appends anchored allows to security-locks, preserving deny", () => {
   const cfg: any = {
     agent: {
