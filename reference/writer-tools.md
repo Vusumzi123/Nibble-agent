@@ -80,6 +80,12 @@ Use these byte-preserving replacements instead:
 | "What links to my backup note?" | `view.backlinks("Backup and Recovery.md")` |
 | "What's in the AI folder?" | `vault.list("AI")` then `bulk_read` |
 | "Tell me about my router setup" | `semantic_search("router setup")` + `global_search("router")` |
-| "Remember to update certs in March" | Go to Stage 5 — append to relevant note |
-| User shares a config detail or fix | Go to Stage 5 — create or append to the topic's note |
-| "I just set up XYZ with this config..." | Proactively save as a new note or section |
+| "Remember to update certs in March" | Append to the relevant note |
+| User shares a config detail or fix | Create or append to the topic's note |
+| "I just set up XYZ with this config..." | Save as a new note or section |
+
+## Related on-demand pages
+
+- `reference/kanban.md` — board frontmatter, lane/card format, block IDs.
+- `reference/consolidation.md` — drain item-label and report-fence contract.
+- `reference/vault-meta.md` — changelog format and structural-change rules.
