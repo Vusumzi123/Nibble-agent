@@ -17,7 +17,9 @@ export type ProducerCtx = {
   quiet: boolean
   signals: HeartbeatSignals
   missions: Mission[]
-  /** Ids already in the pool; a producer never re-adds one. */
+  /** Store-backed dedupe; a producer never re-adds a queued or running id. */
+  has?: (id: string) => boolean
+  /** In-memory fallback for pure producer tests. */
   queuedIds?: ReadonlySet<string>
   /** Injectable randomness for stochastic candidacy (tests). */
   random?: () => number

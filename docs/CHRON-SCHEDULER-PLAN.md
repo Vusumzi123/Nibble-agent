@@ -59,7 +59,8 @@ Non-goals:
 - No LLM work inside chron or inside producers. Producers are deterministic.
 - No concurrent execution. One consumer session at a time, guarded by the
   existing ownership lease.
-- No producer writes `work-queue.json`. The consumer stays the sole writer.
+- Producers insert `queued` rows into `state/work.db` only; the consumer owns
+  every state transition (`running`, `failed`, settle).
 - No hand-rolled cron parser. Use `croner` for cron/DST correctness.
 - No changes to the vault, Brain notes, or the live Kael `.opencode` tree.
 - No new work kind for prompt jobs in v1; reuse the `user-task` rail.
@@ -94,18 +95,18 @@ Non-goals:
 ```text
 chron (own wake, own state, own log)
   |-- MD jobs (.opencode/schedule/*.md) --fire--> bridge --> user-task files
-  |-- code jobs (register/handler) ------fire--> producer --> intent files
-  |-- mission scan (code job, every 1m) -> intents (mission/staleness)
-  |-- drain scan   (code job, every 15m)-> intents (drain-pass)
-  |-- push sources (emit) --------------> intents
+  |-- code jobs (register/handler) ------fire--> producer --> queued rows
+  |-- mission scan (code job, every 1m) -> store.enqueue (mission/staleness)
+  |-- drain scan   (code job, every 15m)-> store.enqueue (drain-pass)
+  |-- push sources (emit) --------------> store.enqueue
 
-state/inbox/<producer>/<id>.json  (intents, atomic, unique)
+state/work.db                     (work_items + scheduler_state + lease)
 state/user-tasks/*.md             (prompt-job occurrences, existing rail)
                  |
                  v
 heartbeat consumer session (lease)
-  merge intents -> ingest user tasks -> prune -> snapshot
-  loop: pickFair -> run one -> settle -> save -> repeat (reorder each pass)
+  recover -> prune -> ingest user tasks -> enqueue -> snapshot
+  loop: claim -> run one -> settle -> repeat (reorder each pass)
   caps between items: items / wall / tokens
   if backlog remains after a cap: wake 0; else sleep to heartbeat.frequency
 ```
@@ -139,13 +140,14 @@ Adapter files outside the core:
 ### 4.1 Independence rules
 
 - Chron never reads `autonomy.*`, never loads missions, never calls
-  `createTask`, never touches `work-queue.json`.
+  `createTask`, never mutates the work store beyond `enqueue`/`has`.
 - Chron owns `state/chron.json`, its own log (`log/chron.log`), and its own
   code-freshness/restart behavior.
 - Chron acquires `state/chron.lock` with the shared `lib/ownership.ts` for each
   tick (short TTL/refresh; a held lock skips the tick). This is separate from
-  the consumer's `state/ownership.lock`, so production continues while the
-  consumer drains, and a second opencode instance cannot run a second chron.
+  the consumer's DB lease (`lease` row in `state/work.db`), so production
+  continues while the consumer drains, and a second opencode instance cannot
+  run a second chron.
 - Shared generic utilities (`fsx`, `ownership`, `logging`) are allowed; chron
   still imports no heartbeat policy module.
 - The bridge/producers read autonomy and write intents; chron sees only
@@ -304,9 +306,13 @@ if (!res.ok && res.reason.includes("cap")) return { defer: true }
 - `agent` is a new optional field on `UserTask`/`CreateTaskInput`; the handler
   passes `task.agent ?? mission.agent` to `runChild`.
 
-## 5. Intent rail and consumer
+## 5. Work-store rail and consumer
 
-### 5.1 Intent schema
+> Superseded 2026-11-02: the file intent rail below is the legacy input the
+> SQLite importer reads once. Runtime producers call `store.enqueue`; the
+> consumer owns `claim`/`settle`/`recover`.
+
+### 5.1 Legacy intent schema (importer input)
 
 `state/inbox/<producer>/<safe-id>.json`, one file per intent:
 
@@ -330,34 +336,29 @@ if (!res.ok && res.reason.includes("cap")) return { defer: true }
 }
 ```
 
-- Unique filenames, atomic writes (`atomicWrite`). Producers never **write**
-  `work-queue.json`; the consumer stays the sole writer. A read-only snapshot
-  is allowed for `queuedIds` dedupe.
+- Unique filenames, atomic writes (`atomicWrite`). Producers insert `queued`
+  rows only; the consumer stays the sole writer of item state. Dedupe is
+  `store.has(id)` (queued or running; failed rows are ignored).
 - Malformed files move to `state/inbox/bad/` with a log line; they never block
   the merge.
 - One open intent per `id`; a new occurrence while the old file exists is
   deduped/skipped.
 
-### 5.2 Merge (consumer, under lease)
+### 5.2 Tick start (consumer, under the DB lease)
 
-1. Read every `state/inbox/*/*.json`.
-2. Validate and dedupe by `id` against the queue.
-3. Prune expired items first.
-4. Accept only up to the free slots
-   (`max(0, MAX_QUEUE_DEPTH - queue.length)`) after pruning; leave the rest in
-   the inbox and log. `enqueueWork` currently calls
-   `cap()` and evicts the oldest (`lib/work-queue.ts:271-282`); replace that
-   with an `enqueueWithinCapacity`/`{ queue, rejected }` variant.
-5. Save with a **checked** writer that returns `boolean`
-   (`saveWorkQueueStateChecked`, or change the existing return type); delete
-   only the merged intent files when it returns true. On failure, leave every
-   merged file in place and retry next session.
-6. Ingest `state/user-tasks/*.md` via the existing `collectUserTasks` (the file
-   is the intent; no production decision).
-7. Snapshot the queue ids for this session.
+The legacy merge is replaced by the store's one-time importer plus the tick:
 
-Producers may read `work-queue.json` read-only for `queuedIds`; they never
-write it. The merge dedupe is authoritative.
+1. First open imports `state/inbox/*/*.json` and `work-queue.json` once under
+   `BEGIN IMMEDIATE`, sets the `legacy_import_v1` marker, then backs both up to
+   `state/backup/pre-sqlite-<ts>/`.
+2. Every tick: `recover(owner)` resets another owner's `running` rows and fails
+   rows at the attempt cap; `prune` drops expired queued rows.
+3. `dropStale(ids)` removes queued work whose handler reports `stillDue = false`.
+4. Ingest `state/user-tasks/*.md` via `collectUserTasks`; `enqueue` the batch.
+5. Snapshot queued rows + scheduler for the session's `pickFair`.
+
+Dedupe is `store.has(id)`: queued or running, never failed. A full queue
+returns `rejected`; the producer keeps the occurrence for the next scan.
 
 ### 5.3 Session loop
 
@@ -382,7 +383,7 @@ schedule next wake (0 if backlog remains after a cap, else idle delay)
 - `seen` set: one attempt per item id per session. A timeout requeue waits for
   the next session, so retries cannot burn out inside one batch.
 - The SWRR picker is re-run between every item; no fixed batch order. Credits
-  persist in `work-queue.json` across sessions.
+  persist in `scheduler_state` in `state/work.db` across sessions.
 - `await lease.refresh()` is checked between items; stop if it returns false.
   `held()` is only an in-memory flag; `refresh()` re-reads the on-disk record,
   so a >90 s suspend/steal is caught before the next dispatch.
@@ -458,8 +459,8 @@ Algorithm per scan:
 9. A failed gate also marks the occurrence consumed (one evaluation per
    occurrence, no retry storm).
 
-`queuedIds` comes from a read-only `loadWorkQueueState` snapshot; the producer
-never writes the queue.
+Dedupe is `store.has(id)`; the producer only calls `enqueue` and never mutates
+an item's state.
 
 `last_evaluated_ms` is producer state, separate from `last_runs` in
 `heartbeat.json` (dispatch history). Interval due-ness uses `last_evaluated_ms`,
@@ -558,7 +559,7 @@ Current-file migration table (apply exactly):
 - New code job `lib/chron/jobs/drain.ts`, schedule from
   `drain.producer_interval_minutes` (default 15).
 - Each fire calls the existing `drainDue()` (`lib/drain/step.ts:55-96`).
-- If due and no `drain-pass` is queued, emit one intent:
+- If due and no `drain-pass` row is queued or running, enqueue one:
   `{ id: "drain-pass", kind: "drain-pass", producer: "chron:drain" }`.
 - `drainDue` thresholds stay config: `trigger_pending` (currently 12; the 15 in
   the design conversation was an example, not a required default) and
@@ -571,8 +572,9 @@ Current-file migration table (apply exactly):
 
 ### 6.5 User tasks
 
-- `collectUserTasks` stays as a file ingester in the merge step. It is not a
-  cadence decision; the task files are the intents.
+- `collectUserTasks` stays as a file ingester at tick start. It is not a
+  cadence decision; the task files are the human rail and the store row is the
+  machine state.
 - `userTaskEnabled` keeps its `user-task` mission gate.
 - Add optional `agent` to the task store, render/parse, and
   `runUserTaskItem` (`task.agent ?? mission.agent`).
@@ -608,6 +610,13 @@ consumer:
 
 drain:
   producer_interval_minutes: 15   # new
+
+storage:
+  path: work.db
+  busy_timeout_ms: 5000
+  synchronous: NORMAL
+  failed_retry_ms: 3600000
+  failed_retention_days: 30
 ```
 
 - `0` on the consumer caps means unlimited.
@@ -864,8 +873,8 @@ Chosen defaults:
   `heartbeat.frequency` (or the earliest `not_before_ms`).
 - Chron runs under its own `state/chron.lock`; the consumer lease is separate,
   so production continues while the consumer drains.
-- Producers may read `work-queue.json` read-only for dedupe; only the consumer
-  writes it.
+- Producers call `store.has(id)` and `store.enqueue(...)`; only the consumer
+  mutates an item's state (`claim`/`settle`/`recover`).
 - Explicit mission `priority` wins over the migration mapping; default 5.
 - The full suite is `find .opencode/plugin/lib -name '*.test.ts' -print0 |
   xargs -0 node --test`; `node --test <directory>` is not valid here.
@@ -913,11 +922,10 @@ Still open (documented, not blocking Phase 1):
 
 ## 13. Alternatives considered
 
-- **Direct enqueue from producers under a lease.** Simpler on paper (no inbox,
-  no merge), but it makes every producer a `work-queue.json` writer, needs
-  CAS/lease coordination, and reintroduces the partial-write and eviction
-  classes the consumer currently owns. The inbox keeps the single-writer
-  invariant and lets the consumer reject/leave overflow. Keep the inbox.
+- **Direct enqueue from producers under a lease.** Originally rejected for a
+  hand-rolled file queue. Superseded 2026-11-02 by the SQLite work store
+  (docs/SQLITE-WORK-STORE-PLAN.md): producers insert `queued` rows only, the
+  consumer owns transitions, and the inbox is importer-only.
 - **One mission producer per mission.** Rejected: the generic scan plus the
   `producer:` escape hatch keeps policy in files and reserves code for genuine
   exceptions.

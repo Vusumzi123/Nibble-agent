@@ -5,7 +5,9 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { mockClient, tempDir, tempHome } from "./test-utils.ts"
 import { HEARTBEAT_FIXED_PROMPT } from "./heartbeat.ts"
-import { writeIntent } from "./production/intents.ts"
+import { openWorkStore } from "./work-store/sqlite.ts"
+import { emptyScheduler } from "./work-queue.ts"
+import { createTask, settleTask } from "./user-tasks.ts"
 
 // Isolate HOME before the hook module resolves anything home-scoped.
 const TEST_HOME = tempHome("hbhook-home-")
@@ -88,30 +90,103 @@ async function writeMissionWithCandidacy(
   )
 }
 
-// Mission production now happens in chron; seed the inbox directly so these
-// consumer tests exercise the merge -> dispatch path with one intent.
+// Mission production now happens in chron; seed the store directly so these
+// consumer tests exercise the claim -> dispatch -> settle path with one row.
+async function withStore<T>(dir: string, fn: (store: Awaited<ReturnType<typeof openWorkStore>>) => T): Promise<T> {
+  const store = await openWorkStore({ stateDir: join(dir, ".opencode", "state") })
+  try {
+    return fn(store)
+  } finally {
+    store.close()
+  }
+}
+
 async function seedMissionIntent(
   dir: string,
   id = "drain",
   kind: "mission" | "staleness" = "mission",
 ): Promise<void> {
   const now = Date.now()
-  const result = await writeIntent(join(dir, ".opencode", "state"), "chron:missions", {
-    id: `mission:${id}`,
-    kind,
-    priority: 5,
-    enqueued_ms: now,
-    expires_ms: now + 24 * HOUR,
-    payload: {
-      mission: id,
-      occurrence_ms: now,
-      level: 3,
-      quiet: false,
-      sleep_status: "awake",
-      signals: {},
-    },
-  })
-  assert.equal(result.ok, true)
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  await withStore(dir, (store) =>
+    store.enqueue(
+      [
+        {
+          id: `mission:${id}`,
+          kind,
+          producer: "chron:missions",
+          priority: 5,
+          enqueued_ms: now,
+          expires_ms: now + 24 * HOUR,
+          requeue_count: 0,
+          payload: {
+            mission: id,
+            occurrence_ms: now,
+            level: 3,
+            quiet: false,
+            sleep_status: "awake",
+            signals: {},
+          },
+        },
+      ],
+      now,
+    ),
+  )
+}
+
+async function storeRows(dir: string) {
+  return withStore(dir, (store) => store.dump().items)
+}
+
+async function seedItems(
+  dir: string,
+  items: Parameters<Awaited<ReturnType<typeof openWorkStore>>["enqueue"]>[0],
+  now = Date.now(),
+): Promise<void> {
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  await withStore(dir, (store) => store.enqueue(items, now))
+}
+
+async function seedRunningClaim(
+  dir: string,
+  item: Parameters<Awaited<ReturnType<typeof openWorkStore>>["enqueue"]>[0][number],
+  owner = "crashed-owner",
+  now = Date.now(),
+): Promise<void> {
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  const store = await openWorkStore({ stateDir, now: () => now })
+  try {
+    store.leaseAcquire(owner, now)
+    store.enqueue([item], now)
+    store.claim(item.id, {
+      ...emptyScheduler(),
+      served: { [item.kind]: 1 },
+      last_kind: item.kind,
+      updated_ms: now,
+    }, owner, now)
+    store.leaseRelease(owner)
+  } finally {
+    store.close()
+  }
+}
+
+async function stealLease(dir: string, owner = "thief"): Promise<void> {
+  const stateDir = join(dir, ".opencode", "state")
+  const store = await openWorkStore({ stateDir })
+  try {
+    const current = store.leaseHolder()
+    if (current) store.leaseRelease(current.owner)
+    store.leaseAcquire(owner)
+  } finally {
+    store.close()
+  }
+}
+
+async function leaseRow(dir: string) {
+  return withStore(dir, (store) => store.leaseHolder())
 }
 
 async function writeBurstMission(dir: string, id: string): Promise<void> {
@@ -139,20 +214,20 @@ async function writeBurstMission(dir: string, id: string): Promise<void> {
 }
 
 async function seedMissionQueue(dir: string, ids: string[]): Promise<void> {
-  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
-  await writeFile(
-    join(dir, ".opencode", "state", "work-queue.json"),
-    JSON.stringify({
-      version: 2,
-      items: ids.map((id, index) => ({
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  const now = Date.now()
+  await withStore(dir, (store) =>
+    store.enqueue(
+      ids.map((id, index) => ({
         id: `mission:${id}`,
-        kind: "mission",
+        kind: "mission" as const,
         producer: "chron:missions",
-        enqueued_ms: Date.now() - (ids.length - index) * 1_000,
+        enqueued_ms: now - (ids.length - index) * 1_000,
         requeue_count: 0,
       })),
-    }),
-    "utf8",
+      now,
+    ),
   )
 }
 
@@ -194,13 +269,24 @@ async function driveChildren(client: ReturnType<typeof burstClient>, hooks: any,
 }
 
 async function seedDrainIntent(dir: string): Promise<void> {
-  const result = await writeIntent(join(dir, ".opencode", "state"), "chron:drain", {
-    id: "drain-pass",
-    kind: "drain-pass",
-    priority: 3,
-    enqueued_ms: Date.now(),
-  })
-  assert.equal(result.ok, true)
+  const stateDir = join(dir, ".opencode", "state")
+  await mkdir(stateDir, { recursive: true })
+  const now = Date.now()
+  await withStore(dir, (store) =>
+    store.enqueue(
+      [
+        {
+          id: "drain-pass",
+          kind: "drain-pass",
+          producer: "chron:drain",
+          priority: 3,
+          enqueued_ms: now,
+          requeue_count: 0,
+        },
+      ],
+      now,
+    ),
+  )
 }
 
 // Seed the default opencode DB (under the test HOME) with one unconsumed turn
@@ -422,15 +508,8 @@ test("zero-LLM quiet path: all-quiet tick at L2 logs the full ledger line and cr
   assert.equal(state.ticks, 1)
   assert.ok((state.last_tick ?? 0) > 0)
 
-  // The lock was released after the tick.
-  await waitFor(async () => {
-    try {
-      await readFile(join(dir, ".opencode", "state", "ownership.lock"), "utf8")
-      return false
-    } catch {
-      return true
-    }
-  })
+  // The lease was released after the tick.
+  await waitFor(async () => (await leaseRow(dir)) === null)
   void hooks
 })
 
@@ -477,17 +556,28 @@ test("kill switch: heartbeat.enabled false sleeps, no tick fires", async () => {
 // A fresh lock held by another instance (the parallel-server case, §12.1
 // step 4) skips the tick: no tick log, no state update, the foreign lock is
 // left standing.
+test("store-unavailable: a broken state path skips the tick without a session", async () => {
+  const dir = await project([
+    "autonomy:",
+    "  level: 2",
+    "",
+    "paths:",
+    "  state: state-file",
+  ])
+  await writeFile(join(dir, "state-file"), "not a directory", "utf8")
+  const client = mockClient()
+  await createHook({ client, directory: dir } as any)
+
+  await delay(250)
+  assert.deepEqual(await readTickLog(dir), [], "the tick is skipped, not crashed")
+  assert.equal(client.calls.create, 0)
+})
+
 test("lock-held skip: a fresh live ownership lease skips the tick and is not stolen", async () => {
   const dir = await project(["autonomy:", "  level: 2"])
   const stateDir = join(dir, ".opencode", "state")
   await mkdir(stateDir, { recursive: true })
-  const lockFile = join(stateDir, "ownership.lock")
-  const foreign = {
-    pid: process.ppid,
-    acquired_ms: Date.now() - 1_000,
-    heartbeat_ms: Date.now(),
-  }
-  await writeFile(lockFile, JSON.stringify(foreign), "utf8")
+  await withStore(dir, (store) => store.leaseAcquire("foreign", Date.now()))
 
   const client = mockClient()
   await createHook({ client, directory: dir } as any)
@@ -497,9 +587,8 @@ test("lock-held skip: a fresh live ownership lease skips the tick and is not sto
   assert.equal(client.calls.create, 0)
   const state = await readTickState(dir)
   assert.ok((state.ticks ?? 0) === 0)
-  // The foreign lock stands untouched.
-  const held = JSON.parse(await readFile(lockFile, "utf8"))
-  assert.equal(held.pid, process.ppid)
+  // The foreign lease stands untouched.
+  assert.equal((await leaseRow(dir))?.owner, "foreign")
 })
 
 // §5.1 execution lock: a foreign mission.lock means another agent is working.
@@ -570,14 +659,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
 
   // 6. Single-flight released: exactly one session, both locks gone.
   assert.equal(client.calls.create, 1)
-  await waitFor(async () => {
-    try {
-      await readFile(join(dir, ".opencode", "state", "ownership.lock"), "utf8")
-      return false
-    } catch {
-      return true
-    }
-  })
+  await waitFor(async () => (await leaseRow(dir)) === null)
   await waitFor(async () => {
     try {
       await readFile(join(dir, ".opencode", "state", "mission.lock"), "utf8")
@@ -593,24 +675,7 @@ test("mission execution: verdict spawns one child, ledger + backlog record the o
 test("a queued mission runs even when its candidacy no longer passes", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
   await writeMissionWithCandidacy(dir, "free", "Free", "roll:0")
-  const stateDir = join(dir, ".opencode", "state")
-  await mkdir(stateDir, { recursive: true })
-  await writeFile(
-    join(stateDir, "work-queue.json"),
-    JSON.stringify({
-      version: 2,
-      items: [
-        {
-          id: "mission:free",
-          kind: "mission",
-          producer: "tick",
-          enqueued_ms: Date.now() - 60_000,
-          requeue_count: 0,
-        },
-      ],
-    }),
-    "utf8",
-  )
+  await seedMissionQueue(dir, ["free"])
 
   const client = missionClient()
   const hooks = await createHook({ client, directory: dir } as any)
@@ -623,31 +688,17 @@ test("a queued mission runs even when its candidacy no longer passes", async () 
   assert.equal(tick.mission, "free")
   assert.equal(client.calls.create, 1)
 
-  const queue = JSON.parse(await readFile(join(stateDir, "work-queue.json"), "utf8"))
-  assert.equal(missionsIn(queue).length, 0, "the reservation is consumed")
+  assert.equal(
+    (await storeRows(dir)).filter((row) => row.kind === "mission").length,
+    0,
+    "the reservation is consumed",
+  )
 })
 
 // A pool with an item that is not runnable must not be labelled "empty".
 test("an unrunnable pool item is labelled no-runnable, not empty", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
-  const stateDir = join(dir, ".opencode", "state")
-  await mkdir(stateDir, { recursive: true })
-  await writeFile(
-    join(stateDir, "work-queue.json"),
-    JSON.stringify({
-      version: 2,
-      items: [
-        {
-          id: "mission:gone",
-          kind: "mission",
-          producer: "tick",
-          enqueued_ms: Date.now() - 60_000,
-          requeue_count: 0,
-        },
-      ],
-    }),
-    "utf8",
-  )
+  await seedMissionQueue(dir, ["gone"])
 
   const client = mockClient()
   await createHook({ client, directory: dir } as any)
@@ -722,8 +773,11 @@ test("a declined mission drops the item and records the result", async () => {
   assert.equal(tick.mood_event, null, "a decline is not a failure")
   assert.deepEqual(await readBacklog(dir), [], "a decline is not backlog-recorded")
 
-  const queue = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
-  assert.equal(missionsIn(queue).length, 0, "the declined item dropped")
+  assert.equal(
+    (await storeRows(dir)).filter((row) => row.kind === "mission").length,
+    0,
+    "the declined item dropped",
+  )
 })
 
 // A failed mission run: outcome error feeds `mission_failure` (shared mood
@@ -891,6 +945,61 @@ test("consumer caps: a token budget stops between items", async () => {
   assert.equal(line.items_run, 1)
 })
 
+test("recovery: a crashed running row is retried with attempt 2", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  await writeBurstMission(dir, "recover-a")
+  await seedRunningClaim(dir, {
+    id: "mission:recover-a",
+    kind: "mission",
+    producer: "chron:missions",
+    enqueued_ms: Date.now() - 60_000,
+    requeue_count: 0,
+  })
+
+  const client = burstClient()
+  const hooks = await createHook({ client, directory: dir } as any)
+  await waitFor(() => client.calls.prompts.length >= 1, 8000)
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: client.calls.prompts[0].path.id } },
+  } as any)
+  await waitFor(
+    async () => (await readTickLog(dir)).some((t: any) => t.verdict === "mission:recover-a"),
+    8000,
+  )
+  const line = (await readTickLog(dir)).find((t: any) => t.verdict === "mission:recover-a")!
+  assert.equal(line.attempt, 2, "the recovered claim is the second attempt")
+  assert.equal((await storeRows(dir)).length, 0)
+})
+
+test("recovery: a settled user task row is dropped instead of leaking a slot", async () => {
+  const dir = await project(["autonomy:", "  level: 3"])
+  const stateDir = join(dir, ".opencode", "state")
+  const task = await createTask(stateDir, { title: "already done", prompt: "p" }, { nowMs: Date.now() })
+  assert.equal(task.ok, true)
+  if (!task.ok) return
+  await settleTask(stateDir, task.id, "done", { summary: "done" })
+  await seedRunningClaim(dir, {
+    id: `user-task:${task.id}`,
+    kind: "user-task",
+    producer: "user-tasks",
+    enqueued_ms: Date.now() - 60_000,
+    requeue_count: 0,
+    payload: { task_ref: task.id, title: "already done", priority: 5 },
+  })
+
+  const client = mockClient()
+  await createHook({ client, directory: dir } as any)
+  await waitFor(async () => (await readTickLog(dir)).length > 0)
+  const [tick] = await readTickLog(dir)
+  assert.equal(tick.stopped, "empty")
+  assert.equal(client.calls.create, 0)
+  assert.equal(
+    (await storeRows(dir)).filter((row) => row.kind === "user-task").length,
+    0,
+    "the recovered stale row is dropped",
+  )
+})
+
 test("consumer caps: lease loss stops the session between items", async () => {
   const dir = await project(["autonomy:", "  level: 3"])
   await writeBurstMission(dir, "lease-a")
@@ -900,7 +1009,7 @@ test("consumer caps: lease loss stops the session between items", async () => {
   const client = burstClient()
   const hooks = await createHook({ client, directory: dir } as any)
   await waitFor(() => client.calls.prompts.length >= 1, 8000)
-  await rm(join(dir, ".opencode", "state", "ownership.lock"), { force: true })
+  await stealLease(dir)
   await hooks.event({
     event: { type: "session.idle", properties: { sessionID: client.calls.prompts[0].path.id } },
   } as any)
@@ -910,7 +1019,7 @@ test("consumer caps: lease loss stops the session between items", async () => {
     8000,
   )
   const line = (await readTickLog(dir)).find((t: any) => t.stopped === "lease-lost")!
-  assert.equal(line.items_run, 1)
+  assert.equal(line.items_run, 0, "the stolen claim's result is discarded")
   assert.equal(client.calls.create, 1, "the second item waits for a new session")
 })
 
@@ -1066,8 +1175,11 @@ test("a failed abort is recorded as an error, never a clean stop", async () => {
   assert.equal(tick.runs[0].aborted, false)
   assert.equal(tick.runs[0].abort_error, "abort refused")
 
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
-  assert.equal(missionsIn(lanes).length, 0, "a failed abort drops the item instead of requeueing it")
+  assert.equal(
+    (await storeRows(dir)).filter((row) => row.kind === "mission").length,
+    0,
+    "a failed abort drops the item instead of requeueing it",
+  )
 })
 
 // Plan 5.2 / P3c: the stall watchdog measures silence, not wall-clock.
@@ -1364,35 +1476,26 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
     "",
   ])
   await writeMission(dir)
-  await seedMissionIntent(dir)
   await seedTurns(dir, "resume-cap")
-  await mkdir(join(dir, ".opencode", "state"), { recursive: true })
   // A resume item already at the ceiling: the next stall must drop it without
   // spawning a summarizer nobody will consume.
-  await writeFile(
-    join(dir, ".opencode", "state", "work-queue.json"),
-    JSON.stringify({
-      version: 2,
-      items: [
-        {
-          id: "mission:drain",
-          kind: "mission",
-          producer: "timeout",
-          enqueued_ms: Date.now() - 60_000,
-          requeue_count: 3,
-          requeue_reason: "timeout",
-          payload: {
-            resume: true,
-            prior_session: "ses_old",
-            stopped_at: new Date().toISOString(),
-            aborted: true,
-            summary: { done: "old work", remaining: "the rest", next_steps: [], notes: "" },
-          },
-        },
-      ],
-    }),
-    "utf8",
-  )
+  await seedItems(dir, [
+    {
+      id: "mission:drain",
+      kind: "mission",
+      producer: "timeout",
+      enqueued_ms: Date.now() - 60_000,
+      requeue_count: 3,
+      requeue_reason: "timeout",
+      payload: {
+        resume: true,
+        prior_session: "ses_old",
+        stopped_at: new Date().toISOString(),
+        aborted: true,
+        summary: { done: "old work", remaining: "the rest", next_steps: [], notes: "" },
+      },
+    },
+  ])
 
   const client = laneClient()
   const hooks = await createHook({
@@ -1417,8 +1520,11 @@ test("the fourth stall drops the item and journals resume_abandoned", async () =
     "the capped drop never spawns the summarizer",
   )
 
-  const lanes = JSON.parse(await readFile(join(dir, ".opencode", "state", "work-queue.json"), "utf8"))
-  assert.equal(missionsIn(lanes).length, 0, "the item drops at the ceiling")
+  assert.equal(
+    (await storeRows(dir)).filter((row) => row.kind === "mission").length,
+    0,
+    "the item drops at the ceiling",
+  )
 })
 
 // ---------------------------------------------------------------------------

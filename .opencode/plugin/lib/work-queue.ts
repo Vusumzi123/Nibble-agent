@@ -142,10 +142,9 @@ export function isDue(item: WorkItem, nowMs: number): boolean {
   return item.not_before_ms === undefined || nowMs >= item.not_before_ms
 }
 
-/** Parse persisted work + scheduler state. A missing/corrupt file yields an
+/** Parse persisted work + scheduler state. A missing/corrupt text yields an
  *  empty queue. Only the v2 `{ items, scheduler }` shape is accepted. */
-export async function loadWorkQueueState(file: string): Promise<WorkQueueState> {
-  const text = await atomicRead(file)
+export function parseWorkQueueState(text: string): WorkQueueState {
   if (!text) return { items: emptyQueue(), scheduler: emptyScheduler() }
   try {
     const parsed = JSON.parse(text) as unknown
@@ -163,6 +162,10 @@ export async function loadWorkQueueState(file: string): Promise<WorkQueueState> 
   } catch {
     return { items: emptyQueue(), scheduler: emptyScheduler() }
   }
+}
+
+export async function loadWorkQueueState(file: string): Promise<WorkQueueState> {
+  return parseWorkQueueState(await atomicRead(file))
 }
 
 /** Queue-only compatibility helper. */

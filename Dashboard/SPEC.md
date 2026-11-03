@@ -27,9 +27,9 @@ Angular 22 SPA (Dashboard/) ── same origin ──► Node server (Dashboard/
 - No demo fallback. If the backend is down the SPA shows an offline banner and
   retries every 4 s; the backend itself retries nothing.
 - Scheduler: [`../docs/swrr-work-scheduler-plan.md`](../docs/swrr-work-scheduler-plan.md).
-  SWRR is live in `.opencode/plugin/lib/work-queue.ts`; the QUEUE panel,
+  SWRR and the queue are live in `.opencode/plugin/lib/work-store/sqlite.ts`; the QUEUE panel,
   METRICS service share, FLIGHT next-kind and SETTINGS weights read the
-  persisted `{version, items, scheduler}` state.
+  persisted `work_items` + `scheduler_state` rows.
 
 ## What is monitored
 
@@ -37,7 +37,7 @@ Angular 22 SPA (Dashboard/) ── same origin ──► Node server (Dashboard/
 | --- | --- |
 | `heartbeat.current.json`, `heartbeat.json` | current flight, lock/stale, tick counters, next-tick schedule |
 | `mood.json`, `sleep.json`, `idea.json` | mood valence/arousal, quiet-hours state, daily idea draw |
-| `work-queue.json` | unified queue + SWRR scheduler: kind, priority, age, due/not-before, TTL, requeues, weights/credits/served |
+| `work.db` (read-only) | `work_items` queued/running/failed rows, `scheduler_state`, `lease`, and the `legacy_import_v1` marker; the server opens WAL with a 5 s busy timeout |
 | `drain.current.json`, `drain-cursor.json`, `drain.log` | drain lag, pending turns/sessions, passes, last outcome (no cursor ⇒ pending 0) |
 | `backlog.ndjson` | open/total counts and entries |
 | `heartbeat.log` + `drain.log` + `opencode.db` | runs with mission, kind, outcome, tokens, cost, model, duration, abort reason; drain pipe passes included |
@@ -83,7 +83,7 @@ GET  /api/health                 backend, serve URL/reachability, paths, writabl
 GET  /api/overview               one-shot shell snapshot
 GET  /api/heartbeat              current + schedule + counters
 GET  /api/mood | /sleep | /idea  state files
-GET  /api/queues                 work queue + running + drain + SWRR scheduler
+GET  /api/queues                 work queue + state/producer counts + failed rows + lease + legacy inbox + running + drain + SWRR scheduler
 GET  /api/drain                  drain lag, pending turns, passes
 GET  /api/runs                   ?limit&mission&kind&outcome&hours
 GET  /api/runs/detail            ?session&tick&mission  one run + session breakdown
@@ -148,7 +148,7 @@ Header (brand, live/offline pill, level, mood, clock, theme menu, ⌘K, refresh)
 | --- | --- | --- |
 | FLIGHT | 1 | mission/lease, token+cost, vitals (mood/sleep/ideas/cadence/next kind/drain), live transcript, queue peek, activity feed |
 | METRICS | 2 | cadence, error rate, drain backlog, token burn, spend, $/mission, current queue age, overruns; scheduler service share; hourly burn chart; spend by model; outcomes; gate verdicts; mission rollup |
-| QUEUE | 3 | drain strip, in-flight, SWRR scheduler panel, unified work queue, run history + run drawer |
+| QUEUE | 3 | drain strip, in-flight, work-store/lease panels, failed-work table, SWRR scheduler panel, unified work queue with lifecycle columns, run history + run drawer |
 | MISSIONS | 4 | effective missions, enable switches, restrict-only overlay editor, candidacy split |
 | LOGS | 5 | ledger index + tailing/filter/save viewer |
 | SETTINGS | 6 | runtime target, locks/backlog insights, schema-driven settings with per-section apply |

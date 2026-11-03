@@ -108,9 +108,9 @@ the body is the child-session prompt. Every mission ends by calling
 re-proposes it on its next occurrence.
 
 Production is decoupled from execution. **Chron** scans mission schedules and
-the drain backlog on its own timer and writes durable intents under
-`.opencode/state/inbox/`; the **heartbeat consumer** merges those intents,
-ingests pending task files, and runs a bounded fair session. A **smooth
+the drain backlog on its own timer and inserts `queued` rows into
+`.opencode/state/work.db`; the **heartbeat consumer** recovers/prunes, ingests
+pending task files, and runs a bounded fair session. A **smooth
 weighted round-robin (SWRR)** scheduler picks the work *kind* (default mission
 4 / user-task 2 / drain 3 / maintenance 1), and the consumer runs up to
 `consumer.max_items_per_tick` items per session (default 10), stopping between

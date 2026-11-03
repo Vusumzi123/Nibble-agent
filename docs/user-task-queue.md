@@ -1,7 +1,8 @@
 # User-task queue
 
 Queue work for the heartbeat to run later with the `queue_add` tool (or the
-`user-task-queue` skill). One task = one Markdown file; the queue only carries
+`user-task-queue` skill). One task = one Markdown file; the machine state
+(queued/running/failed) lives in `state/work.db`. The queue only carries
 scheduling metadata.
 
 ## Store layout
@@ -59,7 +60,8 @@ queue_add ─▶ <id>.md (pending)
 ```
 
 - **Latency:** ≤ one tick (≤60 s) between `queue_add` and dispatch. The tool
-  never writes `work-queue.json`, so there is no lock and no lost update.
+  writes Markdown only; the tick ingests the file and inserts the `queued` row,
+  so there is no lock and no lost update.
 - **Priority:** integer 0–9, higher first, ordering only inside `user-task`.
   SWRR still decides which kind runs, so a task cannot preempt a mission.
 - **Dedupe:** queue dedupe stays id-only. `dedupe_key` is checked by
@@ -67,9 +69,9 @@ queue_add ─▶ <id>.md (pending)
   `deduped: true`.
 - **Timeout:** the item requeues with a resume summary up to `MAX_REQUEUES`
   (3), then the task is archived under `failed/`.
-- **Missing file:** `stillDue` is false, so the queue item drops instead of
-  looping.
-- **Expiry:** an expired task is never produced; its queue item is pruned.
+- **Missing file:** `stillDue` is false, so `dropStale` deletes the row instead
+  of looping.
+- **Expiry:** an expired task is never produced; its queued row is pruned.
 
 ## Retention
 

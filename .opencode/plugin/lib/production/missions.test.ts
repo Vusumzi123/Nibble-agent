@@ -1,21 +1,18 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 // The producer uses local wall time for menus/quiet windows; pin UTC.
 process.env.TZ = "UTC"
 
 const { MISSIONS_STATE_FILE, createMissionScan, runMissionScan } = await import("./missions.ts")
-const { readIntents } = await import("./intents.ts")
 const {
   clearMissionProducers,
   getMissionProducer,
   registerMissionProducer,
 } = await import("./registry.ts")
-const { loadWorkQueueState, saveWorkQueueState, emptyScheduler, WORK_QUEUE_FILE } = await import(
-  "../work-queue.ts"
-)
+const { openWorkStore } = await import("../work-store/sqlite.ts")
 const { tempDir } = await import("../test-utils.ts")
 import type { ChronLog } from "../chron/types.ts"
 
@@ -69,6 +66,19 @@ function missionBody(
   ].join("\n")
 }
 
+async function storeItems(stateDir: string, nowMs = T0) {
+  const store = await openWorkStore({ stateDir, now: () => nowMs })
+  const items = store.dump().items
+  store.close()
+  return items
+}
+
+async function seedStore(stateDir: string, items: Parameters<Awaited<ReturnType<typeof openWorkStore>>["enqueue"]>[0]) {
+  const store = await openWorkStore({ stateDir, now: () => T0 })
+  store.enqueue(items, T0)
+  store.close()
+}
+
 function scanAt(dirs: Dirs, nowMs: number, deps: { random?: () => number } = {}) {
   return runMissionScan({
     directory: dirs.dir,
@@ -92,12 +102,12 @@ test("an interval mission emits one intent at its occurrence", async () => {
   const second = await scanAt(dirs, T0)
   assert.deepEqual(second.emitted, ["research"])
 
-  const { intents } = await readIntents(dirs.stateDir)
-  assert.equal(intents.length, 1)
-  assert.equal(intents[0].intent.id, "mission:research")
-  assert.equal(intents[0].intent.kind, "mission")
-  assert.equal(intents[0].intent.priority, 5)
-  assert.equal(intents[0].intent.producer, "chron:missions")
+  const items = await storeItems(dirs.stateDir)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].id, "mission:research")
+  assert.equal(items[0].kind, "mission")
+  assert.equal(items[0].priority, 5)
+  assert.equal(items[0].producer, "chron:missions")
 
   const state = JSON.parse(
     await (await import("node:fs/promises")).readFile(
@@ -116,7 +126,7 @@ test("a failed gate consumes the occurrence exactly once", async () => {
 
   const second = await scanAt(dirs, T0 + 1_000)
   assert.deepEqual(second.evaluated, [])
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+  assert.deepEqual(await storeItems(dirs.stateDir), [])
 })
 
 test("priority orders the scan and max_per_scan leaves the rest for later", async () => {
@@ -131,7 +141,7 @@ test("priority orders the scan and max_per_scan leaves the rest for later", asyn
   const report = await seedThenScan(dirs)
   assert.deepEqual(report.emitted, ["high", "mid"])
   assert.deepEqual(report.overflow, ["low"])
-  const ids = (await readIntents(dirs.stateDir)).intents.map((r) => r.intent.id).sort()
+  const ids = (await storeItems(dirs.stateDir)).map((row) => row.id).sort()
   assert.deepEqual(ids, ["mission:high", "mission:mid"])
 
   // The overflow occurrence is not consumed; the next scan emits it.
@@ -141,25 +151,19 @@ test("priority orders the scan and max_per_scan leaves the rest for later", asyn
 
 test("an already queued mission is deduped and its occurrence consumed", async () => {
   const dirs = await setup({ "research.md": missionBody("research") })
-  const queueFile = join(dirs.stateDir, WORK_QUEUE_FILE)
-  await mkdir(dirs.stateDir, { recursive: true })
-  await saveWorkQueueState(
-    queueFile,
-    [
-      {
-        id: "mission:research",
-        kind: "mission",
-        producer: "chron:missions",
-        enqueued_ms: T0 - 2 * HOUR,
-        requeue_count: 0,
-      },
-    ],
-    emptyScheduler(),
-  )
+  await seedStore(dirs.stateDir, [
+    {
+      id: "mission:research",
+      kind: "mission",
+      producer: "chron:missions",
+      enqueued_ms: T0 - 2 * HOUR,
+      requeue_count: 0,
+    },
+  ])
   const report = await seedThenScan(dirs)
   assert.deepEqual(report.emitted, [])
   assert.ok(report.evaluated.includes("research"))
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+  assert.equal((await storeItems(dirs.stateDir)).length, 1)
 })
 
 test("brain-stale candidacy emits the staleness kind", async () => {
@@ -174,8 +178,8 @@ test("brain-stale candidacy emits the staleness kind", async () => {
   )
   const report = await seedThenScan(dirs)
   assert.deepEqual(report.emitted, ["staleness"])
-  const { intents } = await readIntents(dirs.stateDir)
-  assert.equal(intents[0].intent.kind, "staleness")
+  const items = await storeItems(dirs.stateDir)
+  assert.equal(items[0].kind, "staleness")
 })
 
 test("enqueue: item and custom-producer missions are skipped by the generic scan", async () => {
@@ -187,7 +191,7 @@ test("enqueue: item and custom-producer missions are skipped by the generic scan
   })
   const report = await seedThenScan(dirs)
   assert.deepEqual(report.emitted, [])
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+  assert.deepEqual(await storeItems(dirs.stateDir), [])
   assert.ok(getMissionProducer("nightly-report"))
   clearMissionProducers()
 })
@@ -205,7 +209,7 @@ test("an unknown producer warns once and never produces", async () => {
   await scan()
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /unknown producer/)
-  assert.deepEqual((await readIntents(dirs.stateDir)).intents, [])
+  assert.deepEqual(await storeItems(dirs.stateDir), [])
 })
 
 test("a mission without a schedule warns once and never produces", async () => {
@@ -233,9 +237,35 @@ test("disabled missions and level 0 produce nothing", async () => {
   assert.deepEqual(lowReport, { evaluated: [], emitted: [], overflow: [], skipped: [] })
 })
 
-test("the work queue is never written by the producer", async () => {
+test("the producer writes queued rows and never an inbox file", async () => {
   const dirs = await setup({ "research.md": missionBody("research") })
   await seedThenScan(dirs)
-  const queue = await loadWorkQueueState(join(dirs.stateDir, WORK_QUEUE_FILE))
-  assert.deepEqual(queue.items, [])
+  assert.equal((await storeItems(dirs.stateDir)).length, 1)
+  const { existsSync } = await import("node:fs")
+  assert.equal(existsSync(join(dirs.stateDir, "inbox")), false)
+  assert.equal(existsSync(join(dirs.stateDir, "work-queue.json")), false)
+})
+
+test("a full store rejects the occurrence so the next scan retries it", async () => {
+  const dirs = await setup({ "research.md": missionBody("research") })
+  await scanAt(dirs, T0 - HOUR)
+  const fill = Array.from({ length: 50 }, (_, i) => ({
+    id: `mission:fill-${i}`,
+    kind: "mission" as const,
+    producer: "test",
+    enqueued_ms: T0 - 10_000 + i,
+    requeue_count: 0,
+  }))
+  await seedStore(dirs.stateDir, fill)
+  const rejected = await scanAt(dirs, T0)
+  assert.deepEqual(rejected.emitted, [])
+  assert.deepEqual(rejected.skipped, [{ id: "research", reason: "queue-full" }])
+  const state = JSON.parse(await readFile(join(dirs.stateDir, MISSIONS_STATE_FILE), "utf8"))
+  assert.equal(state.missions.research.last_evaluated_ms, T0 - HOUR, "the occurrence is not consumed")
+
+  const store = await openWorkStore({ stateDir: dirs.stateDir, now: () => T0 })
+  store.dropStale(store.snapshot().items.map((row) => row.id))
+  store.close()
+  const retried = await scanAt(dirs, T0)
+  assert.deepEqual(retried.emitted, ["research"])
 })

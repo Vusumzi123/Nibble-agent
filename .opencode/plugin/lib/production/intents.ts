@@ -1,28 +1,19 @@
-// Durable producer intents (docs/CHRON-SCHEDULER-PLAN.md §5.1, §5.2).
+// Legacy producer-intent reader (docs/CHRON-SCHEDULER-PLAN.md §5.1, §5.2).
 //
-// Producers write one JSON file per intent under `state/inbox/<producer>/` and
-// never touch work-queue.json. The consumer merges the inbox under its lease:
-// validate, dedupe by id, prune expired, accept only up to the free capacity,
-// save the queue with the checked writer, then delete the consumed files.
+// The file inbox is no longer a runtime rail: the SQLite importer reads it
+// once on first open and moves the tree to `state/backup/pre-sqlite-<ts>/`.
+// This module is the importer's reader only — producers write `queued` rows
+// through `work-store.ts`.
 //
 // A malformed file is quarantined under `state/inbox/bad/` and never blocks the
-// merge. A file whose work is not yet durable in the queue stays in place for
-// the next session.
+// import.
 //
 // Loaded via relative import only.
 import { createHash, randomBytes } from "node:crypto"
-import { existsSync } from "node:fs"
-import { mkdir, readdir, rename, unlink } from "node:fs/promises"
+import { mkdir, readdir, rename } from "node:fs/promises"
 import { join } from "node:path"
-import { atomicRead, atomicWrite } from "../fsx.ts"
-import {
-  MAX_QUEUE_DEPTH,
-  enqueueWithinCapacity,
-  saveWorkQueueState,
-  type SchedulerState,
-  type WorkItem,
-  type WorkKind,
-} from "../work-queue.ts"
+import { atomicRead } from "../fsx.ts"
+import type { WorkItem, WorkKind } from "../work-queue.ts"
 
 export const INBOX_DIRNAME = "inbox"
 export const INTENT_VERSION = 1
@@ -43,19 +34,6 @@ export type Intent = {
 export type IntentRecord = { intent: Intent; path: string }
 export type BadIntent = { path: string; reason: string }
 export type IntentReadResult = { intents: IntentRecord[]; bad: BadIntent[] }
-
-export type WriteIntentInput = {
-  id: string
-  kind: WorkKind
-  priority?: number
-  expires_ms?: number
-  payload?: Record<string, unknown>
-  enqueued_ms?: number
-}
-
-export type WriteIntentResult =
-  | { ok: true; path: string; deduped: boolean }
-  | { ok: false; reason: string }
 
 const WORK_KINDS = new Set<WorkKind>([
   "mission",
@@ -204,46 +182,6 @@ export async function readIntents(
   return { intents, bad }
 }
 
-/** Write one intent file. An existing file for the same id wins (deduped). */
-export async function writeIntent(
-  stateDir: string,
-  producer: string,
-  input: WriteIntentInput,
-  opts: { inboxDir?: string } = {},
-): Promise<WriteIntentResult> {
-  if (!input.id || input.id.length > ID_MAX) return { ok: false, reason: "invalid id" }
-  if (!isWorkKind(input.kind)) return { ok: false, reason: `invalid kind: ${String(input.kind)}` }
-  if (!producer.trim()) return { ok: false, reason: "missing producer" }
-
-  const path = intentPath(stateDir, producer, input.id, opts.inboxDir)
-  if (existsSync(path)) return { ok: true, path, deduped: true }
-
-  const priority =
-    typeof input.priority === "number" &&
-    Number.isInteger(input.priority) &&
-    input.priority >= 0 &&
-    input.priority <= 9
-      ? input.priority
-      : undefined
-  const expires_ms = asNumber(input.expires_ms)
-  const intent: Intent = {
-    version: INTENT_VERSION,
-    id: input.id,
-    kind: input.kind,
-    producer,
-    enqueued_ms: asNumber(input.enqueued_ms) ?? Date.now(),
-    ...(priority === undefined ? {} : { priority }),
-    ...(expires_ms === undefined ? {} : { expires_ms }),
-    ...(input.payload === undefined ? {} : { payload: input.payload }),
-  }
-  try {
-    await atomicWrite(path, JSON.stringify(intent, null, 2) + "\n")
-    return { ok: true, path, deduped: false }
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
-  }
-}
-
 export function toWorkItem(intent: Intent): WorkItem {
   return {
     id: intent.id,
@@ -255,100 +193,4 @@ export function toWorkItem(intent: Intent): WorkItem {
     ...(intent.expires_ms === undefined ? {} : { expires_ms: intent.expires_ms }),
     ...(intent.payload === undefined ? {} : { payload: intent.payload }),
   }
-}
-
-export function pruneExpired(queue: WorkItem[], nowMs: number): WorkItem[] {
-  return queue.filter((item) => item.expires_ms === undefined || nowMs < item.expires_ms)
-}
-
-export type IntentMergePlan = {
-  queue: WorkItem[]
-  accepted: IntentRecord[]
-  duplicates: IntentRecord[]
-  expired: IntentRecord[]
-  rejected: IntentRecord[]
-}
-
-/** Plan the merge without writing or deleting anything. */
-export function planIntentMerge(
-  queue: WorkItem[],
-  records: IntentRecord[],
-  nowMs: number,
-): IntentMergePlan {
-  const pruned = pruneExpired(queue, nowMs)
-  const ids = new Set(pruned.map((item) => item.id))
-  const accepted: IntentRecord[] = []
-  const duplicates: IntentRecord[] = []
-  const expired: IntentRecord[] = []
-
-  for (const record of records) {
-    const { intent } = record
-    if (intent.expires_ms !== undefined && intent.expires_ms <= nowMs) {
-      expired.push(record)
-      continue
-    }
-    if (ids.has(intent.id)) {
-      duplicates.push(record)
-      continue
-    }
-    ids.add(intent.id)
-    accepted.push(record)
-  }
-
-  const free = Math.max(0, MAX_QUEUE_DEPTH - pruned.length)
-  const fitting = accepted.slice(0, free)
-  const rejected = accepted.slice(free)
-  const merged = enqueueWithinCapacity(
-    pruned,
-    fitting.map((record) => toWorkItem(record.intent)),
-  ).queue
-  return { queue: merged, accepted: fitting, duplicates, expired, rejected }
-}
-
-export type MergeIntentOptions = {
-  stateDir: string
-  inboxDir?: string
-  queueFile: string
-  queue: WorkItem[]
-  scheduler: SchedulerState
-  nowMs: number
-  save?: (file: string, queue: WorkItem[], scheduler: SchedulerState) => Promise<boolean>
-}
-
-export type MergeIntentReport = IntentMergePlan & {
-  bad: BadIntent[]
-  saved: boolean
-  deleted: string[]
-}
-
-/**
- * Merge the inbox into the queue and persist it. Accepted files are deleted
- * only after a successful save; on failure they stay for the next session.
- * Duplicates and expired files are redundant, so they are removed either way.
- */
-export async function mergeIntents(opts: MergeIntentOptions): Promise<MergeIntentReport> {
-  const { intents, bad } = await readIntents(opts.stateDir, opts.inboxDir)
-  const plan = planIntentMerge(opts.queue, intents, opts.nowMs)
-  const save = opts.save ?? saveWorkQueueState
-  let saved = false
-  try {
-    saved = await save(opts.queueFile, plan.queue, opts.scheduler)
-  } catch {
-    saved = false
-  }
-
-  const removable = saved
-    ? [...plan.accepted, ...plan.duplicates, ...plan.expired]
-    : [...plan.duplicates, ...plan.expired]
-  const deleted: string[] = []
-  for (const record of removable) {
-    try {
-      await unlink(record.path)
-      deleted.push(record.path)
-    } catch {
-      /* already gone */
-    }
-  }
-
-  return { ...plan, bad, saved, deleted }
 }

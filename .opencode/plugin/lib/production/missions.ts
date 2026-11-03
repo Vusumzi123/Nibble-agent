@@ -21,13 +21,13 @@ import {
 } from "../heartbeat.ts"
 import { DEFAULT_IDEA_STATE, ideaDayContext, readIdeaConfig, type IdeaState } from "../idea.ts"
 import { loadMissions, type Mission } from "../missions.ts"
+import { readStorageConfig } from "../storage-config.ts"
 import { createStateStore } from "../state.ts"
-import { loadWorkQueueState, WORK_QUEUE_FILE } from "../work-queue.ts"
+import { openWorkStore } from "../work-store/sqlite.ts"
 import { readChronConfig } from "../chron/config.ts"
 import { occurrence, parseSchedule } from "../chron/schedule.ts"
 import type { ChronLog } from "../chron/types.ts"
 import { missionExpiry, missionItemId } from "../work-kinds/shared.ts"
-import { writeIntent } from "./intents.ts"
 import { getMissionProducer } from "./registry.ts"
 
 export const MISSIONS_STATE_FILE = "missions.json"
@@ -146,108 +146,124 @@ async function scan(deps: MissionScanDeps, warned: Set<string>): Promise<Mission
   if (ctx.autonomy.level <= 0) return report
 
   const missions = await loadMissions(deps.directory).catch(() => [])
-  const queue = await loadWorkQueueState(join(deps.stateDir, WORK_QUEUE_FILE))
-  const queuedIds = new Set(queue.items.map((item) => item.id))
-
-  const ideaCfg = await readIdeaConfig(deps.directory)
-  const ideaStore = createStateStore<IdeaState>(
-    join(deps.stateDir, "idea.json"),
-    DEFAULT_IDEA_STATE,
-  )
-  const ideaState = await ideaStore.read()
-  const rolled = ideaCfg.enabled
-    ? ideaDayContext(ideaState, nowMs, ideaCfg.daily_weights, random)
-    : { state: ideaState, day: { target: 0, generated: 0 }, changed: false }
-  if (rolled.changed) await ideaStore.write(rolled.state)
-
-  const candidacy = buildCandidacy(
-    ctx,
-    deps.log,
-    rolled,
-    random,
-    await readLastRuns(deps.stateDir),
-    ideaCfg.enabled,
-    ideaCfg.express_min_gap_hours,
-  )
-
-  const stateFile = join(deps.stateDir, MISSIONS_STATE_FILE)
-  const prior = await readEvalState(stateFile)
-  const next: MissionEvalState = { version: MISSIONS_STATE_VERSION, missions: { ...prior.missions } }
-  let dirty = false
-  const window = ctx.quiet ? "night" : "day"
-  const eligible: Array<{ mission: Mission; occurrence_ms: number }> = []
-
-  for (const mission of missions) {
-    if (mission.enqueue === "item") continue
-    if (mission.producer !== "generic") {
-      if (!getMissionProducer(mission.producer)) {
-        warnOnce(
-          `producer|${mission.id}`,
-          `${mission.id}: unknown producer "${mission.producer}" — skipped`,
-        )
-      }
-      continue
-    }
-    if (!mission.schedule) {
-      warnOnce(`schedule|${mission.id}`, `${mission.id}: missing schedule — skipped`)
-      continue
-    }
-    const parsed = parseSchedule(mission.schedule)
-    if (!parsed.ok) {
-      warnOnce(
-        `schedule-invalid|${mission.id}`,
-        `${mission.id}: invalid schedule "${mission.schedule}" (${parsed.reason}) — skipped`,
-      )
-      continue
-    }
-
-    const entry = next.missions[mission.id]
-    if (!entry) {
-      next.missions[mission.id] = { last_evaluated_ms: nowMs }
-      dirty = true
-      continue
-    }
-    const due = occurrence(parsed.schedule, nowMs, entry.last_evaluated_ms)
-    if (!due.due) continue
-
-    const gateOk =
-      mission.enabled &&
-      mission.menus.includes(window) &&
-      ctx.autonomy.level >= mission.min_level &&
-      candidacyPasses(mission, candidacy)
-    if (!gateOk || queuedIds.has(missionItemId(mission.id))) {
-      next.missions[mission.id] = { last_evaluated_ms: due.occurrence_ms }
-      dirty = true
-      report.evaluated.push(mission.id)
-      continue
-    }
-    eligible.push({
-      mission,
-      occurrence_ms: due.occurrence_ms,
+  const storage = await readStorageConfig(deps.directory)
+  let store: Awaited<ReturnType<typeof openWorkStore>>
+  try {
+    store = await openWorkStore({
+      stateDir: deps.stateDir,
+      path: storage.path,
+      busyTimeoutMs: storage.busy_timeout_ms,
+      synchronous: storage.synchronous,
+      failedRetryMs: storage.failed_retry_ms,
+      failedRetentionDays: storage.failed_retention_days,
+      legacyInboxDir: cfg.inbox_dir,
+      now: deps.now,
     })
+  } catch (err) {
+    deps.log.warn("[missions] work store unavailable; scan skipped", err)
+    report.skipped.push({ id: "-", reason: "store-unavailable" })
+    return report
   }
 
-  eligible.sort(
-    (a, b) =>
-      b.mission.priority - a.mission.priority ||
-      a.occurrence_ms - b.occurrence_ms ||
-      a.mission.id.localeCompare(b.mission.id),
-  )
-  const max = Math.max(0, cfg.mission_max_per_scan)
-  const selected = max === 0 ? [] : eligible.slice(0, max)
-  report.overflow = eligible.slice(selected.length).map((entry) => entry.mission.id)
+  try {
+    const ideaCfg = await readIdeaConfig(deps.directory)
+    const ideaStore = createStateStore<IdeaState>(
+      join(deps.stateDir, "idea.json"),
+      DEFAULT_IDEA_STATE,
+    )
+    const ideaState = await ideaStore.read()
+    const rolled = ideaCfg.enabled
+      ? ideaDayContext(ideaState, nowMs, ideaCfg.daily_weights, random)
+      : { state: ideaState, day: { target: 0, generated: 0 }, changed: false }
+    if (rolled.changed) await ideaStore.write(rolled.state)
 
-  for (const entry of selected) {
-    const { mission } = entry
-    const written = await writeIntent(
-      deps.stateDir,
-      "chron:missions",
-      {
+    const candidacy = buildCandidacy(
+      ctx,
+      deps.log,
+      rolled,
+      random,
+      await readLastRuns(deps.stateDir),
+      ideaCfg.enabled,
+      ideaCfg.express_min_gap_hours,
+    )
+
+    const stateFile = join(deps.stateDir, MISSIONS_STATE_FILE)
+    const prior = await readEvalState(stateFile)
+    const next: MissionEvalState = { version: MISSIONS_STATE_VERSION, missions: { ...prior.missions } }
+    let dirty = false
+    const window = ctx.quiet ? "night" : "day"
+    const eligible: Array<{ mission: Mission; occurrence_ms: number }> = []
+
+    for (const mission of missions) {
+      if (mission.enqueue === "item") continue
+      if (mission.producer !== "generic") {
+        if (!getMissionProducer(mission.producer)) {
+          warnOnce(
+            `producer|${mission.id}`,
+            `${mission.id}: unknown producer "${mission.producer}" — skipped`,
+          )
+        }
+        continue
+      }
+      if (!mission.schedule) {
+        warnOnce(`schedule|${mission.id}`, `${mission.id}: missing schedule — skipped`)
+        continue
+      }
+      const parsed = parseSchedule(mission.schedule)
+      if (!parsed.ok) {
+        warnOnce(
+          `schedule-invalid|${mission.id}`,
+          `${mission.id}: invalid schedule "${mission.schedule}" (${parsed.reason}) — skipped`,
+        )
+        continue
+      }
+
+      const entry = next.missions[mission.id]
+      if (!entry) {
+        next.missions[mission.id] = { last_evaluated_ms: nowMs }
+        dirty = true
+        continue
+      }
+      const due = occurrence(parsed.schedule, nowMs, entry.last_evaluated_ms)
+      if (!due.due) continue
+
+      const gateOk =
+        mission.enabled &&
+        mission.menus.includes(window) &&
+        ctx.autonomy.level >= mission.min_level &&
+        candidacyPasses(mission, candidacy)
+      if (!gateOk || store.has(missionItemId(mission.id))) {
+        next.missions[mission.id] = { last_evaluated_ms: due.occurrence_ms }
+        dirty = true
+        report.evaluated.push(mission.id)
+        continue
+      }
+      eligible.push({
+        mission,
+        occurrence_ms: due.occurrence_ms,
+      })
+    }
+
+    eligible.sort(
+      (a, b) =>
+        b.mission.priority - a.mission.priority ||
+        a.occurrence_ms - b.occurrence_ms ||
+        a.mission.id.localeCompare(b.mission.id),
+    )
+    const max = Math.max(0, cfg.mission_max_per_scan)
+    const selected = max === 0 ? [] : eligible.slice(0, max)
+    report.overflow = eligible.slice(selected.length).map((entry) => entry.mission.id)
+
+    const items = selected.map((entry) => {
+      const { mission } = entry
+      return {
         id: missionItemId(mission.id),
-        kind: isStatusMission(mission) ? "staleness" : "mission",
+        kind: isStatusMission(mission) ? ("staleness" as const) : ("mission" as const),
+        producer: "chron:missions",
         priority: mission.priority,
         expires_ms: missionExpiry(nowMs),
         enqueued_ms: nowMs,
+        requeue_count: 0,
         payload: {
           mission: mission.id,
           occurrence_ms: entry.occurrence_ms,
@@ -256,32 +272,38 @@ async function scan(deps: MissionScanDeps, warned: Set<string>): Promise<Mission
           quiet: ctx.quiet,
           sleep_status: ctx.sleep.status,
         },
-      },
-      { inboxDir: cfg.inbox_dir },
-    )
-    if (!written.ok) {
-      report.skipped.push({ id: mission.id, reason: written.reason })
-      continue
+      }
+    })
+    const outcome = store.enqueue(items, nowMs)
+    for (const entry of selected) {
+      const { mission } = entry
+      const id = missionItemId(mission.id)
+      if (outcome.rejected.includes(id)) {
+        report.skipped.push({ id: mission.id, reason: "queue-full" })
+        continue
+      }
+      next.missions[mission.id] = { last_evaluated_ms: entry.occurrence_ms }
+      dirty = true
+      report.evaluated.push(mission.id)
+      if (outcome.accepted.includes(id)) report.emitted.push(mission.id)
     }
-    next.missions[mission.id] = { last_evaluated_ms: entry.occurrence_ms }
-    dirty = true
-    report.emitted.push(mission.id)
-    report.evaluated.push(mission.id)
-  }
 
-  if (dirty) {
-    try {
-      await atomicWrite(stateFile, JSON.stringify(next, null, 2) + "\n")
-    } catch (err) {
-      deps.log.warn(
-        `[missions] failed to save ${stateFile}; occurrences may repeat`,
-        err,
-      )
-      report.skipped.push({ id: "-", reason: "state save failed" })
+    if (dirty) {
+      try {
+        await atomicWrite(stateFile, JSON.stringify(next, null, 2) + "\n")
+      } catch (err) {
+        deps.log.warn(
+          `[missions] failed to save ${stateFile}; occurrences may repeat`,
+          err,
+        )
+        report.skipped.push({ id: "-", reason: "state save failed" })
+      }
     }
-  }
 
-  return report
+    return report
+  } finally {
+    store.close()
+  }
 }
 
 /** Build a scan handler with a process-lifetime warn-once set. */

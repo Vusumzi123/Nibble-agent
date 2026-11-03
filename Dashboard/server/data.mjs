@@ -98,11 +98,13 @@ export function resolveLeaf(root, value) {
 export function loadPaths(dir) {
   const { data } = readConfig(dir);
   const p = data?.paths ?? {};
+  const state = resolveLeaf(dir, p.state ?? DEFAULT_PATHS.state);
   return {
     vault: resolveLeaf(dir, p.vault ?? DEFAULT_PATHS.vault),
     diagrams: resolveLeaf(dir, p.diagrams ?? DEFAULT_PATHS.diagrams),
     logs: resolveLeaf(dir, p.log ?? DEFAULT_PATHS.log),
-    state: resolveLeaf(dir, p.state ?? DEFAULT_PATHS.state),
+    state,
+    workDb: resolveLeaf(state, data?.storage?.path ?? 'work.db'),
   };
 }
 
@@ -370,7 +372,194 @@ export function pendingTurns(dir, watermark, excludeMissions = [], cursor = null
 
 /* ------------------------------------------------------------------- state */
 
-export function readState(paths) {
+function parseJsonRecord(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+const LEASE_TTL_MS = 90_000;
+
+function mapStoreRow(row) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    producer: row.producer,
+    enqueued_ms: row.enqueued_ms,
+    priority: row.priority,
+    not_before_ms: row.not_before_ms,
+    expires_ms: row.expires_ms,
+    requeue_count: row.requeue_count,
+    requeue_reason: row.requeue_reason,
+    payload: typeof row.payload === 'string' ? parseJsonRecord(row.payload) : row.payload,
+    state: row.state,
+    attempts: row.attempts,
+    claimed_by: row.claimed_by ?? null,
+    claimed_ms: row.claimed_ms ?? null,
+    failed_ms: row.failed_ms ?? null,
+    last_error: row.last_error ?? null,
+  };
+}
+
+function countJsonFiles(dir) {
+  try {
+    return readdirSync(dir).filter((name) => name.endsWith('.json')).length;
+  } catch {
+    return 0;
+  }
+}
+
+function readLegacyInbox(dir, paths, marker) {
+  const cfg = readConfig(dir).data ?? {};
+  const leaf = typeof cfg.chron?.inbox_dir === 'string' && cfg.chron.inbox_dir
+    ? cfg.chron.inbox_dir
+    : 'inbox';
+  const inboxDir = resolveLeaf(paths.state, leaf);
+  let pending = 0;
+  let bad = 0;
+  if (existsSync(inboxDir)) {
+    try {
+      for (const entry of readdirSync(inboxDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name === 'bad') {
+          bad = countJsonFiles(join(inboxDir, 'bad'));
+          continue;
+        }
+        pending += countJsonFiles(join(inboxDir, entry.name));
+      }
+    } catch {
+      /* an unreadable inbox is data for the panel, not a failed request */
+    }
+  }
+  const backupRoot = join(paths.state, 'backup');
+  let backups = 0;
+  try {
+    backups = readdirSync(backupRoot, { withFileTypes: true }).filter(
+      (entry) => entry.isDirectory() && entry.name.startsWith('pre-sqlite-'),
+    ).length;
+  } catch {
+    backups = 0;
+  }
+  return { dir: inboxDir, pending, bad, migrated: marker !== null, backups };
+}
+
+// One read-only connection for every work-store signal the Dashboard needs:
+// items, dead-letter rows, state/producer counts, scheduler, lease, and the
+// legacy inbox/import marker.
+export function readWorkStore(dir, paths) {
+  const file = paths.workDb ?? join(paths.state, 'work.db');
+  const now = Date.now();
+  const empty = {
+    available: false,
+    db_file: file,
+    db_bytes: existsSync(file) ? statSync(file).size : 0,
+    user_version: null,
+    marker: null,
+    items: [],
+    failed: [],
+    state_counts: { queued: 0, running: 0, failed: 0 },
+    producer_counts: [],
+    scheduler: null,
+    lease: null,
+  };
+  if (!existsSync(file)) {
+    return { ...empty, inbox: readLegacyInbox(dir, paths, null) };
+  }
+
+  let db = null;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 5000');
+    const version = db.prepare('PRAGMA user_version').get();
+    const markerRow = db.prepare("SELECT value FROM meta WHERE key = 'legacy_import_v1'").get();
+    const marker = markerRow?.value ?? null;
+    const rows = db
+      .prepare(
+        "SELECT * FROM work_items WHERE state IN ('queued','running') ORDER BY enqueued_ms ASC, id ASC",
+      )
+      .all();
+    const failed = db
+      .prepare(
+        "SELECT * FROM work_items WHERE state = 'failed' ORDER BY failed_ms DESC, id ASC LIMIT 50",
+      )
+      .all()
+      .map((row) => ({
+        ...mapStoreRow(row),
+        failed_age_ms: Number.isFinite(row.failed_ms) ? Math.max(0, now - row.failed_ms) : null,
+      }));
+    const stateCounts = { queued: 0, running: 0, failed: 0 };
+    for (const row of db.prepare('SELECT state, COUNT(*) AS n FROM work_items GROUP BY state').all()) {
+      if (Object.hasOwn(stateCounts, row.state)) stateCounts[row.state] = Number(row.n) || 0;
+    }
+    const producerCounts = db
+      .prepare(
+        'SELECT producer, state, COUNT(*) AS n, MIN(enqueued_ms) AS oldest FROM work_items GROUP BY producer, state ORDER BY producer, state',
+      )
+      .all()
+      .map((row) => ({
+        producer: row.producer,
+        state: row.state,
+        count: Number(row.n) || 0,
+        oldest_ms: Number.isFinite(row.oldest) ? row.oldest : null,
+        age_ms: Number.isFinite(row.oldest) ? Math.max(0, now - row.oldest) : null,
+      }));
+    const schedulerRow = db.prepare('SELECT * FROM scheduler_state WHERE id = 1').get();
+    const scheduler = schedulerRow
+      ? {
+          fair: Number(schedulerRow.fair) !== 0,
+          weights: parseJsonRecord(schedulerRow.weights),
+          credits: parseJsonRecord(schedulerRow.credits),
+          served: parseJsonRecord(schedulerRow.served),
+          last_kind: schedulerRow.last_kind ?? null,
+          updated_ms: schedulerRow.updated_ms ?? null,
+        }
+      : null;
+    const leaseRow = db.prepare('SELECT * FROM lease WHERE id = 1').get();
+    const lease = leaseRow
+      ? {
+          owner: leaseRow.owner,
+          pid: leaseRow.pid,
+          pid_start: leaseRow.pid_start ?? null,
+          acquired_ms: leaseRow.acquired_ms,
+          heartbeat_ms: leaseRow.heartbeat_ms,
+          age_ms: Number.isFinite(leaseRow.heartbeat_ms)
+            ? Math.max(0, now - leaseRow.heartbeat_ms)
+            : null,
+          ttl_ms: LEASE_TTL_MS,
+          expired: Number.isFinite(leaseRow.heartbeat_ms)
+            ? now - leaseRow.heartbeat_ms >= LEASE_TTL_MS
+            : true,
+        }
+      : null;
+    return {
+      available: true,
+      db_file: file,
+      db_bytes: statSync(file).size,
+      user_version: version?.user_version ?? null,
+      marker,
+      items: rows.map(mapStoreRow),
+      failed,
+      state_counts: stateCounts,
+      producer_counts: producerCounts,
+      scheduler,
+      lease,
+      inbox: readLegacyInbox(dir, paths, marker),
+    };
+  } catch {
+    return { ...empty, inbox: readLegacyInbox(dir, paths, null) };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+export function readState(dir, paths) {
   return {
     heartbeat: safeJson(join(paths.state, 'heartbeat.json')),
     current: safeJson(join(paths.state, 'heartbeat.current.json')),
@@ -379,24 +568,15 @@ export function readState(paths) {
     idea: safeJson(join(paths.state, 'idea.json')),
     drain: safeJson(join(paths.state, 'drain.current.json')),
     cursor: safeJson(join(paths.state, 'drain-cursor.json')),
-    queue: safeJson(join(paths.state, 'work-queue.json')),
+    queue: readWorkStore(dir, paths),
     runtime: safeJson(join(paths.state, 'runtime.json')),
     serveUrl: safeText(join(paths.state, 'serve-url')).trim(),
   };
 }
 
-export function readQueue(paths, missions) {
-  const raw = safeJson(join(paths.state, 'work-queue.json'));
-  const list = Array.isArray(raw)
-    ? raw
-    : Array.isArray(raw?.items)
-      ? raw.items
-      : Array.isArray(raw?.primary) || Array.isArray(raw?.side)
-        ? [
-            ...(Array.isArray(raw.primary) ? raw.primary : []),
-            ...(Array.isArray(raw.side) ? raw.side.map((item) => ({ ...item, kind: 'staleness' })) : []),
-          ]
-        : [];
+export function readQueue(dir, paths, missions) {
+  const raw = readWorkStore(dir, paths);
+  const list = raw.items;
   const byId = new Map(missions.map((m) => [m.id, m]));
   const now = Date.now();
 
@@ -448,7 +628,19 @@ export function readQueue(paths, missions) {
     total: items.length,
     oldest_ms: items.reduce((max, item) => Math.max(max, item.age_ms ?? 0), 0),
     due: items.filter((item) => item.due).length,
-    scheduler: schedulerSnapshot(raw, items, now),
+    scheduler: schedulerSnapshot(raw.scheduler ? { scheduler: raw.scheduler } : null, items, now),
+    available: raw.available,
+    db: {
+      file: raw.db_file,
+      bytes: raw.db_bytes,
+      user_version: raw.user_version,
+      marker: raw.marker,
+    },
+    state_counts: raw.state_counts,
+    producer_counts: raw.producer_counts,
+    failed: raw.failed,
+    lease: raw.lease,
+    inbox: raw.inbox,
   };
 }
 
@@ -1118,8 +1310,8 @@ export function throughputReport(dir, paths, hours = 24) {
   };
 }
 
-export function queueWaitReport(paths, missions) {
-  const queue = readQueue(paths, missions);
+export function queueWaitReport(dir, paths, missions) {
+  const queue = readQueue(dir, paths, missions);
   const ages = queue.items.map((item) => item.age_ms).filter((v) => typeof v === 'number');
   const byKind = {};
   for (const item of queue.items) {
@@ -1270,7 +1462,7 @@ export function overview(dir, paths, state, options = {}) {
   const now = Date.now();
   const missions = readMissions(dir);
   const heartbeat = readHeartbeat(dir, state, now);
-  const queue = readQueue(paths, missions);
+  const queue = readQueue(dir, paths, missions);
   const drain = readDrain(dir, paths, state, now);
   const runs = readRuns(dir, paths, { limit: 200, hours: 24 });
   const cost = costReport(dir, paths, 24);

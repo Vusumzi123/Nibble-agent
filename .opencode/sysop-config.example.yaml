@@ -280,7 +280,7 @@ chron:                          # Production clock (docs/CHRON-SCHEDULER-PLAN.md
   enabled: true                 # false = no production at all (fail closed)
   schedule_dir: .opencode/schedule  # markdown job files, hot-read
   state_file: chron.json        # leaf under <state>
-  inbox_dir: inbox              # leaf under <state>; producer intent spool
+  inbox_dir: inbox              # legacy spool: imported once, then backed up
   max_sleep_seconds: 60         # timer cap so config/folder edits land within a minute
   prompt_ttl_hours: 24          # expiry for a chron prompt -> user task
   default_priority: 5           # 0-9 for chron-created user tasks
@@ -301,6 +301,13 @@ scheduler:                      # SWRR work-kind fairness (docs/swrr-work-schedu
     staleness: 1
     profile-update: 1
     soul-update: 1
+
+storage:                        # SQLite work store (docs/SQLITE-WORK-STORE-PLAN.md)
+  path: work.db                 # leaf under <state>; absolute honored
+  busy_timeout_ms: 5000         # SQLite busy wait
+  synchronous: NORMAL           # NORMAL | FULL (WAL is always on)
+  failed_retry_ms: 3600000      # failed stable-id replacement cooldown
+  failed_retention_days: 30     # prune-failed retention
 
 idea:                          # idea missions (§17.10) — card 7a reads this
   enabled: true                # day draw + post-run dedupe/review/append gate

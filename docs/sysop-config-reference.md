@@ -38,6 +38,7 @@ config warn-once behaviour).
 | `chron:` | `chron-hook.ts` → `lib/chron/*`; `lib/production/missions.ts`; `lib/chron-bridge.ts`; `lib/chron/jobs/drain.ts` |
 | `consumer:` | `heartbeat-hook.ts` → `lib/consumer-config.ts` |
 | `scheduler:` | `lib/scheduler-config.ts` → `lib/work-queue.ts` (SWRR weights) |
+| `storage:` | `lib/storage-config.ts` → `lib/work-store/sqlite.ts` (DB path, timeouts, failed-row retention); `Dashboard/server/data.mjs` |
 | `idea:` | `heartbeat-hook.ts` → `lib/idea.ts` (day draw, dedupe/review/append, express gap) |
 | `soul:` | `soul-hook.ts` (spawns `self-writer`) |
 | `comms:` | `lib/autonomy.ts` (config plumbing only) |
@@ -579,16 +580,17 @@ wakes immediately; `empty` and `no-runnable` sleep to `autonomy.heartbeat.freque
 ## `chron:`
 
 Production clock (`lib/chron/*`, `chron-hook.ts`; design:
-[CHRON-SCHEDULER-PLAN.md](CHRON-SCHEDULER-PLAN.md)). Producers write durable
-intents under `<state>/inbox/`; the heartbeat consumes them. Chron never reads
-`autonomy.*`, never loads missions, and never touches `work-queue.json`.
+[CHRON-SCHEDULER-PLAN.md](CHRON-SCHEDULER-PLAN.md)). Producers insert `queued`
+rows into `state/work.db`; the heartbeat consumer owns every state transition.
+Chron never reads `autonomy.*`, never loads missions, and never mutates an
+item's state.
 
 | Key | Meaning |
 | --- | ------- |
 | `enabled` | master switch. `false` stops all chron production (fail closed; no inline fallback). |
 | `schedule_dir` | Markdown job directory (repo-relative), hot-read. The file is the schedule and the prompt body. |
 | `state_file` | Leaf under `<state>` → `.opencode/state/chron.json`. Holds per-job `last_fired_ms`, `next_due_ms`, `first_deferred_ms`. |
-| `inbox_dir` | Leaf under `<state>` → `.opencode/state/inbox/`. Producers write one JSON intent per work id. |
+| `inbox_dir` | Legacy leaf under `<state>` → `.opencode/state/inbox/`. Read once by the SQLite importer, then moved to `state/backup/pre-sqlite-<ts>/`. |
 | `max_sleep_seconds` | Timer cap (default 60) so folder/config edits land within a minute. |
 | `prompt_ttl_hours` | Expiry for a chron prompt job converted to a user task. |
 | `default_priority` | `0–9` priority for chron-created user tasks (default 5). |
@@ -640,10 +642,34 @@ item runs. Hot-read at tick start.
 | `weights.soul-update` | relative soul-update share (default `1`). |
 
 Weights are positive integers; `0` disables a kind. At least one weight must be
-positive. The state (`credits`, `served`, `last_kind`) is persisted beside the
-queue in `work-queue.json`; config weights are authoritative and hot-read. The
-max gap for a continuously runnable kind is `ceil(total_weight / weight)`.
-Legacy arrays load unchanged and start with zero credits.
+positive. The state (`credits`, `served`, `last_kind`) is persisted in
+`scheduler_state` in `state/work.db`; config weights are authoritative and
+hot-read. The max gap for a continuously runnable kind is
+`ceil(total_weight / weight)`. Legacy v2 queue arrays are imported once with
+their scheduler state and start with zero credits only when the file was
+missing or corrupt.
+
+---
+
+## `storage:`
+
+SQLite work store (`lib/storage-config.ts` → `lib/work-store/sqlite.ts`).
+The DB is machine state: `work_items`, `scheduler_state`, `lease`, `meta`.
+Missions, config, and user-task briefs stay files.
+
+| Key | Meaning |
+| --- | ------- |
+| `path` | DB leaf under `<state>`; absolute paths are honored. Default `work.db`. |
+| `busy_timeout_ms` | SQLite busy wait on every connection (default `5000`). |
+| `synchronous` | `NORMAL` (default) or `FULL`. WAL is always on. |
+| `failed_retry_ms` | Cooldown before a failed stable id may be replaced (default `3600000`). |
+| `failed_retention_days` | Retention for failed rows; `scripts/work-store.mjs prune-failed` uses it (default `30`). |
+
+The first open imports `work-queue.json` and `state/inbox/` once under
+`BEGIN IMMEDIATE`, sets the `legacy_import_v1` meta marker, and copies both to
+`state/backup/pre-sqlite-<ts>/`. Rollback: `node scripts/work-store.mjs dump`
+writes the legacy v2 queue; checking out the previous commit keeps the DB for
+re-entry, and `node scripts/work-store.mjs import` restores it.
 
 ---
 
