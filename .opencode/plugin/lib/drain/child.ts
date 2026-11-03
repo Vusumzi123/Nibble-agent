@@ -8,6 +8,7 @@
 // Loaded via relative import only.
 import { newestUserMessageID, observeSession } from "./observe.ts"
 import { sessionAccounting } from "../transcript.ts"
+import { splitWriterModel } from "../profile.ts"
 import { SUMMARIZER_SESSION_TITLE, WRITER_SESSION_TITLE } from "./automation.ts"
 
 export type ChildKind = "summarize" | "write" | "correct"
@@ -98,6 +99,14 @@ function errorText(err: unknown): string {
 
 function isPromptError(res: { error?: unknown; response?: { ok?: boolean } } | undefined): boolean {
   return !!res?.error || !!(res?.response && !res.response.ok)
+}
+
+/** Config keeps a "provider/model" spec; the prompt API wants the split shape. */
+function modelField(
+  model: string | undefined,
+): { model?: { providerID: string; modelID: string } } {
+  const parsed = model ? splitWriterModel(model) : null
+  return parsed ? { model: parsed } : {}
 }
 
 function usage(rows: unknown[]): { tokens: number | null; cost: number | null } {
@@ -272,7 +281,7 @@ export function createChildExecutor(deps: ChildExecutorDeps): ChildExecutorHandl
         path: { id: sessionID },
         body: {
           ...(request.agent ? { agent: request.agent } : {}),
-          ...(request.model ? { model: request.model } : {}),
+          ...modelField(request.model),
           parts: [{ type: "text", text: request.prompt }],
         },
         query: { directory: deps.directory },
@@ -305,7 +314,7 @@ export function createChildExecutor(deps: ChildExecutorDeps): ChildExecutorHandl
         path: { id: sessionID },
         body: {
           ...(request.agent ? { agent: request.agent } : {}),
-          ...(request.model ? { model: request.model } : {}),
+          ...modelField(request.model),
           parts: [{ type: "text", text: request.prompt }],
         },
         query: { directory: deps.directory },
