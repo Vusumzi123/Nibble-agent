@@ -169,6 +169,10 @@ Call the \`summary_items\` tool exactly once. Each item has:
 - atoms: commands, paths, URLs, KEY=value and flags, verbatim.
 
 Rules:
+- Summarize only what the delta says. Do not verify, correct, fact-check, or
+  add outside knowledge.
+- Write summary as plain sentences: no markdown, headings, bullets, code
+  fences, or emphasis.
 - one item per distinct durable topic (1..N), "one thought per note";
 - preserve every command, path, URL, KEY=value and flag verbatim in atoms;
 - skip chatter, questions with no answer, and transient status;

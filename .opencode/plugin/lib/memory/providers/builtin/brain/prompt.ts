@@ -23,11 +23,12 @@ export type PromptOptions = {
 }
 
 const HEADER = `Consolidation mode.
-Consolidate the following knowledge items into structured, deduplicated,
-[[linked]] Brain vault notes, following your operating instructions.
-When the batch is finished, call \`drain_report\` exactly once with item_count,
-the consolidated labels, the skipped labels, and partial: true only when the
-step cap stopped you.`
+Store these items in the Brain vault. Use \`markdown-vault_view\` semantic search
+to find an existing note, then \`markdown-vault_vault\` create or update.
+The item \`summary\` and \`atoms\` are the source of truth — do not verify,
+correct, or fact-check them, and never search outside the vault.
+Call \`drain_report\` exactly once when the batch is finished, with \`partial:
+true\` only when the step cap stopped you.`
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8")
