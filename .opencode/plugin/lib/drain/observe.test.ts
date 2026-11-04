@@ -257,3 +257,114 @@ test("newestUserMessageID picks the newest user row, not the last row", () => {
   )
   assert.equal(newestUserMessageID([]), null)
 })
+
+test("a child that keeps producing rows for ten minutes is not stalled", async () => {
+  const c = clock()
+  const client = {
+    session: {
+      async messages() {
+        const at = c.now()
+        const rows: unknown[] = [user("u_new", 1)]
+        const produced = Math.floor(at / 30_000)
+        for (let i = 0; i <= produced; i++) {
+          rows.push(assistant({ id: `a${i}`, parentID: "u_new", created: i * 30_000 }))
+        }
+        if (at >= 600_000) {
+          rows.push(
+            assistant({
+              id: "done",
+              parentID: "u_new",
+              created: 600_000,
+              completed: 600_001,
+              finish: "stop",
+              text: "done",
+            }),
+          )
+        }
+        return { data: rows }
+      },
+    },
+  }
+
+  const observation = await observeSession(client, "/work", "ses_child", {
+    promptUserID: null,
+    timeoutMs: 900_000,
+    stallMs: 120_000,
+    pollMs: 10_000,
+    now: c.now,
+    sleep: c.sleep,
+  })
+
+  assert.equal(observation.phase, "complete")
+  assert.deepEqual(observation.replies, ["done"])
+  assert.ok(c.slept() >= 600_000)
+})
+
+test("a child with no new row for stall_ms is timed out", async () => {
+  const c = clock()
+  const { client } = fakeClient([
+    [user("u_new", 1), assistant({ id: "a1", parentID: "u_new", created: 2, text: "working" })],
+  ])
+
+  const observation = await observeSession(client, "/work", "ses_child", {
+    promptUserID: null,
+    timeoutMs: 900_000,
+    stallMs: 120_000,
+    pollMs: 10_000,
+    now: c.now,
+    sleep: c.sleep,
+  })
+
+  assert.equal(observation.phase, "timeout")
+  assert.deepEqual(observation.replies, ["working"], "the timeout still returns the latest rows")
+  assert.ok(c.slept() >= 120_000)
+  assert.ok(c.slept() < 130_000, "the stall window is not overshot by a full poll")
+})
+
+test("the absolute ceiling stops a child even when stall_ms is larger", async () => {
+  const c = clock()
+  const { client } = fakeClient([
+    [user("u_new", 1), assistant({ id: "a1", parentID: "u_new", created: 2, text: "working" })],
+  ])
+
+  const observation = await observeSession(client, "/work", "ses_child", {
+    promptUserID: null,
+    timeoutMs: 100,
+    stallMs: 1_000_000,
+    pollMs: 25,
+    now: c.now,
+    sleep: c.sleep,
+  })
+
+  assert.equal(observation.phase, "timeout")
+  assert.ok(c.slept() >= 100)
+  assert.ok(c.slept() < 125, "the ceiling is not overshot by a full poll")
+})
+
+test("continuous progress does not extend the absolute ceiling", async () => {
+  const c = clock()
+  const client = {
+    session: {
+      async messages() {
+        const at = c.now()
+        const rows: unknown[] = [user("u_new", 1)]
+        for (let i = 0; i <= Math.floor(at / 10); i++) {
+          rows.push(assistant({ id: `a${i}`, parentID: "u_new", created: i * 10 }))
+        }
+        return { data: rows }
+      },
+    },
+  }
+
+  const observation = await observeSession(client, "/work", "ses_child", {
+    promptUserID: null,
+    timeoutMs: 100,
+    stallMs: 50,
+    pollMs: 10,
+    now: c.now,
+    sleep: c.sleep,
+  })
+
+  assert.equal(observation.phase, "timeout")
+  assert.ok(c.slept() >= 100)
+})

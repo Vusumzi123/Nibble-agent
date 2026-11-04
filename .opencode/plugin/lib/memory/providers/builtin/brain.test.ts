@@ -189,6 +189,19 @@ test("the drain path spawns drain-writer and a 4-item prompt stays lean", async 
   )
 })
 
+test("a partial report is a completed chunk with only its reported items", async () => {
+  const ws = await workspace()
+  const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })
+  const { executor } = fakeExecutor({ rows: reportRows(2, ["#1"], [], true) })
+
+  const result = await provider.consolidate!([ITEM, ITEM], ctx(ws, client(), executor))
+
+  assert.equal(result.ok, true)
+  assert.equal(result.partial, true)
+  assert.deepEqual(result.consumed, [1])
+  assert.deepEqual(result.skipped, [])
+})
+
 test("an invalid report is a permanent error that does not consume items", async () => {
   const ws = await workspace()
   const provider = createBrainProvider({ ...ws, drain: DEFAULT_DRAIN, summaryWords: 400 })

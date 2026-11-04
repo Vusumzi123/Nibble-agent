@@ -126,30 +126,36 @@ the same note twice.
 
 ### 6. Write
 
-The fresh items are split into chunks of `max_items_per_batch` (default 4) and
-handed serially to the active memory provider's writer. The Brain provider
+The fresh items are split into chunks of `max_items_per_batch` (default 1, the
+items per child) and handed serially to the active memory provider's writer.
+The load clamps the value to `max(1, floor(steps / 8))` of the writer agent's
+declared step budget, so a chunk cannot ask for more items than the child can
+finish; a larger configured value warns and is reduced. A pass still drains the
+whole batch, one child per chunk. The Brain provider
 prefetches candidate notes deterministically, builds a consolidation prompt
 labelled `#1..N` per chunk, and spawns the `drain-writer` agent
 (`drain.writer_agent`; `rag-brain` remains the interactive writer). The writer
 creates or updates byte-preserving vault notes and calls `drain_report` once
 with `item_count`, the consolidated labels, and the skipped labels.
 
-Every item must appear exactly once across the two lists. The coordinator reads
-the last `drain_report` call from the transcript and re-validates it against the
-real batch. The pipe maps the chunk-local labels back to run-wide labels and
+Every item must appear exactly once across the two lists unless the writer
+declares `partial: true`. The coordinator reads the last `drain_report` call
+from the transcript and re-validates it against the real batch. The pipe maps the chunk-local labels back to run-wide labels and
 advances only the sessions whose items were all reported.
 
 A completed reply with no `drain_report` call gets one correction turn in the
-same child session. Missing, duplicate, or unknown labels are a permanent
-failure; a child that hit its deadline and was aborted is a transient failure
-unless its late rows contain a valid report, in which case the report is
-accepted with `late: true`.
+same child session. A report with `partial: true` is a completed chunk: only
+its reported items count and the sessions it did not finish stay at their
+marks. Missing, duplicate, or unknown labels are a permanent failure; a child
+that hit its deadline and was aborted is a transient failure unless its late
+rows contain a valid report, in which case the report is accepted with
+`late: true`.
 
 ### 7. Advance
 
 Per-session marks advance to the session's newest rendered turn only when
-every item in that session was consumed or skipped. Sessions with a partial
-report stay at their mark and floor the watermark, so the next pass re-reads
+every item in that session was consumed or skipped. Sessions with unreported
+items stay at their mark and floor the watermark, so the next pass re-reads
 them from the same place. The watermark advances to the minimum of the
 consumed bound and all floors.
 
@@ -161,7 +167,14 @@ Failure accounting is layered:
   sessions; after `poison_attempts` (default 3) only those sessions are dropped
   and advanced, never the whole batch;
 - **budget stop** — unlaunched sessions stay unsummarized and floored; the
-  pass reports `degraded` with `stopped: token-budget`.
+  pass reports `degraded` with `stopped: token-budget`;
+- **partial** — a valid partial report advances the sessions it finished and
+  floors the rest; the pass reports `completed` with `stopped: partial`, never
+  `error`.
+
+Every chunk that reported is folded even when a later chunk fails. A failed
+chunk accounts only its own sessions; the batch-wide backoff is reserved for a
+pass where no item was reported at all.
 
 ## Budgets, concurrency, and timeouts
 
@@ -169,7 +182,8 @@ Failure accounting is layered:
 | --- | --- | --- |
 | `token_budget` | 80 000 (`0` = unlimited) | Per-pass ceiling, checked between units — never mid-unit. A ceiling, not a target. |
 | `summarize_concurrency` | 2 | Concurrent summarizer children, clamped to `1..batch_sessions`. Writer chunks stay serial. |
-| `child_stall_ms` | 600 000 | Hard deadline for one child. Completion is polled from message state; on the deadline the child is read once for a late report, then aborted. |
+| `child_stall_ms` | 600 000 | Absolute ceiling for one child. Completion is polled from message state; on the ceiling the child is read once for a late report, then aborted. |
+| `stall_ms` | 120 000 | Idle window. The child is stopped only after this long with no new message row; progress resets the window. Clamped to `1..child_stall_ms`. |
 | `max_attempts` | 2 | Task attempts per pass. Summarizers respawn; writers retry only when no work could have started. |
 | `settle_seconds` | 120 | A session idle for less than this is not consumed. |
 | `poll_seconds` | 60 | Base for the failure backoff (`× 4`). |
@@ -206,8 +220,9 @@ drain:
   summarize_model: ""
   batch_sessions: 5
   summarize_concurrency: 2
-  max_items_per_batch: 4
+  max_items_per_batch: 1
   child_stall_ms: 600000
+  stall_ms: 120000
   max_attempts: 2
   token_budget: 80000
   trigger_pending: 12

@@ -13,6 +13,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  batch_sessions: 9",
       "  summarize_concurrency: 3",
       "  max_items_per_batch: 5",
+      "  stall_ms: 90000",
       "  max_attempts: 3",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
@@ -38,6 +39,7 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.batch_sessions, 9)
   assert.equal(parsed.summarize_concurrency, 3)
   assert.equal(parsed.max_items_per_batch, 5)
+  assert.equal(parsed.stall_ms, 90000)
   assert.equal(parsed.max_attempts, 3)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
@@ -182,6 +184,64 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.writer_model, "")
   assert.equal(cfg.writer_agent, DEFAULT_DRAIN.writer_agent)
   assert.equal(cfg.summarize_model, "")
-  assert.equal(cfg.max_items_per_batch, 4, "the writer batch default is four items")
+  assert.equal(cfg.max_items_per_batch, 1, "the writer batch default is one item")
   assert.equal(cfg.max_attempts, 2, "summarizer attempts default to two")
+})
+
+test("stall_ms defaults to 120000 and clamps to 1..child_stall_ms", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
+  await mkdir(join(dir, ".opencode"), { recursive: true })
+  const write = (lines: string[]) =>
+    writeFile(join(dir, ".opencode", "sysop-config.yaml"), ["drain:", ...lines].join("\n"), "utf8")
+
+  await write(["  child_stall_ms: 600000"])
+  assert.equal((await readDrainConfig(dir)).stall_ms, 120_000, "the default idle window")
+  assert.equal(DEFAULT_DRAIN.stall_ms, 120_000)
+
+  await write(["  child_stall_ms: 600000", "  stall_ms: 0"])
+  assert.equal((await readDrainConfig(dir)).stall_ms, 120_000, "a non-positive value falls back")
+
+  await write(["  child_stall_ms: 300000", "  stall_ms: 900000"])
+  assert.equal((await readDrainConfig(dir)).stall_ms, 300_000, "the ceiling caps the idle window")
+
+  await write(["  child_stall_ms: 300000", "  stall_ms: 500"])
+  assert.equal((await readDrainConfig(dir)).stall_ms, 500)
+})
+
+test("max_items_per_batch defaults to one and clamps to the writer step budget", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-config-"))
+  await mkdir(join(dir, ".opencode", "agents"), { recursive: true })
+  const writeConfig = (value: number) =>
+    writeFile(
+      join(dir, ".opencode", "sysop-config.yaml"),
+      ["drain:", `  max_items_per_batch: ${value}`].join("\n"),
+      "utf8",
+    )
+  const writeAgent = (steps: number) =>
+    writeFile(
+      join(dir, ".opencode", "agents", "drain-writer.md"),
+      ["---", "steps: " + steps, "---", "# writer"].join("\n"),
+      "utf8",
+    )
+  const warnings: string[] = []
+  const read = () => readDrainConfig(dir, { onWarn: (message) => warnings.push(message) })
+
+  assert.equal(DEFAULT_DRAIN.max_items_per_batch, 1, "one item per child by default")
+
+  await writeConfig(12)
+  await writeAgent(40)
+  assert.equal((await read()).max_items_per_batch, 5, "40 steps / 8 per item = 5")
+  assert.equal(warnings.length, 1, "a clamped value warns")
+  assert.match(warnings[0], /40-step writer budget/)
+
+  warnings.length = 0
+  await writeAgent(80)
+  assert.equal((await read()).max_items_per_batch, 10, "80 steps / 8 per item = 10")
+  assert.equal(warnings.length, 1)
+
+  warnings.length = 0
+  await writeConfig(2)
+  await writeAgent(40)
+  assert.equal((await read()).max_items_per_batch, 2, "a value inside the budget is unchanged")
+  assert.equal(warnings.length, 0)
 })

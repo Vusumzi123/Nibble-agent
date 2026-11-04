@@ -15,8 +15,10 @@ export type SpawnOptions = {
   agent?: string
   /** Model from `drain.writer_model`; "" = the agent default. */
   model?: string
-  /** Hard deadline for the child, in ms. */
+  /** Absolute ceiling for the child, in ms. */
   deadlineMs?: number
+  /** Kill only after this long with no new progress; 0 = deadline-only. */
+  stallMs?: number
 }
 
 export type SpawnResult = {
@@ -87,6 +89,7 @@ export async function spawnConsolidationChild(
     agent: opts.agent ?? "rag-brain",
     ...(opts.model ? { model: opts.model } : {}),
     deadlineMs: opts.deadlineMs ?? 600_000,
+    stallMs: opts.stallMs ?? 0,
   }
   return toSpawnResult(await executor.spawn(request))
 }
@@ -103,6 +106,7 @@ export async function promptConsolidationChild(
     agent: opts.agent ?? "rag-brain",
     ...(opts.model ? { model: opts.model } : {}),
     deadlineMs: opts.deadlineMs ?? 600_000,
+    stallMs: opts.stallMs ?? 0,
   }
   return toSpawnResult(await executor.prompt(sessionID, request))
 }

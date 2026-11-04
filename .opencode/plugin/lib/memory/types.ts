@@ -36,6 +36,8 @@ export type WriteReport = {
   skipped: number[]
   /** A provider that extracted/wrote the whole batch atomically. */
   atomic?: boolean
+  /** The writer stopped at its step cap and reported the items it finished. */
+  partial?: boolean
   /** The report came from a child that answered after its wait deadline. */
   late?: boolean
   /** Work may have started (the child prompt was accepted). */

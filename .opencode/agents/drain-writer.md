@@ -1,6 +1,5 @@
 ---
 description: Drain-only consolidation writer. Turns summarized conversation items into byte-preserving Brain vault notes and reports through the drain_report tool. Invoked by the drain pipe, never by the user. Vault reads stay with rag-search.
-model: deepseek/deepseek-flash
 mode: subagent
 color: "#FFD700"
 steps: 40

@@ -30,8 +30,10 @@ export type ChildRequest = {
   agent?: string
   model?: string
   title?: string
-  /** Hard deadline for this child, in ms. */
+  /** Absolute ceiling for this child, in ms. */
   deadlineMs: number
+  /** Kill only after this long with no new progress; 0 = deadline-only. */
+  stallMs?: number
 }
 
 export type ChildOutcome = {
@@ -198,6 +200,7 @@ export function createChildExecutor(deps: ChildExecutorDeps): ChildExecutorHandl
       observation = await observeSession(deps.client, deps.directory, sessionID, {
         promptUserID,
         timeoutMs: request.deadlineMs,
+        stallMs: request.stallMs ?? 0,
         signal: controller.signal,
         ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
       })

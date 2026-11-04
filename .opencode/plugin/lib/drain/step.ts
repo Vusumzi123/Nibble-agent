@@ -103,7 +103,8 @@ export async function drainDue(deps: {
  */
 export async function runDrainStep(deps: DrainStepDeps): Promise<DrainStepResult> {
   const now = deps.now ?? Date.now
-  const readConfig = deps.readConfig ?? (() => readDrainConfig(deps.directory))
+  const readConfig =
+    deps.readConfig ?? (() => readDrainConfig(deps.directory, { onWarn: deps.onWarn }))
 
   let cfg: DrainConfig
   try {

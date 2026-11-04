@@ -5,6 +5,8 @@
 // never throws.
 //
 // Loaded via relative import only.
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 import { parseFlatBlock, parseInlineList, readSection, sectionCoercer } from "../config.ts"
 
 export type DrainConfig = {
@@ -22,8 +24,10 @@ export type DrainConfig = {
   max_session_bytes: number
   max_items_per_session: number
   max_items_per_batch: number
-  /** Hard deadline for one child (summarizer or writer), in ms. */
+  /** Absolute ceiling for one child (summarizer or writer), in ms. */
   child_stall_ms: number
+  /** Kill only after this long with no new progress, in ms. */
+  stall_ms: number
   /** Attempts per summarizer task; writer retries stay guarded. */
   max_attempts: number
   prefetch_candidates: number
@@ -71,8 +75,9 @@ export const DEFAULT_DRAIN: DrainConfig = {
   max_turns_per_session: 40,
   max_session_bytes: 24000,
   max_items_per_session: 6,
-  max_items_per_batch: 4,
+  max_items_per_batch: 1,
   child_stall_ms: 600_000,
+  stall_ms: 120_000,
   max_attempts: 2,
   prefetch_candidates: 3,
   continuity_turns: 6,
@@ -104,6 +109,7 @@ const INT_KEYS = new Set([
   "max_items_per_session",
   "max_items_per_batch",
   "child_stall_ms",
+  "stall_ms",
   "max_attempts",
   "prefetch_candidates",
   "continuity_turns",
@@ -172,7 +178,29 @@ function atLeast(value: number, min: number, fallback: number): number {
   return Number.isFinite(value) && value >= min ? Math.floor(value) : fallback
 }
 
-export async function readDrainConfig(directory: string): Promise<DrainConfig> {
+/** The writer agent's declared step budget, or null when it cannot be read. */
+async function writerStepBudget(directory: string, agent: string): Promise<number | null> {
+  const name = agent.trim()
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) return null
+  try {
+    const text = await readFile(join(directory, ".opencode", "agents", `${name}.md`), "utf8")
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? ""
+    const match = /^steps:\s*(\d+)\s*$/m.exec(frontmatter)
+    const steps = Number(match?.[1] ?? NaN)
+    return Number.isFinite(steps) && steps > 0 ? Math.floor(steps) : null
+  } catch {
+    return null
+  }
+}
+
+export type DrainConfigReadOptions = {
+  onWarn?: (message: string, err?: unknown) => void
+}
+
+export async function readDrainConfig(
+  directory: string,
+  opts: DrainConfigReadOptions = {},
+): Promise<DrainConfig> {
   const cfg = await readSection(directory, "drain", DEFAULT_DRAIN, { coerce: DRAIN_COERCE })
 
   cfg.batch_sessions = atLeast(cfg.batch_sessions, 1, DEFAULT_DRAIN.batch_sessions)
@@ -202,9 +230,23 @@ export async function readDrainConfig(directory: string): Promise<DrainConfig> {
     1,
     DEFAULT_DRAIN.max_items_per_batch,
   )
+  const writerSteps = await writerStepBudget(directory, cfg.writer_agent)
+  if (writerSteps !== null) {
+    const cap = Math.max(1, Math.floor(writerSteps / 8))
+    if (cfg.max_items_per_batch > cap) {
+      opts.onWarn?.(
+        `drain: max_items_per_batch ${cfg.max_items_per_batch} exceeds the ${writerSteps}-step writer budget; clamped to ${cap}`,
+      )
+      cfg.max_items_per_batch = cap
+    }
+  }
   cfg.child_stall_ms = Number.isFinite(cfg.child_stall_ms)
     ? Math.max(1000, Math.floor(cfg.child_stall_ms))
     : DEFAULT_DRAIN.child_stall_ms
+  cfg.stall_ms =
+    Number.isFinite(cfg.stall_ms) && cfg.stall_ms > 0
+      ? Math.min(cfg.child_stall_ms, Math.max(1, Math.floor(cfg.stall_ms)))
+      : Math.min(cfg.child_stall_ms, DEFAULT_DRAIN.stall_ms)
   cfg.max_attempts = atLeast(cfg.max_attempts, 1, DEFAULT_DRAIN.max_attempts)
   cfg.prefetch_candidates = atLeast(
     cfg.prefetch_candidates,

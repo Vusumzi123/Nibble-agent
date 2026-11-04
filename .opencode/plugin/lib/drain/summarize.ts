@@ -142,8 +142,10 @@ export type SummarizeDeps = {
   /** Model from `drain.summarize_model`; "" = the agent default. */
   model?: string
   maxItems: number
-  /** Hard deadline for this child, in ms. */
+  /** Absolute ceiling for this child, in ms. */
   deadlineMs?: number
+  /** Kill only after this long with no new progress; 0 = deadline-only. */
+  stallMs?: number
   onWarn?: (message: string, err?: unknown) => void
 }
 
@@ -349,6 +351,7 @@ export async function summarizeSession(
     agent: "session-summarizer",
     ...(deps.model ? { model: deps.model } : {}),
     deadlineMs: deps.deadlineMs ?? 600_000,
+    stallMs: deps.stallMs ?? 0,
   }
 
   let outcome: ChildOutcome

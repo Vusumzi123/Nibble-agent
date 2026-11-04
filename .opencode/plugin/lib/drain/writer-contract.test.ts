@@ -78,21 +78,17 @@ test("rare vault formats live in on-demand references", async () => {
   assert.match(meta, /consolidation.*reclassification.*hygiene.*change/)
 })
 
-test("only the vault writers declare a predefined model", async () => {
-  // No hidden pin may drift from the deployed harness: model selection comes
-  // from config (drain.writer_model / drain.summarize_model) or inheritance.
-  // The two vault writers are the exception: drain-writer's pin is the live
-  // rag-brain default and exists so drain cost comparisons stay on the same
-  // substrate. A deployed rag-brain may carry the same pin.
+test("no agent declares a predefined model", async () => {
+  // Model selection comes from config (drain.writer_model /
+  // drain.summarize_model) or inheritance. A frontmatter pin would silently
+  // defeat a config model swap.
   const dir = new URL("../../../agents/", import.meta.url)
-  const mayPin = new Set(["drain-writer.md", "rag-brain.md"])
   for (const name of await readdir(dir)) {
-    if (!name.endsWith(".md") || mayPin.has(name)) continue
+    if (!name.endsWith(".md")) continue
     const text = await readFile(new URL(name, dir), "utf8")
     assert.equal(/^model:/m.test(text), false, `${name} must not declare model:`)
   }
   const drainWriter = await readFile(new URL("drain-writer.md", dir), "utf8")
-  assert.match(drainWriter, /^model:\s*\S+$/m)
   assert.match(drainWriter, /^steps:\s*40$/m)
   assert.match(drainWriter, /drain_report:\s*true/)
   assert.match(drainWriter, /drain_report/)

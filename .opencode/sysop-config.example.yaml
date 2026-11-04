@@ -54,8 +54,9 @@ drain:
   max_turns_per_session: 40    # turn cap per session
   max_session_bytes: 24000     # rendered-delta byte cap (0 = unlimited)
   max_items_per_session: 6     # summarizer output cap
-  max_items_per_batch: 4       # writer items per spawn (40-step budget)
-  child_stall_ms: 600000       # hard deadline per child (summarizer/writer)
+  max_items_per_batch: 1       # items per writer child, clamped to floor(agent steps / 8)
+  child_stall_ms: 600000       # absolute ceiling per child (summarizer/writer)
+  stall_ms: 120000             # idle window; progress resets it, never over the ceiling
   max_attempts: 2              # summarizer attempts; writers retry only if unstarted
   prefetch_candidates: 3       # deterministic vault candidates per batch
   continuity_turns: 6          # reserved for continuity tuning (currently unused)

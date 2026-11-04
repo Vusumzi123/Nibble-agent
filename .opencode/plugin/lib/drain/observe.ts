@@ -27,8 +27,10 @@ export type Observation = {
 export type ObserveOptions = {
   /** Newest user message id read immediately before `promptAsync`. */
   promptUserID?: string | null
-  /** Hard deadline for this child, in ms. */
+  /** Absolute ceiling for this child, in ms. */
   timeoutMs: number
+  /** Kill only after this long with no new progress; 0 = deadline-only. */
+  stallMs?: number
   /** Poll interval (default 1000 ms). */
   pollMs?: number
   /** Clock seam for tests. */
@@ -193,6 +195,10 @@ function evaluate(
   }
 }
 
+function progressKey(progress: Observation["progress"]): string {
+  return `${progress.messages}:${progress.newestId ?? ""}:${progress.newestPartAt ?? ""}`
+}
+
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve()
@@ -224,7 +230,10 @@ export async function observeSession(
     opts.sleep ? opts.sleep(ms) : defaultSleep(ms, opts.signal)
   const promptUserID = opts.promptUserID ?? null
   const timeoutMs = Math.max(0, opts.timeoutMs)
+  const stallMs = Math.max(0, Math.floor(opts.stallMs ?? 0))
   const deadline = now() + timeoutMs
+  let lastProgressKey = ""
+  let lastProgressAt = now()
 
   const read = async (): Promise<unknown[]> => {
     const res = await client.session.messages({
@@ -239,12 +248,23 @@ export async function observeSession(
     const observation = evaluate(rows, promptUserID, false)
     if (observation.phase !== "running") return observation
 
-    if (now() >= deadline) {
+    const at = now()
+    const key = progressKey(observation.progress)
+    if (key !== lastProgressKey) {
+      lastProgressKey = key
+      lastProgressAt = at
+    }
+    const idleMs = at - lastProgressAt
+    const stalled = stallMs > 0 && idleMs >= stallMs
+    if (at >= deadline || stalled) {
       const finalRows = await read()
       return evaluate(finalRows, promptUserID, true)
     }
 
-    const remaining = deadline - now()
+    const remaining = Math.min(
+      deadline - at,
+      stallMs > 0 ? stallMs - idleMs : Number.POSITIVE_INFINITY,
+    )
     await sleep(Math.max(1, Math.min(pollMs, remaining)))
     if (opts.signal?.aborted) {
       const finalRows = await read()

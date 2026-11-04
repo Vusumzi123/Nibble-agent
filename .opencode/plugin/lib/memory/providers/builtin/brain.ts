@@ -119,6 +119,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         agent: cfg.writer_agent,
         model: cfg.writer_model,
         deadlineMs: cfg.child_stall_ms,
+        stallMs: cfg.stall_ms,
       })
 
       let late = spawned.lateReply
@@ -161,6 +162,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
             agent: cfg.writer_agent,
             model: cfg.writer_model,
             deadlineMs: cfg.child_stall_ms,
+            stallMs: cfg.stall_ms,
           })
           late = late || corrected.lateReply
           aborted = aborted || corrected.aborted
@@ -200,6 +202,7 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
       if (aborted) late = true
       return {
         ok: true,
+        ...(report.partial ? { partial: true } : {}),
         consumed: report.consolidated,
         skipped: report.skipped,
         ...telemetry(),

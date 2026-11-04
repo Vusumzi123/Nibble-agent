@@ -139,8 +139,9 @@ fully-reported sessions.
 | `max_turns_per_session` | Cap on fetched text parts per session. |
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
-| `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 4). |
-| `child_stall_ms` | Hard deadline for one child, summarizer or writer (default 600 000 ms, floor 1 000). The coordinator polls message state; on the deadline it reads once for a late report, then aborts the child. |
+| `max_items_per_batch` | Items handed to **one writer child** (default 1); a pass still drains the whole batch serially, one child per chunk. Clamped at load to `max(1, floor(steps / 8))` of the configured `writer_agent` when its frontmatter declares `steps:`; a larger configured value warns and is reduced. |
+| `child_stall_ms` | Absolute ceiling for one child, summarizer or writer (default 600 000 ms, floor 1 000). The coordinator polls message state; reaching the ceiling reads once for a late report, then aborts the child. This is not the idle timeout. |
+| `stall_ms` | Idle window for one child (default 120 000 ms, clamped to `1..child_stall_ms`). The child is stopped only after this long with no new message row; continued progress resets the window, so a slow but live child is never killed at a fixed wall clock. |
 | `max_attempts` | Attempts per task in one pass (default 2, floor 1). A summarizer may respawn; a writer retries only when no work could have started. |
 | `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness, dream]`. |
 | `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |

@@ -5,7 +5,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { DEFAULT_DRAIN, type DrainConfig } from "./config.ts"
-import { loadCursor, resolveCursorFile } from "./cursor.ts"
+import {
+  advanceSession,
+  defaultCursor,
+  loadCursor,
+  resolveCursorFile,
+  saveCursor,
+} from "./cursor.ts"
 import { createDrainLedger, DRAIN_LEDGER_FILE } from "./ledger.ts"
 import { createBrainProvider } from "../memory/providers/builtin/brain.ts"
 import { DRAIN_REPORT_TOOL } from "../memory/providers/builtin/brain/report.ts"
@@ -240,6 +246,37 @@ async function seedDb(
     "m1",
     JSON.stringify({ type: opts.partType ?? "text", text }),
   )
+  db.close()
+  return file
+}
+
+async function seedTwoSessionsDb(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "drain-pipe-db-"))
+  const file = join(dir, "opencode.db")
+  const db = new DatabaseSync(file)
+  db.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL, time_updated INTEGER NOT NULL, time_created INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '');
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, data TEXT NOT NULL);
+    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+  `)
+  const insertSession = db.prepare(
+    "INSERT INTO session (id, parent_id, directory, time_updated) VALUES (?, ?, ?, ?)",
+  )
+  const insertMessage = db.prepare(
+    "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+  )
+  const insertPart = db.prepare(
+    "INSERT INTO part (id, message_id, data) VALUES (?, ?, ?)",
+  )
+  for (const [id, ts, text] of [
+    ["ses_a", 1000, "alpha topic: restart the tunnel"],
+    ["ses_b", 2000, "beta topic: rotate backups"],
+  ] as const) {
+    insertSession.run(id, null, PROJECT, ts)
+    insertMessage.run(`${id}-m`, id, ts, JSON.stringify({ role: "user" }))
+    insertPart.run(`${id}-p`, `${id}-m`, JSON.stringify({ type: "text", text }))
+  }
   db.close()
   return file
 }
@@ -483,7 +520,9 @@ test("a partial writer report blocks the cursor and counts attempts", async () =
     writerReportFor: () => ({ consolidated: ["#1"], skipped: [] }),
   })
 
-  const first = await runDrainPipe(deps(base, client))
+  const first = await runDrainPipe(
+    deps(base, client, { config: { max_items_per_batch: 2 } }),
+  )
   assert.equal(first.outcome, "error")
   assert.match(first.error ?? "", /invalid report/)
   assert.equal(first.cursorAfter, 0)
@@ -494,7 +533,7 @@ test("a partial writer report blocks the cursor and counts attempts", async () =
   assert.equal(cursor1.blocked.attempts, 1)
   assert.ok(cursor1.blocked.blocked_until > 0, "a failure sets the backoff deadline")
 
-  await runDrainPipe(deps(base, client))
+  await runDrainPipe(deps(base, client, { config: { max_items_per_batch: 2 } }))
   const cursor2 = await loadCursor(resolveCursorFile(base.stateDir))
   assert.equal(cursor2.blocked.ts, 1000)
   assert.equal(cursor2.blocked.attempts, 2)
@@ -507,9 +546,9 @@ test("poison advances past a batch that never reports completely", async () => {
     writerReportFor: () => ({ consolidated: ["#1"], skipped: [] }),
   })
 
-  await runDrainPipe(deps(base, client))
-  await runDrainPipe(deps(base, client))
-  const third = await runDrainPipe(deps(base, client))
+  await runDrainPipe(deps(base, client, { config: { max_items_per_batch: 2 } }))
+  await runDrainPipe(deps(base, client, { config: { max_items_per_batch: 2 } }))
+  const third = await runDrainPipe(deps(base, client, { config: { max_items_per_batch: 2 } }))
 
   assert.equal(third.outcome, "dropped")
   assert.equal(third.cursorAfter, 1000)
@@ -695,10 +734,9 @@ test("a batch over max_items_per_batch is chunked into complete writer reports",
   assert.deepEqual(ledgerSources(lines), ["summarizer", "writer", "writer", "pipe"])
 })
 
-test("a later chunk failure blocks the cursor even when earlier chunks succeeded", async () => {
-  const base = { ...(await workspace()), dbFile: await seedDb() }
-  const { client } = fakeClient({ summaryItemsFor: () => TWO_ITEMS })
-  let calls = 0
+test("a later chunk failure advances earlier sessions and leaves only the failed one pending", async () => {
+  const base = { ...(await workspace()), dbFile: await seedTwoSessionsDb() }
+  const { client } = fakeClient({ summaryItemsFor: poolItems })
   const provider: any = {
     ...createBrainProvider({
       directory: PROJECT,
@@ -708,12 +746,17 @@ test("a later chunk failure blocks the cursor even when earlier chunks succeeded
       summaryWords: 400,
       dbFile: base.dbFile,
     }),
-    async consolidate() {
-      calls++
-      if (calls === 2) {
-        return { ok: false, consumed: [], skipped: [], errorKind: "permanent", detail: "chunk two failed" }
+    async consolidate(items: any[]) {
+      if (items.some((item) => item.title === "Beta Note")) {
+        return {
+          ok: false,
+          consumed: [],
+          skipped: [],
+          errorKind: "permanent",
+          detail: "chunk two failed",
+        }
       }
-      return { ok: true, consumed: [1], skipped: [] }
+      return { ok: true, consumed: items.map((_, i) => i + 1), skipped: [] }
     },
   }
 
@@ -723,13 +766,14 @@ test("a later chunk failure blocks the cursor even when earlier chunks succeeded
   })
 
   assert.equal(result.outcome, "error")
-  assert.equal(result.consolidated, 1)
-  assert.equal(result.cursorAfter, 0)
+  assert.equal(result.consolidated, 1, "the earlier chunk's report is kept")
   assert.match(result.error ?? "", /chunk two failed/)
+
   const cursor = await loadCursor(resolveCursorFile(base.stateDir))
-  assert.equal(cursor.blocked.ts, 1000)
-  assert.equal(cursor.blocked.attempts, 1)
-  assert.ok(cursor.blocked.blocked_until > 0, "a failure sets the backoff deadline")
+  assert.equal(cursor.sessions.ses_a?.last_ts, 1000, "session A advances")
+  assert.equal(cursor.sessions.ses_b, undefined, "only session B stays unadvanced")
+  assert.equal(cursor.failures.ses_b?.attempts, 1, "session B is poisoned, not the batch")
+  assert.equal(cursor.blocked.attempts, 0, "progress elsewhere does not arm the batch gate")
 })
 
 test("a transient provider error backs off without poisoning the boundary", async () => {
@@ -939,6 +983,7 @@ function poolDb(opts: {
   sessions: PoolSession[]
   summaryItemsFor: (prompt: string) => SummaryInput[] | null
   summaryGate?: (sessionID: string, prompt: string) => Promise<void> | undefined
+  writerReportFor?: (prompt: string, itemCount: number) => WriterReport | null
 }): { client: DrainPipeClient; prompts: any[] } {
   const sdkSessions = opts.sessions.map((session) => ({
     id: session.id,
@@ -967,6 +1012,7 @@ function poolDb(opts: {
     sdkTurns,
     summaryItemsFor: opts.summaryItemsFor,
     ...(opts.summaryGate ? { summaryGate: opts.summaryGate } : {}),
+    ...(opts.writerReportFor ? { writerReportFor: opts.writerReportFor } : {}),
   })
 }
 
@@ -992,6 +1038,7 @@ function pooledDeps(
   opts: {
     concurrency: number
     tokenBudget?: number
+    maxItemsPerBatch?: number
   },
 ): DrainPipeDeps {
   return deps(
@@ -1001,6 +1048,9 @@ function pooledDeps(
       config: {
         summarize_concurrency: opts.concurrency,
         ...(opts.tokenBudget !== undefined ? { token_budget: opts.tokenBudget } : {}),
+        ...(opts.maxItemsPerBatch !== undefined
+          ? { max_items_per_batch: opts.maxItemsPerBatch }
+          : {}),
       },
     },
   )
@@ -1013,6 +1063,76 @@ async function waitUntil(cond: () => boolean): Promise<void> {
   }
   throw new Error("waitUntil timed out")
 }
+
+test("a partial report completes the pass and advances only fully reported sessions", async () => {
+  const base = { ...(await workspace()), dbFile: await seedTwoSessionsDb() }
+  const { client } = fakeClient({
+    summaryItemsFor: poolItems,
+    writerReportFor: () => ({ consolidated: ["#1"], skipped: [], partial: true }),
+  })
+
+  const stateDir = base.stateDir
+  const seed = advanceSession(defaultCursor(), "ses_b", 1500)
+  await saveCursor(resolveCursorFile(stateDir), seed)
+
+  const result = await runDrainPipe(
+    deps(base, client, { config: { max_items_per_batch: 2, settle_seconds: 0 } }),
+  )
+
+  assert.equal(result.outcome, "completed")
+  assert.equal(result.stopped, "partial")
+  assert.equal(result.consolidated, 1)
+  assert.equal(result.cursorAfter, 1000, "the watermark advances over the reported session only")
+
+  const cursor = await loadCursor(resolveCursorFile(stateDir))
+  assert.equal(cursor.sessions.ses_a?.last_ts, 1000, "the reported session advances")
+  assert.equal(cursor.sessions.ses_b?.last_ts, 1500, "the unreported session stays at its mark")
+  assert.equal(cursor.blocked.attempts, 0, "a partial report is not a failure")
+  assert.deepEqual(cursor.failures, {})
+})
+
+test("chunks after a failure still report and advance their sessions", async () => {
+  const base = await workspace()
+  const { client } = poolDb({
+    sessions: POOL_SESSIONS,
+    summaryItemsFor: poolItems,
+  })
+  const provider: any = {
+    ...createBrainProvider({
+      directory: PROJECT,
+      stateDir: base.stateDir,
+      vaultDir: base.vaultDir,
+      drain: config(),
+      summaryWords: 400,
+    }),
+    async consolidate(items: any[]) {
+      if (items.some((item) => item.title === "Alpha Note")) {
+        return {
+          ok: false,
+          consumed: [],
+          skipped: [],
+          errorKind: "permanent",
+          detail: "alpha chunk failed",
+        }
+      }
+      return { ok: true, consumed: items.map((_, i) => i + 1), skipped: [] }
+    },
+  }
+
+  const result = await runDrainPipe({
+    ...pooledDeps(base, client, { concurrency: 1, maxItemsPerBatch: 1 }),
+    provider,
+  })
+
+  assert.equal(result.outcome, "error")
+  assert.equal(result.consolidated, 2, "both later chunks are recorded")
+  const cursor = await loadCursor(resolveCursorFile(base.stateDir))
+  assert.equal(cursor.sessions.ses_a, undefined, "only the failed session stays unadvanced")
+  assert.equal(cursor.sessions.ses_b?.last_ts, 2000, "the first later chunk advances")
+  assert.equal(cursor.sessions.ses_c?.last_ts, 3000, "the last later chunk advances")
+  assert.equal(cursor.failures.ses_a?.attempts, 1)
+  assert.equal(cursor.blocked.attempts, 0, "a failed item does not gate the batch")
+})
 
 test("summarizers overlap up to summarize_concurrency and fold in discovery order", async () => {
   const base = await workspace()
@@ -1112,7 +1232,9 @@ test("one malformed update under concurrency degrades once and still writes the 
         : poolItems(prompt),
   })
 
-  const result = await runDrainPipe(pooledDeps(base, client, { concurrency: 2 }))
+  const result = await runDrainPipe(
+    pooledDeps(base, client, { concurrency: 2, maxItemsPerBatch: 3 }),
+  )
 
   assert.equal(result.outcome, "degraded")
   assert.equal(result.degraded, "sdk-fallback", "the SDK lane already marked the source")

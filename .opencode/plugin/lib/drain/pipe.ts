@@ -68,7 +68,7 @@ import type {
 export type DrainOutcome = "completed" | "nothing" | "degraded" | "error" | "dropped"
 
 /** Why the pass stopped early (§2.2). */
-export type DrainStopReason = "token-budget"
+export type DrainStopReason = "token-budget" | "partial"
 
 export type DrainPipeResult = {
   outcome: DrainOutcome
@@ -84,7 +84,7 @@ export type DrainPipeResult = {
   tokens?: number | null
   degraded?: "schema-mismatch" | "summarizer-fallback" | "sdk-fallback" | "budget-exhausted"
   error?: string
-  /** Early stop: the per-pass budget ran out between units (§2.2). */
+  /** Early stop: the per-pass budget ran out, or the writer reported partial. */
   stopped?: DrainStopReason | null
   pendingBefore?: number | null
   pendingAfter?: number | null
@@ -165,7 +165,7 @@ export function summarizePolicy(cfg: DrainConfig): TaskPolicy {
     model: cfg.summarize_model,
     concurrency: cfg.summarize_concurrency,
     deadlineMs: cfg.child_stall_ms,
-    stallMs: 0,
+    stallMs: cfg.stall_ms,
     maxAttempts: cfg.max_attempts,
     retry: "respawn",
   }
@@ -179,7 +179,7 @@ export function writePolicy(cfg: DrainConfig): TaskPolicy {
     model: cfg.writer_model,
     concurrency: 1,
     deadlineMs: cfg.child_stall_ms,
-    stallMs: 0,
+    stallMs: cfg.stall_ms,
     maxAttempts: cfg.max_attempts,
     retry: "reuse",
   }
@@ -597,6 +597,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
               model: cfg.summarize_model,
               maxItems: cfg.max_items_per_session,
               deadlineMs: cfg.child_stall_ms,
+              stallMs: cfg.stall_ms,
               onWarn: deps.onWarn,
             },
           )
@@ -834,18 +835,22 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
     for (const [chunkIndex, chunk] of chunks.entries()) {
       const chunkReport = chunkReports[chunkIndex]
       if (!chunkReport) {
-        // The budget gate stopped this chunk before launch.
-        if (stopped === null) stopped = "token-budget"
-        break
+        // The budget gate stopped this chunk before launch; a budget stop
+        // outranks an earlier partial report.
+        stopped = "token-budget"
+        continue
       }
       promptBytes += chunkReport.promptBytes ?? 0
       writerSession = chunkReport.session ?? writerSession
 
       if (!chunkReport.ok) {
-        failure = chunkReport
-        failedItems = chunk.items
-        break
+        // Keep folding the chunks that already ran; only this chunk's items
+        // stay unreported.
+        failure ??= chunkReport
+        failedItems.push(...chunk.items)
+        continue
       }
+      if (chunkReport.partial === true && stopped === null) stopped = "partial"
       if (chunkReport.atomic === true) {
         // The provider handled this whole chunk. Scope the claim to the chunk:
         // keep processing the remaining chunks, and never advance sessions
@@ -860,10 +865,13 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       }
       consumed.push(...chunkReport.consumed.map((label) => label + chunk.offset))
       skipped.push(...chunkReport.skipped.map((label) => label + chunk.offset))
-      if (chunkReport.consumed.length + chunkReport.skipped.length !== chunk.items.length) {
-        failure = { ...chunkReport, detail: "incomplete report" }
-        failedItems = chunk.items
-        break
+      if (
+        chunkReport.partial !== true &&
+        chunkReport.consumed.length + chunkReport.skipped.length !== chunk.items.length
+      ) {
+        failure ??= { ...chunkReport, detail: "incomplete report" }
+        failedItems.push(...chunk.items)
+        continue
       }
       // Record only consumed items: a retried pass may re-read this session
       // after a crash, and those notes must not be created twice.
@@ -879,115 +887,103 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
 
     const reportedAll = consumed.length + skipped.length === fresh.length
     const complete = failure === null && reportedAll
+    // Progress means at least one item was reported (written or replayed).
+    const progress = consumed.length + skipped.length + replayCount > 0
 
     if (failure || (!complete && stopped === null)) {
-      // Transient provider failures back off without poisoning anything.
-      const errorKind = failure?.errorKind
-      if (errorKind !== "transient") {
-        const boundaryItems = failedItems.length > 0 ? failedItems : fresh
-        const affected = new Map<string, number>()
-        for (const item of boundaryItems) {
-          affected.set(item.sessionID, Math.max(affected.get(item.sessionID) ?? 0, item.ts))
-        }
-        const boundary = Math.max(0, ...affected.values())
-        const backoffMs = cfg.poll_seconds * 4 * 1000
-
-        // Batch backoff only: poison is per session below, so this can never
-        // push the watermark past another session's unreported items.
-        cursor = recordFailure(cursor, boundary, 0, { backoffMs }).cursor
-        const batchBlocked = cursor.blocked
-
-        // Sessions whose chunks were fully reported before the failure still
-        // advance; only the affected sessions are retried or poisoned.
-        const reportedLabels = new Set([...consumed, ...skipped])
-        const labelOf = new Map<PlannedItem, number>()
-        fresh.forEach((entry, i) => labelOf.set(entry, i + 1))
-        const bySession = new Map<string, { ts: number; parts: string[]; fully: boolean }>()
-        for (const entry of planned) {
-          const current =
-            bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [], fully: true }
-          current.ts = Math.max(current.ts, entry.ts)
-          const reported = entry.written === true || entry.deduped === true
-          if (!reported && !reportedLabels.has(labelOf.get(entry) ?? -1)) current.fully = false
-          if (entry.item.summary.trim()) current.parts.push(entry.item.summary.trim())
-          bySession.set(entry.sessionID, current)
-        }
-
-        let droppedAny = false
-        let keptAny = false
-        for (const [sid, entry] of bySession) {
-          if (entry.fully) {
-            cursor = advanceSession(cursor, sid, entry.ts, entry.parts.join("\n\n").slice(0, 2000) || undefined)
-            consumedMarks.push(entry.ts)
-            continue
-          }
-          const ts = affected.get(sid)
-          if (ts === undefined) {
-            floorMarks.push(sessionMarkTs(cursor, sid))
-            continue
-          }
-          const recorded = recordSessionFailure(cursor, sid, ts, cfg.poison_attempts, { backoffMs })
-          cursor = recorded.cursor
-          if (recorded.dropped) {
-            droppedAny = true
-            cursor = advanceSession(cursor, sid, ts)
-            consumedMarks.push(ts)
-            // Keep the watermark from crossing newer turns in this session;
-            // its own mark already skips the poisoned batch.
-            floorMarks.push(ts)
-          } else {
-            keptAny = true
-            floorMarks.push(sessionMarkTs(cursor, sid))
-          }
-        }
-        for (const [sid, ts] of sessionMaxTs) {
-          if (!bySession.has(sid)) {
-            cursor = advanceSession(cursor, sid, ts)
-            consumedMarks.push(ts)
-          }
-        }
-        for (const rendered of renderings) {
-          if (!bySession.has(rendered.sessionID)) {
-            floorMarks.push(sessionMarkTs(cursor, rendered.sessionID))
-          }
-        }
-        if (consumedMarks.length > 0) {
-          const bound = Math.max(...consumedMarks)
-          const candidate = Math.min(bound, ...(floorMarks.length > 0 ? floorMarks : [bound]))
-          cursor = advanceWatermark(cursor, candidate)
-        }
-        // A partly-dropped batch still owes the kept sessions their backoff.
-        if (keptAny && batchBlocked.attempts > 0) {
-          cursor = { ...cursor, blocked: batchBlocked }
-        }
-        cursor = pruneSessions(cursor, cfg.continuity_sessions)
-        await timedSave(cursor)
-        pendingAfter = await countPending()
-        return emit({
-          outcome: droppedAny && !keptAny ? "dropped" : "error",
-          sessions: renderings.length,
-          items: planned.length,
-          consolidated: consumed.length,
-          skipped: skipped.length + replayCount,
-          cursorBefore,
-          cursorAfter: cursor.watermark_ts,
-          session: writerSession,
-          tokens: totalTokens || null,
-          degraded,
-          error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
-        })
+      const boundaryItems = failedItems.length > 0 ? failedItems : fresh
+      const affected = new Map<string, number>()
+      for (const item of boundaryItems) {
+        affected.set(item.sessionID, Math.max(affected.get(item.sessionID) ?? 0, item.ts))
       }
-      // Persist the backoff: a transient outage must not hot-loop at the
-      // step's poll cadence. Attempts are batch-level and never poison.
-      const transientItems = failedItems.length > 0 ? failedItems : fresh
-      const transientBoundary = Math.max(0, ...transientItems.map((entry) => entry.ts))
-      cursor = recordFailure(cursor, transientBoundary, 0, {
-        backoffMs: cfg.poll_seconds * 4 * 1000,
-      }).cursor
+      const boundary = Math.max(0, ...affected.values())
+      const backoffMs = cfg.poll_seconds * 4 * 1000
+
+      // A pass with no reported work arms the batch-wide gate so it cannot
+      // hot-loop. A pass that made progress accounts the failure per session
+      // instead, so unrelated sessions keep draining.
+      let batchBlocked = cursor.blocked
+      if (!progress) {
+        cursor = recordFailure(cursor, boundary, 0, { backoffMs }).cursor
+        batchBlocked = cursor.blocked
+      }
+
+      // Sessions whose chunks were fully reported still advance; only the
+      // affected sessions are retried or poisoned.
+      const reportedLabels = new Set([...consumed, ...skipped])
+      const labelOf = new Map<PlannedItem, number>()
+      fresh.forEach((entry, i) => labelOf.set(entry, i + 1))
+      const bySession = new Map<string, { ts: number; parts: string[]; fully: boolean }>()
+      for (const entry of planned) {
+        const current =
+          bySession.get(entry.sessionID) ?? { ts: entry.ts, parts: [], fully: true }
+        current.ts = Math.max(current.ts, entry.ts)
+        const reported = entry.written === true || entry.deduped === true
+        if (!reported && !reportedLabels.has(labelOf.get(entry) ?? -1)) current.fully = false
+        if (entry.item.summary.trim()) current.parts.push(entry.item.summary.trim())
+        bySession.set(entry.sessionID, current)
+      }
+
+      const permanent = failure?.errorKind !== "transient"
+      let droppedAny = false
+      let keptAny = false
+      for (const [sid, entry] of bySession) {
+        if (entry.fully) {
+          cursor = advanceSession(cursor, sid, entry.ts, entry.parts.join("\n\n").slice(0, 2000) || undefined)
+          consumedMarks.push(entry.ts)
+          continue
+        }
+        const ts = affected.get(sid)
+        if (ts === undefined) {
+          floorMarks.push(sessionMarkTs(cursor, sid))
+          continue
+        }
+        if (!permanent) {
+          // A transient outage backs off at the batch or poll level; it never
+          // poisons a session's unreported work.
+          keptAny = true
+          floorMarks.push(sessionMarkTs(cursor, sid))
+          continue
+        }
+        const recorded = recordSessionFailure(cursor, sid, ts, cfg.poison_attempts, { backoffMs })
+        cursor = recorded.cursor
+        if (recorded.dropped) {
+          droppedAny = true
+          cursor = advanceSession(cursor, sid, ts)
+          consumedMarks.push(ts)
+          // Keep the watermark from crossing newer turns in this session;
+          // its own mark already skips the poisoned batch.
+          floorMarks.push(ts)
+        } else {
+          keptAny = true
+          floorMarks.push(sessionMarkTs(cursor, sid))
+        }
+      }
+      for (const [sid, ts] of sessionMaxTs) {
+        if (!bySession.has(sid)) {
+          cursor = advanceSession(cursor, sid, ts)
+          consumedMarks.push(ts)
+        }
+      }
+      for (const rendered of renderings) {
+        if (!bySession.has(rendered.sessionID)) {
+          floorMarks.push(sessionMarkTs(cursor, rendered.sessionID))
+        }
+      }
+      if (consumedMarks.length > 0) {
+        const bound = Math.max(...consumedMarks)
+        const candidate = Math.min(bound, ...(floorMarks.length > 0 ? floorMarks : [bound]))
+        cursor = advanceWatermark(cursor, candidate)
+      }
+      // A no-progress pass keeps its batch gate even if empty sessions advance.
+      if (!progress && keptAny && batchBlocked.attempts > 0) {
+        cursor = { ...cursor, blocked: batchBlocked }
+      }
+      cursor = pruneSessions(cursor, cfg.continuity_sessions)
       await timedSave(cursor)
       pendingAfter = await countPending()
       return emit({
-        outcome: "error",
+        outcome: droppedAny && !keptAny ? "dropped" : "error",
         sessions: renderings.length,
         items: planned.length,
         consolidated: consumed.length,
@@ -997,7 +993,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
         session: writerSession,
         tokens: totalTokens || null,
         degraded,
-        error: failure?.detail ?? "writer failed (transient)",
+        error: failure?.detail ?? (failure ? "writer failed" : "incomplete report"),
       })
     }
 
@@ -1080,6 +1076,7 @@ export async function runDrainPipe(deps: DrainPipeDeps): Promise<DrainPipeResult
       tokens: totalTokens || null,
       degraded,
       ...(error ? { error } : {}),
+      ...(stopped ? { stopped } : {}),
     })
   } catch (err) {
     return emit({
