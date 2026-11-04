@@ -10,6 +10,7 @@ import {
   logEditRules,
   diagramEditRules,
   appendAnchoredAllows,
+  VAULT_WRITER_AGENTS,
 } from "./scopes.ts"
 import {
   DEFAULT_PATHS,
@@ -116,25 +117,31 @@ test("applyVaultScope allows the vault-confined MCP write tools for rag-brain on
   )
 })
 
-test("applyVaultScope gives drain-writer the same anchored Brain edit scope", () => {
+test("applyVaultScope leaves drain-writer's narrower agent-file scope untouched", () => {
+  assert.deepEqual(VAULT_WRITER_AGENTS, ["rag-brain"])
+
   const cfg: any = {
     agent: {
       "drain-writer": {
-        permission: { task: "deny", edit: { "*": "deny" } },
+        permission: {
+          task: "deny",
+          edit: "deny",
+          "markdown-vault_view": "allow",
+          "markdown-vault_vault": "allow",
+        },
       },
     },
     mcp: { "markdown-vault": { environment: {} } },
   }
   applyVaultScope(cfg, vaultDir(), DIR)
 
-  const edit = cfg.agent["drain-writer"].permission.edit
-  assert.equal(edit["*"], "ask")
-  assert.equal(edit[`${vaultDir()}/**`], "allow")
-  assert.equal(edit[`${strip(vaultDir())}/**`], "allow")
-  assert.equal(edit[`${DEFAULT_PATHS.vault}/**`], "allow", "worktree-relative form")
-  assert.equal(cfg.agent["drain-writer"].permission.task, "deny", "existing denies are kept")
-  assert.equal(cfg.agent["drain-writer"].permission["markdown-vault_vault"], "allow")
-  assert.equal(cfg.agent["drain-writer"].permission["markdown-vault_edit"], undefined)
+  const permission = cfg.agent["drain-writer"].permission
+  assert.equal(permission.edit, "deny", "no native edit allow")
+  assert.equal(permission["markdown-vault_system"], undefined, "no MCP system grant")
+  assert.equal(permission["markdown-vault_vault"], "allow", "agent file keeps its allow")
+  assert.equal(permission["markdown-vault_view"], "allow", "agent file keeps its allow")
+  assert.equal(permission.task, "deny", "existing denies are kept")
+  assert.equal(cfg.mcp["markdown-vault"].environment.VAULT_PATH, vaultDir())
 })
 
 test("applyLogScope appends anchored allows to security-locks, preserving deny", () => {
