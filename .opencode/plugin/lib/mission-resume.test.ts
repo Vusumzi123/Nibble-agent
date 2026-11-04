@@ -217,6 +217,19 @@ test("summarizeMissionAttempt returns the parsed strict JSON", async () => {
   assert.ok(result.promptBytes > 0)
 })
 
+test("summarizeMissionAttempt sends the model spec as the SDK model object", async () => {
+  const { client, calls } = fakeClient({ replies: ['{"done":"x"}'] })
+  await summarizeMissionAttempt(
+    { transcript: "user: go", mission: { id: "mission:p4a" } },
+    deps(client, { model: "qwencloud/qwen3.8-flash" }),
+  )
+
+  assert.deepEqual(calls.prompt[0].body.model, {
+    providerID: "qwencloud",
+    modelID: "qwen3.8-flash",
+  })
+})
+
 test("summarizeMissionAttempt retries malformed JSON once, then falls back", async () => {
   const { client, calls } = fakeClient({ replies: ["nope", "still nope"] })
   const result = await summarizeMissionAttempt(

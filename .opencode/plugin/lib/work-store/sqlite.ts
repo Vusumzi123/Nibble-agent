@@ -695,8 +695,8 @@ export async function openWorkStore(opts: WorkStoreOptions): Promise<WorkStore> 
         .prepare(
           "SELECT 1 AS present FROM work_items WHERE id = ? AND state IN ('queued','running')",
         )
-        .get(id) as Row | undefined
-      return row !== undefined
+        .get(id) as Row | null | undefined
+      return row != null
     },
 
     dump(): WorkQueueState {

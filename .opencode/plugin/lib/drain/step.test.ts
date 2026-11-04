@@ -4,36 +4,34 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_DRAIN, readDrainConfig } from "./config.ts"
-import { childIdleWait } from "./step.ts"
+import { runDrainStep } from "./step.ts"
 
-test("the drain step injects child_stall_ms into every idle wait", async () => {
-  const calls: Array<[string, number | undefined]> = []
-  const wait = childIdleWait(
-    { child_stall_ms: 240_000 },
-    async (sessionID, timeoutMs) => {
-      calls.push([sessionID, timeoutMs])
-      return true
-    },
-  )
-
-  assert.equal(await wait("ses_sum_1"), true)
-  assert.equal(await wait("ses_writer"), true)
-  assert.deepEqual(calls, [
-    ["ses_sum_1", 240_000],
-    ["ses_writer", 240_000],
-  ])
-})
-
-test("child_stall_ms defaults to 240 s and never drops below 1 s", async () => {
-  assert.equal(DEFAULT_DRAIN.child_stall_ms, 240_000)
+test("child_stall_ms defaults to 600 s, attempts to 2, and the floor holds", async () => {
+  assert.equal(DEFAULT_DRAIN.child_stall_ms, 600_000)
+  assert.equal(DEFAULT_DRAIN.max_attempts, 2)
 
   const dir = await mkdtemp(join(tmpdir(), "drain-step-config-"))
   await mkdir(join(dir, ".opencode"), { recursive: true })
   await writeFile(
     join(dir, ".opencode", "sysop-config.yaml"),
-    "drain:\n  child_stall_ms: 10",
+    "drain:\n  child_stall_ms: 10\n  max_attempts: 0",
     "utf8",
   )
 
-  assert.equal((await readDrainConfig(dir)).child_stall_ms, 1000)
+  const cfg = await readDrainConfig(dir)
+  assert.equal(cfg.child_stall_ms, 1000)
+  assert.equal(cfg.max_attempts, DEFAULT_DRAIN.max_attempts)
+})
+
+test("a disabled config returns before any provider or child work", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "drain-step-"))
+  const result = await runDrainStep({
+    directory: dir,
+    stateDir: dir,
+    vaultDir: dir,
+    client: {} as any,
+    resolveProvider: async () => undefined,
+    readConfig: async () => ({ ...DEFAULT_DRAIN, enabled: false }),
+  })
+  assert.deepEqual(result, { ran: false, reason: "disabled" })
 })

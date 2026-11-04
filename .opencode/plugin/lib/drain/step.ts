@@ -23,8 +23,9 @@ export type DrainStepDeps = {
   stateDir: string
   vaultDir: string
   client: DrainPipeClient
-  waitForIdle: (sessionID: string, timeoutMs?: number) => Promise<boolean>
   registerChild?: (sessionID: string) => void
+  unregisterChild?: (sessionID: string) => void
+  status?: (snapshot: import("./coordinator.ts").CoordinatorSnapshot) => Promise<void>
   dbFile?: string
   ledger?: DrainLedger
   onWarn?: (message: string, err?: unknown) => void
@@ -38,18 +39,6 @@ export type DrainStepDeps = {
 export type DrainStepResult =
   | { ran: false; reason: "disabled" | "backoff" | "below-trigger" | "no-provider" | "config-error" }
   | { ran: true; result: DrainPipeResult; pendingBefore: number | null; pendingAfter: number | null }
-
-/**
- * Bind the configured child budget onto a one-argument idle wait. The pipe and
- * the provider context only know the one-argument form; the bound wait caps
- * every summarizer and writer at `child_stall_ms` instead of the mission stall.
- */
-export function childIdleWait(
-  cfg: Pick<DrainConfig, "child_stall_ms">,
-  waitForIdle: DrainStepDeps["waitForIdle"],
-): (sessionID: string) => Promise<boolean> {
-  return (sessionID) => waitForIdle(sessionID, cfg.child_stall_ms)
-}
 
 type TriggerState = { pending: number | null; oldestAgeMs: number | null }
 
@@ -142,10 +131,8 @@ export async function runDrainStep(deps: DrainStepDeps): Promise<DrainStepResult
   if (!provider?.consolidate) return { ran: false, reason: "no-provider" }
 
   const startedAt = now()
-  // One child budget for both stages: a summarizer or writer that outlives it
-  // is aborted by the child's own late-reply path, never by the 600 s mission
-  // stall.
-  const wait = childIdleWait(cfg, deps.waitForIdle)
+  // One child deadline for both stages: the coordinator owns the per-child
+  // deadline and aborts a straggler alone, never the pass.
   const result = await runDrainPipe({
     directory: deps.directory,
     stateDir: deps.stateDir,
@@ -153,8 +140,9 @@ export async function runDrainStep(deps: DrainStepDeps): Promise<DrainStepResult
     config: cfg,
     client: deps.client,
     provider,
-    waitForIdle: wait,
     registerChild: deps.registerChild,
+    ...(deps.unregisterChild ? { unregisterChild: deps.unregisterChild } : {}),
+    ...(deps.status ? { status: deps.status } : {}),
     ...(deps.dbFile === undefined ? {} : { dbFile: deps.dbFile }),
     ...(deps.ledger ? { ledger: deps.ledger } : {}),
     trigger: "tick",

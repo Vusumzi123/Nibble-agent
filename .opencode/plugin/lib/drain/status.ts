@@ -6,10 +6,72 @@
 // back), so the digest and the tool cannot disagree about "in sync".
 //
 // Loaded via relative import only.
+import { join } from "node:path"
 import type { DrainConfig } from "./config.ts"
 import { countUnconsumed } from "./db.ts"
 import { loadCursor, resolveCursorFile, sessionMarks } from "./cursor.ts"
+import { atomicRead, atomicWrite } from "../fsx.ts"
 import type { MemoryProvider } from "../memory/types.ts"
+
+export const DRAIN_STATUS_FILE = "drain.current.json"
+
+export type DrainStatusFile = {
+  state: string
+  trigger?: string | null
+  pass?: number | null
+  pending?: number | null
+  oldest_pending_age_ms?: number | null
+  next_due?: string | null
+  updated_at: string
+  pass_id?: string
+  phase?: string
+  started_at?: string
+  finished_at?: string
+  outcome?: string
+  counts?: Record<string, number>
+  tasks?: unknown[]
+  tasks_updated_at?: string
+  [key: string]: unknown
+}
+
+function parseStatus(text: string): Partial<DrainStatusFile> {
+  try {
+    const value = JSON.parse(text)
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Merge one live-status patch into `drain.current.json` atomically.
+ *
+ * `updated_at` changes only at pass boundaries (`idle`, `starting`,
+ * `finishing`, an outcome, or an explicit value); task transitions only move
+ * `tasks_updated_at`, so `drainHealth.last_wake_age_ms` stays meaningful.
+ */
+export async function writeDrainStatus(
+  stateDir: string,
+  patch: Partial<DrainStatusFile> & { state: string },
+): Promise<void> {
+  const file = join(stateDir, DRAIN_STATUS_FILE)
+  const existing = parseStatus(await atomicRead(file))
+  const now = new Date().toISOString()
+  const boundary =
+    patch.updated_at !== undefined ||
+    patch.state === "idle" ||
+    patch.phase === "starting" ||
+    patch.phase === "finishing" ||
+    patch.finished_at !== undefined ||
+    patch.outcome !== undefined
+  const next: DrainStatusFile = {
+    ...existing,
+    ...patch,
+    state: patch.state,
+    updated_at: boundary ? (patch.updated_at ?? now) : (existing.updated_at ?? now),
+  }
+  await atomicWrite(file, `${JSON.stringify(next, null, 2)}\n`)
+}
 
 export type DrainSkipReason =
   | "disabled"

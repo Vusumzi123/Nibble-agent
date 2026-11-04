@@ -36,14 +36,36 @@ function isBun(): boolean {
   return typeof (process.versions as { bun?: string }).bun === "string"
 }
 
+// Bindings disagree on the no-row result: `bun:sqlite` returns null,
+// `node:sqlite` returns undefined. Normalize to null so a store check never
+// depends on which backend opened the file.
+function normalizeStatement(statement: SqliteStatement): SqliteStatement {
+  return {
+    all: (...params) => statement.all(...params),
+    get: (...params) => {
+      const row = statement.get(...params)
+      return row === undefined ? null : row
+    },
+    run: (...params) => statement.run(...params),
+  }
+}
+
+function normalizeDatabase(db: SqliteDatabase): SqliteDatabase {
+  return {
+    prepare: (sql) => normalizeStatement(db.prepare(sql)),
+    exec: (sql) => db.exec(sql),
+    close: () => db.close(),
+  }
+}
+
 export async function openReadWriteDb(file: string): Promise<SqliteDatabase> {
   if (isBun()) {
     const spec = "bun:sqlite"
     const mod = (await import(spec)) as { Database: BunDatabaseCtor }
-    return new mod.Database(file)
+    return normalizeDatabase(new mod.Database(file))
   }
   const mod = (await import("node:sqlite")) as { DatabaseSync: NodeDatabaseCtor }
-  return new mod.DatabaseSync(file)
+  return normalizeDatabase(new mod.DatabaseSync(file))
 }
 
 export type SqliteProbe =

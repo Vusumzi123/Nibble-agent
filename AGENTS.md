@@ -50,3 +50,12 @@ into sub-tasks, each delegated to the matching sub-agent.
 | OS configuration    | environment variables, system services, kernel params, dotfiles — no dedicated sub-agent; route through `security-locks` |
 | System hygiene      | orphan cleanup, cache pruning, stale config removal, disk analysis        |
 | Vault knowledge     | search notes, retrieve knowledge, create/update notes (see Hard rules)    |
+
+## Enforcement
+
+Rules a repeat mistake must fail on. The check, not the prose, is the rule.
+
+| Rule | Enforced by |
+| ---- | ----------- |
+| Send a prompt model as `{ providerID, modelID }` via `modelField()`; never pass a `"provider/model"` config string to `promptAsync`. | `lib/prompt-model.test.ts`, `lib/drain/child.test.ts`, `lib/mission-resume.test.ts` |
+| Never test a SQLite `.get()` result with `!== undefined`; `sqlite/open.ts` normalizes a missing row to `null`. | `lib/sqlite/open.test.ts`, `lib/work-store.test.ts` |

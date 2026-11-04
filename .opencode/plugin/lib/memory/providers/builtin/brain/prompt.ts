@@ -24,7 +24,10 @@ export type PromptOptions = {
 
 const HEADER = `Consolidation mode.
 Consolidate the following knowledge items into structured, deduplicated,
-[[linked]] Brain vault notes, following your operating instructions.`
+[[linked]] Brain vault notes, following your operating instructions.
+When the batch is finished, call \`drain_report\` exactly once with item_count,
+the consolidated labels, the skipped labels, and partial: true only when the
+step cap stopped you.`
 
 function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8")

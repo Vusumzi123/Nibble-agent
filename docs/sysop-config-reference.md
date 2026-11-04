@@ -140,7 +140,8 @@ fully-reported sessions.
 | `max_session_bytes` | Rendered-delta byte cap; `0` = unlimited. |
 | `max_items_per_session` | Cap on summarizer output items. |
 | `max_items_per_batch` | Items handed to one writer spawn; larger batches are chunked (default 4). |
-| `child_stall_ms` | Bounded idle wait for one child, summarizer or writer (default 240 000 ms, floor 1 000). Replaces the 600 s mission stall for drain children. |
+| `child_stall_ms` | Hard deadline for one child, summarizer or writer (default 600 000 ms, floor 1 000). The coordinator polls message state; on the deadline it reads once for a late report, then aborts the child. |
+| `max_attempts` | Attempts per task in one pass (default 2, floor 1). A summarizer may respawn; a writer retries only when no work could have started. |
 | `exclude_missions` | Mission ids whose `heartbeat:<id>` / `dream:<id>` child sessions are skipped. Inline list; default `[drain, staleness, dream]`. |
 | `trigger_pending` | Run a pass while the pending-turn count is ≥ N (default 12). |
 | `trigger_max_age_hours` | Run a pass while the oldest pending turn is ≥ T hours old (default 2). |

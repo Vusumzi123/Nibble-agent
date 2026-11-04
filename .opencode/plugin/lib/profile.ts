@@ -511,14 +511,9 @@ export function setFrontmatterDate(note: string, value: string): string {
   return newHead + body
 }
 
-// Split a "provider/model" spec into the SDK's model shape, or null when empty
-// or malformed (caller then omits `model` and the agent default applies).
-export function splitWriterModel(model: string): { providerID: string; modelID: string } | null {
-  const m = model.trim()
-  const i = m.indexOf("/")
-  if (i <= 0 || i === m.length - 1) return null
-  return { providerID: m.slice(0, i), modelID: m.slice(i + 1) }
-}
+// Split a "provider/model" spec into the SDK's model shape. The owner is the
+// prompt-model module; kept re-exported here for the profile/soul hooks.
+export { splitModelSpec as splitWriterModel } from "./prompt-model.ts"
 
 // Write via a same-directory temp file + rename so a crash can never leave a
 // half-written profile note. Shared implementation: lib/fsx.ts.

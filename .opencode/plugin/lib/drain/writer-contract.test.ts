@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises"
 
 const AGENT = new URL("../../../agents/rag-brain.md", import.meta.url)
 const DRAIN_WRITER = new URL("../../../agents/drain-writer.md", import.meta.url)
+const SESSION_SUMMARIZER = new URL("../../../agents/session-summarizer.md", import.meta.url)
 const REFERENCE = new URL("../../../../reference/writer-tools.md", import.meta.url)
 const CONSOLIDATION = new URL("../../../../reference/consolidation.md", import.meta.url)
 const KANBAN = new URL("../../../../reference/kanban.md", import.meta.url)
@@ -26,17 +27,25 @@ test("the writer never narrates steps or announces tool calls", async () => {
   assert.match(text, /Never announce steps or narrate tool calls/i)
 })
 
-test("the drain-pipe item-label contract lives in drain-writer and its reference", async () => {
+test("the drain-pipe report contract lives in the writer and its reference", async () => {
   for (const url of [DRAIN_WRITER, CONSOLIDATION]) {
     const text = await readFile(url, "utf8")
     assert.match(text, /### Knowledge item #<n>/)
-    assert.match(text, /```consolidated/)
-    assert.match(text, /```skipped/)
-    assert.match(text, /Every item exactly once/i)
+    assert.match(text, /drain_report/)
+    assert.match(text, /exactly once/i)
+    assert.equal(/```consolidated/.test(text), false)
+    assert.equal(/```skipped/.test(text), false)
+    assert.equal(/=== ITEM ===/.test(text), false)
+    assert.equal(/NO_ITEMS/.test(text), false)
     assert.equal(/### Turn #<seq>/.test(text), false)
     assert.equal(/knowledge-hook/.test(text), false)
     assert.equal(/memory\.json/.test(text), false)
   }
+
+  const summarizer = await readFile(SESSION_SUMMARIZER, "utf8")
+  assert.match(summarizer, /summary_items/)
+  assert.equal(/=== ITEM ===/.test(summarizer), false)
+  assert.equal(/NO_ITEMS/.test(summarizer), false)
 })
 
 test("the tool matrix and cheat sheet live in the on-demand reference", async () => {
@@ -84,7 +93,7 @@ test("only the vault writers declare a predefined model", async () => {
   }
   const drainWriter = await readFile(new URL("drain-writer.md", dir), "utf8")
   assert.match(drainWriter, /^model:\s*\S+$/m)
-  assert.match(drainWriter, /^steps:\s*20$/m)
-  assert.match(drainWriter, /```consolidated/)
-  assert.match(drainWriter, /```skipped/)
+  assert.match(drainWriter, /^steps:\s*40$/m)
+  assert.match(drainWriter, /drain_report:\s*true/)
+  assert.match(drainWriter, /drain_report/)
 })

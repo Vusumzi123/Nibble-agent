@@ -21,62 +21,14 @@ import type {
 } from "../../types.ts"
 import { extractTitlePhrases, findCandidateNotes, type CandidateNote } from "./brain/candidates.ts"
 import { buildConsolidationPrompt } from "./brain/prompt.ts"
-import {
-  parseConsolidationReport,
-  type ConsolidationReport,
-} from "./brain/report.ts"
-import { assistantReplies, spawnConsolidationChild } from "./brain/spawn.ts"
+import { parseDrainReport } from "./brain/report.ts"
+import { promptConsolidationChild, spawnConsolidationChild } from "./brain/spawn.ts"
 
-function fenceCorrection(itemCount: number): string {
-  return `Your previous reply did not end with the required report fences.
-Reply again with ONLY the two fenced blocks below: one line per item label (#
-plus its number), every item from #1 to #${itemCount} exactly once, no prose.
-
-\`\`\`consolidated
-#1
-\`\`\`
-\`\`\`skipped
-#2
-\`\`\``
-}
-
-/** Ask the same child for the missing fences once, then re-read its newest reply. */
-async function requestReportFences(
-  ctx: WriteContext,
-  sessionID: string,
-  itemCount: number,
-  agent: string,
-  model: string,
-): Promise<ConsolidationReport | null> {
-  const res = await ctx.client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      agent,
-      ...(model ? { model } : {}),
-      parts: [{ type: "text", text: fenceCorrection(itemCount) }],
-    },
-    query: { directory: ctx.directory },
-  })
-  if (res?.error || (res?.response && !res.response.ok)) return null
-  if (!(await ctx.waitForIdle(sessionID))) {
-    // A correction child that outlives its wait must not keep running.
-    try {
-      await ctx.client.session.abort({
-        path: { id: sessionID },
-        query: { directory: ctx.directory },
-      })
-    } catch {
-      /* best effort */
-    }
-    return null
-  }
-  const messages = await ctx.client.session.messages({
-    path: { id: sessionID },
-    query: { directory: ctx.directory },
-  })
-  const rows = Array.isArray(messages?.data) ? messages.data : []
-  const newest = assistantReplies(rows)[0]
-  return newest ? parseConsolidationReport(newest, itemCount) : null
+function reportCorrection(itemCount: number): string {
+  return `Your previous reply completed without calling \`drain_report\`.
+Call \`drain_report\` now with item_count: ${itemCount}, the \`consolidated\`
+labels, the \`skipped\` labels, and partial: true only when the step cap stopped
+you. Every item #1..#${itemCount} must appear exactly once unless partial is true.`
 }
 
 export const BRAIN_AGENTS = ["rag-search", "rag-brain"]
@@ -150,21 +102,34 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
       })
       const promptBytes = Buffer.byteLength(prompt, "utf8")
 
-      const spawned = await spawnConsolidationChild(ctx.client, {
+      const executor = ctx.executor
+      if (!executor) {
+        return {
+          ok: false,
+          consumed: [],
+          skipped: [],
+          errorKind: "transient",
+          detail: "no child executor",
+        }
+      }
+
+      const spawned = await spawnConsolidationChild(executor, {
         directory: ctx.directory,
         prompt,
         agent: cfg.writer_agent,
         model: cfg.writer_model,
-        waitForIdle: ctx.waitForIdle,
-        registerChild: ctx.registerChild,
+        deadlineMs: cfg.child_stall_ms,
       })
 
-      const telemetry = {
+      let late = spawned.lateReply
+      let aborted = spawned.aborted
+      const baseTelemetry = {
         tokens: spawned.tokens,
         cost: spawned.cost,
         promptBytes,
         session: spawned.sessionID || null,
-        ...(spawned.lateReply ? { late: true } : {}),
+        started: spawned.started,
+        timedOut: spawned.aborted,
         spawnMs: spawned.spawnMs ?? null,
         queueMs: spawned.queueMs ?? null,
         runMs: spawned.runMs ?? null,
@@ -173,56 +138,49 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
         modelMs: spawned.modelMs ?? null,
         toolMs: spawned.toolMs ?? null,
       }
+      const telemetry = () => ({ ...baseTelemetry, ...(late ? { late: true } : {}) })
 
-      if (!spawned.ok) {
+      if (!spawned.sessionID) {
         return {
           ok: false,
           consumed: [],
           skipped: [],
           errorKind: "transient",
           detail: spawned.error ?? "writer failed",
-          ...telemetry,
+          ...telemetry(),
         }
       }
 
-      // A timed-out child was already aborted; its partial text is not a
-      // report. Retry the batch transiently instead of poisoning it.
-      if (spawned.aborted) {
+      // A valid late report is still a report: parse the rows before deciding.
+      let report = parseDrainReport(spawned.rows, items.length)
+      if (report === null && !spawned.aborted) {
+        try {
+          const corrected = await promptConsolidationChild(executor, spawned.sessionID, {
+            directory: ctx.directory,
+            prompt: reportCorrection(items.length),
+            agent: cfg.writer_agent,
+            model: cfg.writer_model,
+            deadlineMs: cfg.child_stall_ms,
+          })
+          late = late || corrected.lateReply
+          aborted = aborted || corrected.aborted
+          report = parseDrainReport(corrected.rows, items.length)
+        } catch (err) {
+          ctx.onWarn?.("memory brain: report correction failed", err)
+        }
+      }
+
+      if (report === null) {
         return {
           ok: false,
           consumed: [],
           skipped: [],
           errorKind: "transient",
-          detail: "writer timed out",
-          ...telemetry,
+          detail: spawned.error ?? "writer did not call drain_report",
+          ...telemetry(),
         }
       }
 
-      // Newest first: a trailing acknowledgement must not hide the report in
-      // the preceding assistant message.
-      const reports = spawned.replies.map((reply) =>
-        parseConsolidationReport(reply, items.length),
-      )
-      let report =
-        reports.find((candidate) => candidate.valid) ??
-        reports[0] ??
-        parseConsolidationReport("", items.length)
-      // One correction turn for the only recoverable class: the writer forgot
-      // the fences. Everything else keeps the permanent/poison path.
-      if (!report.valid && report.error === "no report fence") {
-        try {
-          const corrected = await requestReportFences(
-            ctx,
-            spawned.sessionID,
-            items.length,
-            cfg.writer_agent,
-            cfg.writer_model,
-          )
-          if (corrected?.valid) report = corrected
-        } catch (err) {
-          ctx.onWarn?.("memory brain: report-fence correction failed", err)
-        }
-      }
       if (!report.valid) {
         const missing = report.missing.length > 0 ? ` missing=${report.missing.join(",")}` : ""
         const excerpt = spawned.reply.replace(/\s+/g, " ").trim().slice(0, 500)
@@ -235,15 +193,16 @@ export function createBrainProvider(deps: BrainProviderDeps): MemoryProvider {
           skipped: report.skipped,
           errorKind: "permanent",
           detail: `invalid report: ${report.error ?? "incomplete"}`,
-          ...telemetry,
+          ...telemetry(),
         }
       }
 
+      if (aborted) late = true
       return {
         ok: true,
         consumed: report.consolidated,
         skipped: report.skipped,
-        ...telemetry,
+        ...telemetry(),
       }
     },
 

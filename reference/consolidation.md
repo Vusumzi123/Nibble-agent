@@ -46,40 +46,29 @@ the source of truth:
    wikilinks, frontmatter dates, and serializer bullet rewrites after every
    write. Do NOT spend tool calls re-reading notes to check for those.
 7. Append one `## [YYYY-MM-DD] consolidation | Short Title` entry to
-   `meta/log.md` for the batch (1–3 sentences, newest last), then report every
-   item.
+   `meta/log.md` for the batch (1–3 sentences, newest last), then call
+   `drain_report` for every item.
 
 ## Reporting (MANDATORY)
 
-End your reply with the outcome fenced blocks. Each line MUST be an item label
-(`#<n>`) copied verbatim from the `### Knowledge item #<n>` header. **Never
-report a note title, file path, or session id**: the pipe uses these labels to
-advance its cursor.
+Call the `drain_report` tool exactly once when the batch is finished. Do not
+write labels in prose and do not use fenced blocks.
 
-```consolidated
-#1
-#3
-```
-```skipped
-#2
-```
-
-- **`consolidated`** — list an item label here ONLY if you actually wrote or
-  updated a note for that item and verified the write.
-- **`skipped`** — list an item label here when the item held no durable,
-  findable knowledge (trivial chatter, or already documented elsewhere in the
-  vault). This is a successful "nothing to save" outcome, not a failure.
-- **Neither block** — an item you failed to process (read/write error, or you
-  could not verify the note). Briefly explain the failure above the blocks.
-- **Every item exactly once.** A missing, duplicated, or unknown label blocks
-  the batch: the cursor does not advance and the pipe retries (then poisons the
-  batch after repeated failures).
+- `item_count` — N from the `### Knowledge item #1..N` headers.
+- `consolidated` — labels of items whose note you actually wrote or updated.
+- `skipped` — labels of items with no durable, findable knowledge (trivial
+  chatter, or already documented elsewhere in the vault). A successful
+  "nothing to save" outcome.
+- Every item `#1..#N` must appear exactly once across the two lists. The tool
+  rejects duplicate, unknown, or missing labels and returns the valid labels;
+  correct the call in the same turn.
+- An item you failed to process (read/write error, or you could not verify the
+  note) stays out of both lists; the batch does not advance and the pipe
+  retries it.
 - **Budget exhausted** — if the step cap stops you mid-batch (you receive a
-  "Maximum steps" notice), stop working and make your entire reply the two raw
-  fenced blocks: no prose, no list, no ````text```` or other wrapper, and never
-  nest the report inside another fence. List every item you already finished;
-  leave unfinished items out of both blocks so the pipe retries them instead of
-  silently skipping them.
+  "Maximum steps" notice), call `drain_report` with the labels you finished and
+  `partial: true`. Leave unfinished items out so the pipe retries them instead
+  of silently skipping them.
 
 ## Do NOT
 

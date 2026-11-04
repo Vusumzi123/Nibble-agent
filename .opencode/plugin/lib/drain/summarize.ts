@@ -1,18 +1,85 @@
 // Session summarizer for the drain pipe (knowledge-pipeline-redesign §A.6).
 //
-// Spawns the tool-free `session-summarizer` agent, parses its plain-text
-// `=== ITEM ===` blocks deterministically, and normalizes the items (unique
-// titles, lowercased tags, capped count, stable content hashes). The model
-// never writes JSON, so there is no schema, repair, or truncation handling.
-// Any parse/spawn/timeout failure degrades to a deterministic per-turn
-// fallback built from extractKeywords + atoms — the pipe never throws and
-// never loses a turn.
+// Spawns the `session-summarizer` agent through the pass executor, reads its
+// `summary_items` tool call from the transcript, and normalizes the items
+// (unique titles, lowercased tags, capped count, stable content hashes). A
+// missing or invalid tool call gets one correction prompt; a still-missing
+// call degrades to a deterministic per-turn fallback built from
+// extractKeywords + atoms — the pipe never throws and never loses a turn.
 //
 // Loaded via relative import only.
-import { textOf } from "../sessions.ts"
-import { extractKeywords, sessionAccounting } from "../transcript.ts"
+import { lastToolCall } from "../tools/tool-call.ts"
+import { extractKeywords } from "../transcript.ts"
 import { hashContent, extractAtoms, type RenderedSession } from "./render.ts"
-import { SUMMARIZER_SESSION_TITLE } from "./automation.ts"
+import type { ChildExecutor, ChildOutcome, ChildRequest } from "./child.ts"
+
+export const SUMMARY_ITEMS_TOOL = "summary_items"
+
+/** The typed item shape the `summary_items` tool accepts. */
+export type RawSummaryItem = {
+  title: string
+  summary: string
+  tags: string[]
+  atoms: string[]
+}
+
+export type SummaryItemsValidation =
+  | { ok: true; items: RawSummaryItem[] }
+  | { ok: false; error: string }
+
+function stringList(value: unknown): string[] | null {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return null
+  const out: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== "string") return null
+    const text = entry.trim()
+    if (text) out.push(text)
+  }
+  return out
+}
+
+/** Validate the `summary_items` arguments. An empty array is the no-items case. */
+export function validateSummaryItems(raw: unknown): SummaryItemsValidation {
+  let value: unknown = raw
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return { ok: false, error: "summary_items arguments must be an object" }
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "summary_items arguments must be an object" }
+  }
+  const items = (value as { items?: unknown }).items
+  if (!Array.isArray(items)) return { ok: false, error: "items must be an array" }
+
+  const out: RawSummaryItem[] = []
+  for (const [index, entry] of items.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: `item ${index + 1} must be an object` }
+    }
+    const item = entry as Record<string, unknown>
+    const title = typeof item.title === "string" ? item.title.trim() : ""
+    if (!title) return { ok: false, error: `item ${index + 1}: title must be a non-empty string` }
+    const summary = typeof item.summary === "string" ? item.summary.trim() : ""
+    const tags = stringList(item.tags)
+    if (tags === null) return { ok: false, error: `item ${index + 1}: tags must be a string array` }
+    const atoms = stringList(item.atoms)
+    if (atoms === null) return { ok: false, error: `item ${index + 1}: atoms must be a string array` }
+    out.push({ title, summary, tags, atoms })
+  }
+  return { ok: true, items: out }
+}
+
+/** Last valid `summary_items` call in the child transcript, or null. */
+export function parseSummaryItems(rows: unknown[]): RawSummaryItem[] | null {
+  const raw = lastToolCall(rows, SUMMARY_ITEMS_TOOL)
+  if (raw === null) return null
+  const result = validateSummaryItems(raw)
+  return result.ok ? result.items : null
+}
 
 export type SummaryItem = {
   title: string
@@ -33,7 +100,7 @@ export type SummarizeResult = {
   error?: string
   /** Set when the deterministic fallback ran; identifies why. */
   errorCode?: SummarizeFailure
-  /** A reply arrived after the idle deadline but was used anyway. */
+  /** A reply arrived after the deadline but was used anyway. */
   lateReply?: boolean
   model?: string | null
   promptBytes: number
@@ -45,7 +112,7 @@ export type SummarizeResult = {
   sessionID?: string | null
   /** Create + prompt setup observed by the caller (ms). */
   spawnMs?: number | null
-  /** Caller wait from prompt accepted to idle (ms). */
+  /** Caller wait from prompt accepted to completion (ms). */
   runMs?: number | null
   /** Prompt accepted -> first assistant message (queue + TTFT, ms). */
   queueMs?: number | null
@@ -57,7 +124,7 @@ export type SummarizeResult = {
   modelMs?: number | null
   /** Sum of tool-call execution time (ms). */
   toolMs?: number | null
-  /** Attempts spent on this session (malformed-reply retries). */
+  /** Attempts spent on this session (coordinator retries). */
   attempts?: number
 }
 
@@ -71,14 +138,12 @@ export type SummarizerClient = {
 }
 
 export type SummarizeDeps = {
-  client: SummarizerClient
-  directory: string
+  executor: ChildExecutor
   /** Model from `drain.summarize_model`; "" = the agent default. */
   model?: string
   maxItems: number
-  /** Bounded wait for the child to go idle; false = timeout. */
-  waitForIdle: (sessionID: string) => Promise<boolean>
-  registerChild?: (sessionID: string) => void
+  /** Hard deadline for this child, in ms. */
+  deadlineMs?: number
   onWarn?: (message: string, err?: unknown) => void
 }
 
@@ -95,23 +160,18 @@ export function buildSummarizerPrompt(
 ): string {
   const prior = priorSummary?.trim() || "none"
   return `Summarize this session delta into durable knowledge items.
-Reply with plain-text blocks, nothing else. Use exactly this shape per item:
-
-=== ITEM ===
-TITLE: <one line>
-TAGS: <comma-separated tags>
-SUMMARY: <1-3 sentences>
-ATOMS:
-- <command, path, URL, KEY=value or flag, verbatim>
+Call the \`summary_items\` tool exactly once. Each item has:
+- title: one line, never empty;
+- tags: lowercase-hierarchical tags;
+- summary: 1-3 sentences;
+- atoms: commands, paths, URLs, KEY=value and flags, verbatim.
 
 Rules:
 - one item per distinct durable topic (1..N), "one thought per note";
-- repeat the block for every item; no JSON and no prose outside the blocks;
-- preserve every command, path, URL, KEY=value and flag verbatim in ATOMS;
-- tags are lowercase-hierarchical;
+- preserve every command, path, URL, KEY=value and flag verbatim in atoms;
 - skip chatter, questions with no answer, and transient status;
-- prior summary (if any) is context only; do not repeat it verbatim;
-- if nothing durable happened, reply with exactly: NO_ITEMS
+- the prior summary (if any) is context only; do not repeat it verbatim;
+- if nothing durable happened, call \`summary_items\` with an empty items array.
 
 ## Prior summary
 ${prior}
@@ -120,7 +180,11 @@ ${prior}
 ${delta}`
 }
 
-type RawItem = { title?: unknown; summary?: unknown; tags?: unknown; atoms?: unknown }
+/** One correction turn for a child that finished without calling the tool. */
+export const SUMMARY_ITEMS_CORRECTION =
+  "Your previous reply completed without calling `summary_items`. " +
+  "Call `summary_items` now with the items you extracted (or an empty items array " +
+  "if nothing durable happened). Do not reply with prose."
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -142,101 +206,8 @@ function uniqueTitle(title: string, used: Set<string>): string {
   return candidate
 }
 
-const TEXT_ITEM_MARKER = /^=+\s*ITEM\s*=+$/i
-
-/** Strip a single wrapping markdown fence from a plain-text reply. */
-function stripTextEnvelope(reply: string): string {
-  const text = reply.trim()
-  if (!text.startsWith("```")) return text
-  const firstNewline = text.indexOf("\n")
-  if (firstNewline === -1) return text
-  const body = text.slice(firstNewline + 1)
-  const end = body.lastIndexOf("```")
-  return (end === -1 ? body : body.slice(0, end)).trim()
-}
-
-/**
- * Parse the summarizer's deterministic line-block reply.
- *
- * The model never writes JSON: one `=== ITEM ===` block per topic, with
- * TITLE/TAGS/SUMMARY lines and ATOMS bullets. Parsing is forgiving (case,
- * fences, wrapped summaries) but structural: a block without a TITLE is
- * dropped, and a reply with no blocks returns null so the caller can retry.
- */
-export function parseSummaryReply(reply: string): RawItem[] | null {
-  const text = stripTextEnvelope(reply)
-  if (!text) return null
-  if (/^NO_ITEMS\.?$/i.test(text)) return []
-
-  type Draft = { title?: string; summary: string[]; tags: string[]; atoms: string[] }
-  const items: RawItem[] = []
-  let current: Draft | null = null
-  let section: "summary" | "atoms" | null = null
-
-  const flush = () => {
-    if (!current) return
-    const draft = current
-    current = null
-    section = null
-    const title = asString(draft.title)
-    if (!title) return
-    items.push({
-      title,
-      summary: draft.summary.join(" ").trim(),
-      tags: draft.tags,
-      atoms: draft.atoms,
-    })
-  }
-
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (TEXT_ITEM_MARKER.test(line)) {
-      flush()
-      current = { summary: [], tags: [], atoms: [] }
-      section = null
-      continue
-    }
-    if (!current) continue
-
-    const title = /^TITLE:\s*(.*)$/i.exec(line)
-    if (title) {
-      current.title = title[1].trim()
-      section = null
-      continue
-    }
-    const tags = /^TAGS:\s*(.*)$/i.exec(line)
-    if (tags) {
-      current.tags = tags[1]
-        .split(",")
-        .map((tag) => tag.trim())
-        .filter((tag) => tag !== "")
-      section = null
-      continue
-    }
-    const summary = /^SUMMARY:\s*(.*)$/i.exec(line)
-    if (summary) {
-      if (summary[1].trim()) current.summary.push(summary[1].trim())
-      section = "summary"
-      continue
-    }
-    if (/^ATOMS:\s*$/i.test(line)) {
-      section = "atoms"
-      continue
-    }
-    if (section === "atoms") {
-      const bullet = /^[-*]\s*(.+)$/.exec(line)
-      if (bullet) current.atoms.push(bullet[1].trim())
-      continue
-    }
-    if (section === "summary" && line) current.summary.push(line)
-  }
-  flush()
-
-  return items.length > 0 ? items : null
-}
-
 function normalizeItems(
-  raw: RawItem[],
+  raw: RawSummaryItem[],
   maxItems: number,
   renderedAtoms: string[],
 ): SummaryItem[] {
@@ -330,50 +301,39 @@ export function deterministicItems(rendered: RenderedSession, maxItems: number):
   return items
 }
 
-function usageTokens(rows: unknown[]): number | null {
-  let total = 0
-  let known = false
-  for (const row of rows) {
-    const tokens = (row as { info?: { tokens?: Record<string, unknown> } })?.info?.tokens
-    if (!tokens) continue
-    for (const key of ["input", "output", "reasoning"]) {
-      const value = Number(tokens[key] ?? 0)
-      if (Number.isFinite(value)) {
-        total += value
-        known = true
-      }
-    }
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function timingOf(outcome: ChildOutcome): Pick<
+  SummarizeResult,
+  "sessionID" | "spawnMs" | "runMs" | "queueMs" | "steps" | "spanMs" | "modelMs" | "toolMs"
+> {
+  return {
+    sessionID: outcome.sessionID,
+    spawnMs: outcome.spawnMs ?? null,
+    runMs: outcome.runMs ?? null,
+    queueMs: outcome.queueMs ?? null,
+    steps: outcome.steps ?? null,
+    spanMs: outcome.spanMs ?? null,
+    modelMs: outcome.modelMs ?? null,
+    toolMs: outcome.toolMs ?? null,
   }
-  return known ? total : null
 }
 
-/** Assistant reply texts, newest first. The last valid block wins; a trailing
- *  acknowledgement must not discard an earlier, well-formed summary. */
-function assistantReplies(rows: unknown[]): string[] {
-  const replies: string[] = []
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i] as { info?: { role?: unknown }; parts?: unknown[] }
-    if (row?.info?.role !== "assistant") continue
-    const text = textOf(row.parts ?? []).trim()
-    if (text) replies.push(text)
+function replyBytesOf(outcome: ChildOutcome): number {
+  let bytes = 0
+  for (const reply of outcome.replies) {
+    bytes = Math.max(bytes, Buffer.byteLength(reply, "utf8"))
   }
-  return replies
-}
-
-function isPromptError(res: { error?: unknown; response?: { ok?: boolean } } | undefined): boolean {
-  return !!res?.error || !!(res?.response && !res.response.ok)
-}
-
-function promptErrorText(err: unknown): string {
-  if (typeof err === "string" && err) return err
-  const message = (err as { message?: unknown } | undefined)?.message
-  if (typeof message === "string" && message) return message
-  return "promptAsync failed"
+  return bytes
 }
 
 /**
  * Summarize one rendered session. Never throws: spawn/parse/timeout failures
  * return the deterministic fallback with `degraded: "summarizer-fallback"`.
+ * The coordinator owns retries (respawn); this function makes one attempt plus
+ * one in-child correction when the tool call is missing.
  */
 export async function summarizeSession(
   input: SummarizeInput,
@@ -382,303 +342,101 @@ export async function summarizeSession(
   const started = performance.now()
   const prompt = buildSummarizerPrompt(input.priorSummary, input.rendered.text)
   const promptBytes = Buffer.byteLength(prompt, "utf8")
-  let lastReplyBytes = 0
-  let attempts = 0
-  let lastSessionID: string | null = null
-  let timing: {
-    spawnMs: number | null
-    runMs: number | null
-    queueMs: number | null
-    steps: number | null
-    spanMs: number | null
-    modelMs: number | null
-    toolMs: number | null
-  } = {
-    spawnMs: null,
-    runMs: null,
-    queueMs: null,
-    steps: null,
-    spanMs: null,
-    modelMs: null,
-    toolMs: null,
+  const request: ChildRequest = {
+    id: input.sessionID,
+    kind: "summarize",
+    prompt,
+    agent: "session-summarizer",
+    ...(deps.model ? { model: deps.model } : {}),
+    deadlineMs: deps.deadlineMs ?? 600_000,
   }
-  const timingFields = (): Pick<
-    SummarizeResult,
-    | "sessionID"
-    | "spawnMs"
-    | "runMs"
-    | "queueMs"
-    | "steps"
-    | "spanMs"
-    | "modelMs"
-    | "toolMs"
-    | "attempts"
-  > => ({ sessionID: lastSessionID, ...timing, attempts })
 
-  const fallback = (
-    error: string,
-    wallMs: number,
-    errorCode: SummarizeFailure,
-    lateReply = false,
-  ): SummarizeResult => {
+  let outcome: ChildOutcome
+  try {
+    outcome = await deps.executor.spawn(request)
+  } catch (err) {
+    const error = `summarizer spawn failed: ${errorText(err)}`
     deps.onWarn?.(`drain summarizer: ${error}`)
     return {
       items: deterministicItems(input.rendered, deps.maxItems),
       degraded: "summarizer-fallback",
       error,
-      errorCode,
-      ...(lateReply ? { lateReply: true } : {}),
+      errorCode: "spawn",
       model: deps.model || null,
       promptBytes,
-      wallMs,
+      wallMs: Math.round(performance.now() - started),
       tokens: null,
-      replyBytes: lastReplyBytes,
-      ...timingFields(),
+      replyBytes: 0,
+      attempts: 1,
     }
   }
 
-  try {
-    const abortChild = async (childID: string): Promise<string | null> => {
-      try {
-        const res = await deps.client.session.abort({
-          path: { id: childID },
-          query: { directory: deps.directory },
-        })
-        if (res?.error || (res?.response && !res.response.ok)) {
-          return (
-            (res?.error as { message?: string } | undefined)?.message ??
-            `session.abort failed (status ${res?.response?.status ?? "unknown"})`
-          )
-        }
-        return null
-      } catch (err) {
-        return err instanceof Error ? err.message : String(err)
-      }
+  let items = parseSummaryItems(outcome.rows)
+  if (items === null && outcome.sessionID && !outcome.timedOut && outcome.phase !== "failed") {
+    try {
+      outcome = await deps.executor.prompt(outcome.sessionID, {
+        ...request,
+        kind: "correct",
+        prompt: SUMMARY_ITEMS_CORRECTION,
+      })
+      items = parseSummaryItems(outcome.rows)
+    } catch {
+      /* keep the original outcome */
     }
-
-    type AskTiming = {
-      spawnMs: number | null
-      runMs: number | null
-      queueMs: number | null
-      steps: number | null
-      spanMs: number | null
-      modelMs: number | null
-      toolMs: number | null
-    }
-    type AskResult = AskTiming & {
-      rows: unknown[]
-      replies: string[]
-      late: boolean
-      childID: string
-    }
-
-    const ask = async (text: string): Promise<AskResult> => {
-      const spawn = async (): Promise<{
-        childID: string
-        spawnMs: number
-        acceptedAt: number
-      }> => {
-        const createStarted = performance.now()
-        const created = await deps.client.session.create({
-          body: { title: SUMMARIZER_SESSION_TITLE },
-          query: { directory: deps.directory },
-        })
-        const childID = String(created?.data?.id ?? "")
-        if (!childID) throw new Error("session.create returned no id")
-        deps.registerChild?.(childID)
-        const spawnMs = performance.now() - createStarted
-
-        const res = await deps.client.session.promptAsync({
-          path: { id: childID },
-          body: {
-            agent: "session-summarizer",
-            ...(deps.model ? { model: deps.model } : {}),
-            parts: [{ type: "text", text }],
-          },
-          query: { directory: deps.directory },
-        })
-        if (isPromptError(res)) throw new Error(promptErrorText(res?.error))
-        return { childID, spawnMs, acceptedAt: Date.now() }
-      }
-
-      const read = async (
-        id: string,
-      ): Promise<{ rows: unknown[]; replies: string[]; late: boolean }> => {
-        const messages = await deps.client.session.messages({
-          path: { id },
-          query: { directory: deps.directory },
-        })
-        const rows = Array.isArray(messages?.data) ? messages.data : []
-        return { rows, replies: assistantReplies(rows), late: false }
-      }
-
-      const timingOf = (
-        rows: unknown[],
-        acceptedAt: number,
-        spawnMs: number,
-        runMs: number,
-      ): AskTiming => {
-        const times = rows
-          .map((row) => Number((row as any)?.info?.time?.created ?? NaN))
-          .filter((value) => Number.isFinite(value))
-        const first = times.length > 0 ? Math.min(...times) : null
-        const acct = sessionAccounting(rows)
-        return {
-          spawnMs: Math.round(spawnMs),
-          runMs: Math.round(runMs),
-          queueMs: first === null ? null : Math.max(0, Math.round(first - acceptedAt)),
-          steps: acct.assistantSteps,
-          spanMs: acct.spanMs,
-          modelMs: acct.modelMs,
-          toolMs: acct.toolMs,
-        }
-      }
-
-      const collect = async (
-        id: string,
-        spawnMs: number,
-        acceptedAt: number,
-      ): Promise<AskResult> => {
-        const waitStarted = performance.now()
-        const idled = await deps.waitForIdle(id)
-        const runMs = performance.now() - waitStarted
-        if (idled) {
-          const result = await read(id)
-          return {
-            ...result,
-            ...timingOf(result.rows, acceptedAt, spawnMs, runMs),
-            childID: id,
-          }
-        }
-
-        // LATE REPLY: the child may have answered just after the deadline.
-        // Read before aborting so a valid reply is never discarded.
-        const late = await read(id).catch(() => null)
-        const usable = late?.replies.some((reply) => parseSummaryReply(reply) !== null)
-        // A timed-out child must not outlive its own wait (§5.2).
-        const abortError = await abortChild(id)
-        if (late && usable) {
-          return {
-            ...late,
-            late: true,
-            ...timingOf(late.rows, acceptedAt, spawnMs, runMs),
-            childID: id,
-          }
-        }
-        // Preserve what we know about the failed attempt for the ledger line.
-        lastSessionID = id
-        timing = {
-          spawnMs: Math.round(spawnMs),
-          runMs: Math.round(runMs),
-          queueMs: null,
-          steps: null,
-          spanMs: null,
-          modelMs: null,
-          toolMs: null,
-        }
-        throw new SummarizeError(
-          abortError ? `summarizer timed out; abort failed: ${abortError}` : "summarizer timed out",
-          "timeout",
-        )
-      }
-
-      const { childID, spawnMs, acceptedAt } = await spawn()
-      return collect(childID, spawnMs, acceptedAt)
-    }
-
-    // A malformed block reply gets exactly one correction attempt before the
-    // deterministic per-turn fallback (§3.4).
-    for (let attempt = 1; ; attempt++) {
-      const text =
-        attempt === 1
-          ? prompt
-          : `${prompt}\n\nYour previous reply did not follow the block format. Reply again with only \`=== ITEM ===\` blocks, one per durable topic.`
-      const asked = await ask(text)
-      attempts = attempt
-      lastSessionID = asked.childID
-      timing = {
-        spawnMs: asked.spawnMs,
-        runMs: asked.runMs,
-        queueMs: asked.queueMs,
-        steps: asked.steps,
-        spanMs: asked.spanMs,
-        modelMs: asked.modelMs,
-        toolMs: asked.toolMs,
-      }
-      const { rows, replies, late } = asked
-      const tokens = usageTokens(rows)
-
-      // Newest first: accept the last block that parses; a trailing "done"
-      // acknowledgement falls through to the earlier, well-formed reply.
-      const reply =
-        replies.find((candidate) => parseSummaryReply(candidate) !== null) ??
-        replies[0] ??
-        ""
-      lastReplyBytes = Buffer.byteLength(reply, "utf8")
-      const raw = parseSummaryReply(reply)
-
-      if (!raw) {
-        if (attempt < 2) continue
-        const suffix = ` (bytes=${lastReplyBytes})`
-        if (late) {
-          return fallback(
-            `late-reply did not parse${suffix}`,
-            Math.round(performance.now() - started),
-            "late-reply",
-            true,
-          )
-        }
-        return fallback(
-          `malformed summarizer reply${suffix}`,
-          Math.round(performance.now() - started),
-          "parse-failure",
-        )
-      }
-      if (raw.length === 0) {
-        // NO_ITEMS: a clean no-op, not a failure.
-        return {
-          items: [],
-          ...(late ? { lateReply: true } : {}),
-          model: deps.model || null,
-          promptBytes,
-          wallMs: Math.round(performance.now() - started),
-          tokens,
-          replyBytes: lastReplyBytes,
-          ...timingFields(),
-        }
-      }
-
-      const items = normalizeItems(raw, deps.maxItems, input.rendered.atoms)
-      if (items.length === 0) {
-        return fallback("no valid items", Math.round(performance.now() - started), "parse-failure", late)
-      }
-
-      return {
-        items,
-        ...(late ? { lateReply: true } : {}),
-        model: deps.model || null,
-        promptBytes,
-        wallMs: Math.round(performance.now() - started),
-        tokens,
-        replyBytes: lastReplyBytes,
-        ...timingFields(),
-      }
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    const code: SummarizeFailure =
-      err instanceof SummarizeError ? err.code : message.includes("timed out") ? "timeout" : "spawn"
-    return fallback(message, Math.round(performance.now() - started), code)
   }
-}
 
-
-/** Internal marker so the outer catch can classify timeouts without parsing text. */
-class SummarizeError extends Error {
-  readonly code: SummarizeFailure
-  constructor(message: string, code: SummarizeFailure) {
-    super(message)
-    this.name = "SummarizeError"
-    this.code = code
+  const wallMs = Math.round(performance.now() - started)
+  const telemetry = {
+    model: deps.model || null,
+    promptBytes,
+    wallMs,
+    tokens: outcome.tokens ?? null,
+    replyBytes: replyBytesOf(outcome),
+    ...timingOf(outcome),
+    attempts: 1,
   }
+  // A timeout with a valid tool call is a late report even when the child
+  // produced no text reply (the report itself is the tool call).
+  const late = outcome.late || (outcome.timedOut && items !== null)
+  const lateField = late ? { lateReply: true as const } : {}
+
+  if (items === null) {
+    const error = outcome.error ?? "summarizer did not call summary_items"
+    const code: SummarizeFailure = outcome.timedOut
+      ? late
+        ? "late-reply"
+        : "timeout"
+      : outcome.phase === "failed"
+        ? "spawn"
+        : "parse-failure"
+    deps.onWarn?.(`drain summarizer: ${error}`)
+    return {
+      items: deterministicItems(input.rendered, deps.maxItems),
+      degraded: "summarizer-fallback",
+      error,
+      errorCode: code,
+      ...lateField,
+      ...telemetry,
+    }
+  }
+
+  if (items.length === 0) {
+    return { items: [], ...lateField, ...telemetry }
+  }
+
+  const normalized = normalizeItems(items, deps.maxItems, input.rendered.atoms)
+  if (normalized.length === 0) {
+    const error = "no valid items"
+    deps.onWarn?.(`drain summarizer: ${error}`)
+    return {
+      items: deterministicItems(input.rendered, deps.maxItems),
+      degraded: "summarizer-fallback",
+      error,
+      errorCode: "parse-failure",
+      ...lateField,
+      ...telemetry,
+    }
+  }
+
+  return { items: normalized, ...lateField, ...telemetry }
 }

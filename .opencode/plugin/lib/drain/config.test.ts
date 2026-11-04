@@ -13,6 +13,7 @@ test("parseDrainConfig overlays known keys", () => {
       "  batch_sessions: 9",
       "  summarize_concurrency: 3",
       "  max_items_per_batch: 5",
+      "  max_attempts: 3",
       "  initial_lookback_hours: 6",
       '  writer_model: "provider/model"',
       "  writer_agent: custom-writer",
@@ -37,6 +38,7 @@ test("parseDrainConfig overlays known keys", () => {
   assert.equal(parsed.batch_sessions, 9)
   assert.equal(parsed.summarize_concurrency, 3)
   assert.equal(parsed.max_items_per_batch, 5)
+  assert.equal(parsed.max_attempts, 3)
   assert.equal(parsed.initial_lookback_hours, 6)
   assert.equal(parsed.writer_model, "provider/model")
   assert.equal(parsed.writer_agent, "custom-writer")
@@ -101,6 +103,7 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
       "  producer_interval_minutes: 0",
       "  token_budget: -5",
       "  max_passes_per_wake: 0",
+      "  max_attempts: 0",
       "  lock_refresh_ms: 60000",
       "  lock_stale_ms: 1000",
       "  cursor_migration: garbage",
@@ -114,6 +117,7 @@ test("readDrainConfig floors consumer keys and enforces stale >= 3x refresh (§2
   assert.equal(cfg.producer_interval_minutes, DEFAULT_DRAIN.producer_interval_minutes)
   assert.equal(cfg.token_budget, DEFAULT_DRAIN.token_budget, "negative falls back to the default")
   assert.equal(cfg.max_passes_per_wake, DEFAULT_DRAIN.max_passes_per_wake)
+  assert.equal(cfg.max_attempts, DEFAULT_DRAIN.max_attempts, "attempts floor to the default")
   assert.equal(
     cfg.lock_stale_ms,
     3 * 60_000,
@@ -179,4 +183,5 @@ test("invalid values fall back and models may be empty", async () => {
   assert.equal(cfg.writer_agent, DEFAULT_DRAIN.writer_agent)
   assert.equal(cfg.summarize_model, "")
   assert.equal(cfg.max_items_per_batch, 4, "the writer batch default is four items")
+  assert.equal(cfg.max_attempts, 2, "summarizer attempts default to two")
 })

@@ -184,7 +184,7 @@ For an interactive "remember this" or a batch of summarized items:
 5. Enforce frontmatter, tags, and the `## Related` + backlink convention.
 6. Report the notes touched in 1–2 lines. If the prompt begins
    `Consolidation mode.`, load `reference/consolidation.md` for the mandatory
-   item-label and report-fence contract.
+   `drain_report` contract.
 
 ## On-demand references
 

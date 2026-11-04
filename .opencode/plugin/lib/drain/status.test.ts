@@ -1,13 +1,18 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 
 import { DEFAULT_DRAIN, type DrainConfig } from "./config.ts"
 import { defaultCursor, resolveCursorFile, saveCursor } from "./cursor.ts"
-import { readDrainStatus, effectiveCursorLastTs } from "./status.ts"
+import {
+  DRAIN_STATUS_FILE,
+  effectiveCursorLastTs,
+  readDrainStatus,
+  writeDrainStatus,
+} from "./status.ts"
 
 const HOUR = 3_600_000
 
@@ -149,4 +154,62 @@ test("drain status: an unreadable store is unavailable, never zero", async () =>
   assert.equal(status.available, false)
   assert.equal(status.reason, "unavailable")
   assert.ok(status.error)
+})
+
+test("drain status file: pass fields persist and task transitions keep updated_at", async () => {
+  const ws = await workspace()
+  const file = join(ws.stateDir, DRAIN_STATUS_FILE)
+
+  await writeDrainStatus(ws.stateDir, {
+    state: "summarizing",
+    trigger: "tick",
+    pass: 1,
+    pending: 3,
+    oldest_pending_age_ms: 1000,
+    next_due: null,
+    pass_id: "pass-1",
+    phase: "starting",
+    started_at: "2026-11-03T00:00:00.000Z",
+    counts: { total: 1, queued: 1 },
+    tasks: [{ id: "summarize:ses_1", state: "queued" }],
+    tasks_updated_at: "2026-11-03T00:00:00.000Z",
+  })
+  const first = JSON.parse(await readFile(file, "utf8"))
+  assert.equal(first.state, "summarizing")
+  assert.equal(first.pending, 3)
+  assert.equal(first.tasks[0].id, "summarize:ses_1")
+  const firstUpdated = first.updated_at
+
+  await writeDrainStatus(ws.stateDir, {
+    state: "summarizing",
+    phase: "summarizing",
+    counts: { total: 1, running: 1 },
+    tasks: [{ id: "summarize:ses_1", state: "running" }],
+    tasks_updated_at: "2026-11-03T00:00:05.000Z",
+  })
+  const second = JSON.parse(await readFile(file, "utf8"))
+  assert.equal(second.updated_at, firstUpdated, "a task transition does not move updated_at")
+  assert.equal(second.tasks_updated_at, "2026-11-03T00:00:05.000Z")
+  assert.equal(second.tasks[0].state, "running")
+
+  await writeDrainStatus(ws.stateDir, {
+    state: "idle",
+    outcome: "completed",
+    finished_at: "2026-11-03T00:00:10.000Z",
+    pending: 0,
+  })
+  const third = JSON.parse(await readFile(file, "utf8"))
+  assert.equal(third.state, "idle")
+  assert.equal(third.outcome, "completed")
+  assert.notEqual(third.updated_at, firstUpdated, "the pass end moves updated_at")
+  assert.equal(third.tasks[0].state, "running", "additive task state is preserved")
+})
+
+test("drain status file: a corrupt file is replaced, not thrown", async () => {
+  const ws = await workspace()
+  await writeFile(join(ws.stateDir, DRAIN_STATUS_FILE), "not json", "utf8")
+  await writeDrainStatus(ws.stateDir, { state: "idle" })
+  const parsed = JSON.parse(await readFile(join(ws.stateDir, DRAIN_STATUS_FILE), "utf8"))
+  assert.equal(parsed.state, "idle")
+  assert.match(parsed.updated_at, /^\d{4}-/)
 })

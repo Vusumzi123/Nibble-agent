@@ -18,6 +18,7 @@ docs/*
 !docs/CHRON-SCHEDULER-PLAN.md
 !docs/DRAIN-PRODUCER-PLAN.md
 !docs/SQLITE-WORK-STORE-PLAN.md
+!docs/DRAIN-RELIABILITY.md
 
 # Kanban board (personal project management, local only)
 Boards/
