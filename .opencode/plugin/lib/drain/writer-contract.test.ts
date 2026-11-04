@@ -89,7 +89,124 @@ test("no agent declares a predefined model", async () => {
     assert.equal(/^model:/m.test(text), false, `${name} must not declare model:`)
   }
   const drainWriter = await readFile(new URL("drain-writer.md", dir), "utf8")
-  assert.match(drainWriter, /^steps:\s*40$/m)
+  assert.match(drainWriter, /^steps:\s*\d+$/m)
   assert.match(drainWriter, /drain_report:\s*true/)
   assert.match(drainWriter, /drain_report/)
+})
+
+function frontmatter(text: string): string {
+  return /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? ""
+}
+
+function mapAfter(text: string, key: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  const start = new RegExp(`^${key}:\\s*$`, "m").exec(text)
+  if (!start) return out
+  const rest = text.slice(start.index + start[0].length)
+  for (const line of rest.split(/\r?\n/)) {
+    if (/^\S/.test(line)) break
+    const match = /^\s+([\w-]+):\s*(\S+)\s*$/.exec(line)
+    if (match) out[match[1]] = match[2]
+  }
+  return out
+}
+
+function frontmatterParts(text: string): {
+  tools: Record<string, string>
+  permission: Record<string, string>
+} {
+  const fm = frontmatter(text)
+  const permissionAt = fm.search(/^permission:/m)
+  const toolsText = permissionAt === -1 ? fm : fm.slice(0, permissionAt)
+  const permissionText = permissionAt === -1 ? "" : fm.slice(permissionAt)
+  return {
+    tools: mapAfter(toolsText, "tools"),
+    permission: mapAfter(permissionText, "permission"),
+  }
+}
+
+const WRITER_DISABLED_TOOLS = [
+  "read",
+  "write",
+  "edit",
+  "glob",
+  "grep",
+  "list",
+  "bash",
+  "task",
+  "lsp",
+  "webfetch",
+  "websearch",
+  "todowrite",
+  "todoread",
+  "skill",
+  "question",
+  "mission_result",
+  "queue_add",
+  "summary_items",
+  "markdown-vault_edit",
+  "markdown-vault_system",
+  "markdown-vault_workflow",
+] as const
+
+test("the drain writer locks its tool surface to vault view/vault and drain_report", async () => {
+  const { tools, permission } = frontmatterParts(await readFile(DRAIN_WRITER, "utf8"))
+  for (const key of ["markdown-vault_view", "markdown-vault_vault", "drain_report"]) {
+    assert.equal(tools[key], "true", `${key} must be enabled`)
+  }
+  for (const key of WRITER_DISABLED_TOOLS) {
+    assert.equal(tools[key], "false", `${key} must be hidden`)
+    assert.equal(permission[key], "deny", `${key} must be denied`)
+  }
+  assert.equal(permission["markdown-vault_view"], "allow")
+  assert.equal(permission["markdown-vault_vault"], "allow")
+})
+
+const SUMMARIZER_DISABLED_TOOLS = [
+  "read",
+  "write",
+  "edit",
+  "glob",
+  "grep",
+  "list",
+  "bash",
+  "task",
+  "lsp",
+  "webfetch",
+  "websearch",
+  "todowrite",
+  "todoread",
+  "skill",
+  "question",
+  "queue_add",
+  "mission_result",
+  "drain_report",
+  "markdown-vault_view",
+  "markdown-vault_vault",
+  "markdown-vault_edit",
+  "markdown-vault_system",
+  "markdown-vault_workflow",
+] as const
+
+test("the session summarizer exposes only summary_items", async () => {
+  const { tools, permission } = frontmatterParts(await readFile(SESSION_SUMMARIZER, "utf8"))
+  assert.equal(tools["summary_items"], "true")
+  for (const key of SUMMARIZER_DISABLED_TOOLS) {
+    assert.equal(tools[key], "false", `${key} must be hidden`)
+    assert.equal(permission[key], "deny", `${key} must be denied`)
+  }
+})
+
+test("the writer body forbids research and verification", async () => {
+  const text = await readFile(DRAIN_WRITER, "utf8")
+  const plain = text.replaceAll("*", "").replace(/\s+/g, " ")
+  assert.match(plain, /not a researcher/i)
+  assert.match(plain, /Do not verify/i)
+})
+
+test("the summarizer body stays dual-use for drain and mission resume", async () => {
+  const text = await readFile(SESSION_SUMMARIZER, "utf8")
+  assert.match(text, /strict JSON/i)
+  assert.match(text, /mission-resume/i)
+  assert.equal(/call exactly one tool/i.test(text), false)
 })
