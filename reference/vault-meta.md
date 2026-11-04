@@ -1,6 +1,6 @@
 # Vault Meta Rules
 
-On-demand reference for `rag-brain` and `drain-writer`. Load when a structural
+On-demand reference for `rag-brain`. Load when a structural
 change touches `Brain/meta/` or when the changelog format is needed.
 
 ## Ownership

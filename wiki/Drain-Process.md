@@ -267,7 +267,7 @@ Healthy signals after the parallel fan-out:
 
 - `phase_ms.summarize` is close to the slowest child, not the sum of children;
 - no row has `wall_ms >= 600000` or `wall_ms > 2 × span_ms`;
-- writer `steps` stays under its 20-step cap;
+- writer `steps` stays under its `steps` budget (64 in the agent file);
 - `late: true` appears only on a genuinely capped child, and a late writer row
   is followed by a retry, not a cursor jump.
 
